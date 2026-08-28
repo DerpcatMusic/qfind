@@ -1,4 +1,8 @@
 /target
+pkg/
+src/
+*.pkg.tar.*
+*.tar.zst
 **/*.rs.bk
 .qfind-catalog
 node_modules/

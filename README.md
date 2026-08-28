@@ -10,6 +10,23 @@ cd qfind
 ./packaging/install.sh
 ```
 
+Prebuilt x86_64 binaries (GitHub Releases):
+
+```bash
+curl -L https://github.com/DerpcatMusic/qfind/releases/download/v0.1.0/qfind-0.1.0-x86_64.tar.zst | tar -C /tmp -x --zstd
+sudo install -Dm755 /tmp/qfind /tmp/qfind-tui /tmp/qfind-gtk /tmp/qfind-qt -t /usr/local/bin
+sudo install -Dm644 /tmp/qfind.desktop /usr/local/share/applications/qfind.desktop
+```
+
+Arch, from this tree (uses the GitHub release tarball):
+
+```bash
+cd packaging/aur/qfind-bin
+makepkg -si
+```
+
+`packaging/aur/qfind` builds from the source tag instead. To publish either to the AUR: add an SSH key at https://aur.archlinux.org/account/ then `./packaging/aur/publish.sh qfind-bin`.
+
 That puts `qfind`, `qfind-tui`, and `qfind-gtk` in `~/.local/bin`, plus the desktop launcher. If Qt6 is installed, you also get `qfind-qt` (Breeze).
 
 ```bash
@@ -53,7 +70,7 @@ Gear: extra exclude names, include Mounts, default Zoom, spacing, Reset. Stored 
 
 Tree is experimental. WeightMap at the bottom is a WizTree-style folder heatmap.
 
-The list is a virtual GTK4 ListView/GridView. Bind does not `stat`. Scrollbars stay on; kinetic flick is on. GSK composites on the GPU. GTK stays GTK because Wayland drag needs it.
+The list is a virtual GTK4 ListView/GridView: bind does not `stat`, scrollbars stay visible, and kinetic flick is on. GSK composites on the GPU. GTK stays GTK because Wayland drag needs it.
 
 ## TUI
 

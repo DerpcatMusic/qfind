@@ -1,0 +1,21 @@
+pkgbase = qfind-bin
+	pkgdesc = Instant filename search (prebuilt x86_64)
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/DerpcatMusic/qfind
+	arch = x86_64
+	license = MIT
+	depends = gtk4
+	depends = gcc-libs
+	depends = glibc
+	optdepends = qt6-widgets: qfind-qt
+	optdepends = nautilus: Ctrl+F and Search with Qfind
+	optdepends = python-gobject: Nautilus plugin
+	optdepends = ripdrag: drag from the TUI
+	provides = qfind
+	conflicts = qfind
+	options = !strip
+	source = qfind-0.1.0-x86_64.tar.zst::https://github.com/DerpcatMusic/qfind/releases/download/v0.1.0/qfind-0.1.0-x86_64.tar.zst
+	sha256sums = 96ae14d290e17127ff68a49d2d9a484a3be4b26099f8fa0cb3980af7fa6580cb
+
+pkgname = qfind-bin
