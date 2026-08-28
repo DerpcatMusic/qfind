@@ -106,14 +106,10 @@ pub fn attach_preview_on_hits(
     mode: Rc<Cell<PreviewMode>>,
 ) {
     let keys = gtk::EventControllerKey::new();
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
     keys.connect_key_pressed(move |_, key, _, _| {
-        if key == gdk::Key::space {
-            let path = match mode.get() {
-                PreviewMode::Hovered => hovered.borrow().clone(),
-                PreviewMode::Selected => selected_row(&selection).map(|r| r.path()),
-            }
-            .or_else(|| selected_row(&selection).map(|r| r.path()));
-            if let Some(path) = path {
+        if key == gdk::Key::space || key == gdk::Key::KP_Space {
+            if let Some(path) = preview_path(mode.get(), &hovered, &selection) {
                 preview(window.upcast_ref(), &path, &preview_slot);
             }
             return glib::Propagation::Stop;
@@ -123,12 +119,35 @@ pub fn attach_preview_on_hits(
     widget.add_controller(keys);
 }
 
+pub fn preview_path(
+    mode: PreviewMode,
+    hovered: &RefCell<Option<String>>,
+    selection: &gtk::SingleSelection,
+) -> Option<String> {
+    match mode {
+        PreviewMode::Hovered => hovered
+            .borrow()
+            .clone()
+            .or_else(|| selected_row(selection).map(|r| r.path())),
+        PreviewMode::Selected => selected_row(selection)
+            .map(|r| r.path())
+            .or_else(|| hovered.borrow().clone()),
+    }
+}
+
 pub fn attach_hover(row: &impl IsA<gtk::Widget>, item: gtk::ListItem, hovered: Rc<RefCell<Option<String>>>) {
     let motion = gtk::EventControllerMotion::new();
-    motion.connect_enter(move |_, _, _| {
-        if let Some(data) = item.item().and_downcast::<RowData>() {
-            hovered.replace(Some(data.path()));
-        }
+    {
+        let item = item.clone();
+        let hovered = Rc::clone(&hovered);
+        motion.connect_enter(move |_, _, _| {
+            if let Some(data) = item.item().and_downcast::<RowData>() {
+                hovered.replace(Some(data.path()));
+            }
+        });
+    }
+    motion.connect_leave(move |_| {
+        hovered.replace(None);
     });
     row.add_controller(motion);
 }

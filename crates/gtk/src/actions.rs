@@ -6,7 +6,6 @@
 //! built-in window.
 
 use std::path::Path;
-use std::process::Command;
 
 use gtk::gdk;
 use gtk::gio;
@@ -112,10 +111,7 @@ pub fn preview(parent: &gtk::Window, path: &str, slot: &std::cell::RefCell<Optio
 
 fn sushi_show(path: &str) -> bool {
     let uri = gio::File::for_path(path).uri();
-    if dbus_show_file(&uri) {
-        return true;
-    }
-    Command::new("sushi").arg(path).spawn().is_ok()
+    dbus_show_file(&uri)
 }
 
 fn dbus_show_file(uri: &str) -> bool {

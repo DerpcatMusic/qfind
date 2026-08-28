@@ -649,6 +649,8 @@ fn build_ui(app: &gtk::Application) {
         &list,
         &selection,
         Rc::clone(&preview_slot),
+        Rc::clone(&hovered),
+        Rc::clone(&preview_mode),
         Rc::clone(&state),
         popover.clone(),
     );
@@ -728,12 +730,29 @@ fn install_actions(
     window.add_action(&act);
 }
 
+fn focus_in(window: &gtk::ApplicationWindow, ancestor: &impl IsA<gtk::Widget>) -> bool {
+    let Some(focus) = gtk::prelude::RootExt::focus(window) else {
+        return false;
+    };
+    let target = ancestor.upcast_ref::<gtk::Widget>();
+    let mut w = Some(focus);
+    while let Some(n) = w {
+        if n == *target {
+            return true;
+        }
+        w = n.parent();
+    }
+    false
+}
+
 fn install_keys(
     window: &gtk::ApplicationWindow,
     search: &gtk::SearchEntry,
     list: &gtk::ListView,
     selection: &gtk::SingleSelection,
     preview_slot: Rc<RefCell<Option<gtk::Window>>>,
+    hovered: Rc<RefCell<Option<String>>>,
+    preview_mode: Rc<Cell<qfind_core::PreviewMode>>,
     state: Rc<RefCell<State>>,
     popover: gtk::PopoverMenu,
 ) {
@@ -745,9 +764,27 @@ fn install_keys(
     let host = window.clone();
     let window = window.clone();
     keys.connect_key_pressed(move |_, key, _, mods| {
-        let search_focus = search.has_focus();
+        let search_focus = focus_in(&window, &search);
         let ctrl = mods.contains(gdk::ModifierType::CONTROL_MASK);
         let shift = mods.contains(gdk::ModifierType::SHIFT_MASK);
+
+        if key == gdk::Key::space || key == gdk::Key::KP_Space {
+            if preview_slot.borrow().is_some() {
+                if let Some(w) = preview_slot.borrow_mut().take() {
+                    w.close();
+                }
+                return glib::Propagation::Stop;
+            }
+            let hovering = hovered.borrow().is_some();
+            if search_focus && !hovering {
+                return glib::Propagation::Proceed;
+            }
+            if let Some(path) = surface::preview_path(preview_mode.get(), &hovered, &selection) {
+                preview(window.upcast_ref(), &path, &preview_slot);
+                return glib::Propagation::Stop;
+            }
+            return glib::Propagation::Proceed;
+        }
 
         if key == gdk::Key::Escape {
             if preview_slot.borrow().is_some() {
