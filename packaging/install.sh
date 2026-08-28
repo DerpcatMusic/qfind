@@ -28,6 +28,7 @@ if command -v update-desktop-database >/dev/null; then
   update-desktop-database "$prefix/share/applications" || true
 fi
 echo "installed $prefix/bin/qfind"
-echo "nautilus plugin: ~/.local/share/nautilus-python/extensions/qfind.py"
-echo "vicinae script: $prefix/share/qfind/vicinae/qfind.sh"
 echo "launcher: $prefix/share/applications/qfind.desktop"
+echo "Nautilus: ~/.local/share/nautilus-python/extensions/qfind.py  (restart: nautilus -q ; Ctrl+F)"
+echo "Vicinae:  ~/.local/share/vicinae/extensions/qfind  (reopen Vicinae, command Qfind)"
+echo "plugins only next time: ./packaging/install-plugins.sh"

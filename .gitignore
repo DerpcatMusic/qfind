@@ -5,3 +5,5 @@ node_modules/
 dist/
 packaging/vicinae/search.js
 packaging/kde/build/
+__pycache__/
+*.pyc

@@ -1,61 +1,73 @@
-# Plugin plan — Vicinae and Nautilus
+# Install Vicinae and Nautilus
 
-Catalog stays the only deep module. Plugins are adapters that Query it. They do not own Drag, Rebuild, or Surface.
+Both plugins talk to the Qfind CLI (`qfind --json`). Install the app first:
 
-## Seams
+```bash
+git clone https://github.com/DerpcatMusic/qfind.git
+cd qfind
+./packaging/install.sh
+```
 
-| Adapter | Talks to Catalog via | Why this seam |
-|---|---|---|
-| CLI `qfind --json` | `Catalog::open` + `search_with` | mmap Catalog, no daemon |
-| Vicinae extension | spawn `qfind --json --limit 40 …` | Vicinae is React/TS over a C++ core; it already shells out |
-| Nautilus | **cannot** replace Files’ in-window search | Nautilus search is Tracker/LocalSearch inside the Files binary |
-| GNOME Shell | `org.gnome.Shell.SearchProvider2` | Overview search is a public D-Bus interface |
+That builds `qfind` / `qfind-gtk` into `~/.local/bin` **and** installs both plugins. If the binaries are already installed, plugins only:
 
-Two adapters (GTK + TUI) already justified the Catalog seam. CLI JSON is the third. A plugin that opens the snapshot itself would be a fourth — only worth it if spawn latency shows up.
+```bash
+./packaging/install-plugins.sh
+```
 
-## Vicinae (do this first)
+## Nautilus / Files
 
-Vicinae extensions are TypeScript/React (`@vicinae/api`), Raycast-shaped. File search in the launcher should:
+**What you get**
 
-1. Debounce ~50ms (same as GTK).
-2. `qfind --json --limit 40 -- <query>`
-3. Map `{name, path, dir}` → `List.Item` with `Action.Open` / copy path.
-4. Empty Query: show Catalog stats (`qfind` with no args, non-tty).
+- **Ctrl+F** in a folder opens Qfind for that directory (split: this folder on top, elsewhere below).
+- Right-click a folder or the background → **Search with Qfind**.
 
-Fallback if someone does not want TS: a **script command** that prints paths. Weaker UX, same Catalog.
+Nautilus 43+ has no public hook to replace the in-window search box (Tracker/LocalSearch is compiled in). Ctrl+F is captured on the Files window and handed to `qfind-gtk --here`.
 
-Stub: `packaging/vicinae/`.
+**Manual install**
 
-Do not embed nucleo in the extension. The Catalog already has the SIMD prefilter.
+```bash
+# Arch: sudo pacman -S nautilus-python
+# Debian/Ubuntu: sudo apt install python3-nautilus nautilus
 
-## Nautilus / Files (honest)
+install -Dm644 packaging/nautilus/qfind.py \
+  ~/.local/share/nautilus-python/extensions/qfind.py
+nautilus -q
+```
 
-**Overriding the search box inside Files is not a public interface.** Nautilus 43+ search is Tracker 3 / LocalSearch, compiled in. nautilus-python exposes MenuProvider, InfoProvider, Properties — not “replace search”.
+Open Files again. `qfind-gtk` must be on `PATH` (`~/.local/bin`).
 
-What we *can* ship:
+## Vicinae
 
-1. **MenuProvider** — “Search with Qfind” on a folder / background. Spawns `qfind-gtk`. Stub: `packaging/nautilus/qfind.py`.
-2. **GNOME Shell SearchProvider2** — Overview typing. New small binary `qfind-search-provider` that mmap-opens the snapshot and answers `GetInitialResultSet`. This is the real “system search uses our fuzzy” path, and it is *not* Nautilus.
-3. **Fork/patch Files** — only if we later accept a distro overlay. Out of scope.
+**What you get**
 
-Hyprland users often do not use GNOME Shell; (1) + Vicinae cover them. (2) is for GNOME sessions.
+A launcher command named **Qfind**. Type a filename; `.wav` / `.png` / `.exe` filter by extension.
 
-## Settings
+**From this repo (supported)**
 
-`$XDG_CONFIG_HOME/qfind/config.toml` (GTK Settings window, Reset to default):
+Needs Node.js (npm). `vici build` writes the extension into Vicinae’s user dir:
 
-- `exclude` — extra junk names/globs on Rebuild
-- `include` — Mounts to Rebuild (empty = discover disks)
-- `zoom` / `spacing` — compactness and extra row padding
-- `preview` — `hovered` (default) or `selected` for Space
+```bash
+cd packaging/vicinae
+npm install
+npx vici build
+```
 
-CLI `qfind index` reads the same Config.
+Output: `~/.local/share/vicinae/extensions/qfind`. Reopen Vicinae, run **Qfind**.
 
-## Order
+**Script fallback** (no Node)
 
-1. Keep `qfind --json` stable (this tree).
-2. Vicinae List extension calling that CLI.
-3. Nautilus context-menu adapter.
-4. Optional SearchProvider2 if we care about GNOME Overview.
+```bash
+install -Dm755 packaging/vicinae/qfind.sh ~/.local/share/qfind/vicinae/qfind.sh
+```
 
-No daemon until two processes need a live Catalog at once. Plugins open the snapshot; GTK already polls mtime.
+Point a Vicinae script command at that file if you do not want the TS extension.
+
+**From another machine**
+
+```bash
+git clone https://github.com/DerpcatMusic/qfind.git
+cd qfind
+./packaging/install-plugins.sh
+```
+
+`qfind` must be on `PATH` so the extension can spawn `qfind --json --limit 32 --files …`.
