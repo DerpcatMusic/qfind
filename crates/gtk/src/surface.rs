@@ -22,6 +22,7 @@ pub struct Host {
     pub root: gtk::Box,
     pub stack: gtk::Stack,
     pub list: gtk::ListView,
+    pub else_list: Option<gtk::ListView>,
     pub grid: gtk::GridView,
     #[allow(dead_code)]
     pub tree: gtk::ListView,
@@ -54,6 +55,10 @@ impl Host {
         // Visible widgets only. items_changed on the same GObjects is a no-op
         // in GTK4, which is why list Zoom used to look like it did nothing.
         restyle_hits(&self.list, &self.grid, zoom, self.spacing.get());
+        if let Some(else_list) = &self.else_list {
+            restyle_hits(else_list, &self.grid, zoom, self.spacing.get());
+            else_list.queue_resize();
+        }
         self.fit_names();
         self.list.queue_resize();
         self.grid.queue_resize();
@@ -68,6 +73,9 @@ impl Host {
             }
         };
         walk_apply(self.list.upcast_ref(), &fit);
+        if let Some(else_list) = &self.else_list {
+            walk_apply(else_list.upcast_ref(), &fit);
+        }
         walk_apply(self.grid.upcast_ref(), &fit);
         walk_apply(self.tree.upcast_ref(), &fit);
     }
@@ -503,6 +511,101 @@ fn walk_apply(w: &gtk::Widget, f: &impl Fn(&gtk::Widget)) {
         walk_apply(&n, f);
         child = n.next_sibling();
     }
+}
+
+pub fn make_list_factory(
+    selection: gtk::SingleSelection,
+    popover: gtk::PopoverMenu,
+    hovered: Rc<RefCell<Option<String>>>,
+    zebra: Rc<Cell<bool>>,
+    zoom: Rc<Cell<Zoom>>,
+    spacing: Rc<Cell<u8>>,
+    icons: Rc<RefCell<std::collections::HashMap<String, gio::Icon>>>,
+) -> gtk::SignalListItemFactory {
+    let factory = gtk::SignalListItemFactory::new();
+    {
+        let selection_for_row = selection.clone();
+        let popover_for_row = popover.clone();
+        let hovered_setup = Rc::clone(&hovered);
+        factory.connect_setup(move |_, item| {
+            let Some(item) = item.downcast_ref::<gtk::ListItem>() else {
+                return;
+            };
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+            row.set_margin_start(6);
+            row.set_margin_end(6);
+            row.add_css_class("qfind-row");
+            let icon = gtk::Image::from_icon_name("folder");
+            icon.set_pixel_size(16);
+            let name = make_name_line(true);
+            let path = gtk::Label::new(None);
+            path.set_xalign(0.0);
+            path.add_css_class("dim-label");
+            path.set_ellipsize(gtk::pango::EllipsizeMode::Start);
+            path.set_width_chars(28);
+            row.append(&icon);
+            row.append(&name);
+            row.append(&path);
+            attach_marquee(&row, &name);
+            let drag = gtk::DragSource::new();
+            drag.set_actions(gdk::DragAction::COPY);
+            let list_item = item.clone();
+            drag.connect_prepare(move |_, _, _| {
+                let item = list_item.downcast_ref::<gtk::ListItem>()?;
+                let data = item.item().and_downcast::<RowData>()?;
+                crate::actions::content_for_path(&data.path())
+            });
+            row.add_controller(drag);
+            attach_hover(&row, item.clone(), Rc::clone(&hovered_setup));
+            let right = gtk::GestureClick::new();
+            right.set_button(gdk::BUTTON_SECONDARY);
+            let list_item = item.clone();
+            let selection = selection_for_row.clone();
+            let popover = popover_for_row.clone();
+            let row_for_pop = row.clone();
+            right.connect_pressed(move |_, _, x, y| {
+                let Some(li) = list_item.downcast_ref::<gtk::ListItem>() else {
+                    return;
+                };
+                selection.set_selected(li.position());
+                popup_at(&popover, &row_for_pop, x, y);
+            });
+            row.add_controller(right);
+            item.set_child(Some(&row));
+        });
+    }
+    factory.connect_bind(move |_, item| {
+        let Some(item) = item.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        let Some(data) = item.item().and_downcast::<RowData>() else {
+            return;
+        };
+        let Some(row) = item.child().and_downcast::<gtk::Box>() else {
+            return;
+        };
+        let Some(icon) = row.first_child().and_downcast::<gtk::Image>() else {
+            return;
+        };
+        let Some(name) = icon.next_sibling().and_downcast::<gtk::Box>() else {
+            return;
+        };
+        let Some(path) = name.next_sibling().and_downcast::<gtk::Label>() else {
+            return;
+        };
+        let z = zoom.get();
+        apply_list_metrics(row.upcast_ref(), z, spacing.get());
+        row.set_margin_start(6 + (data.depth() as i32) * 14);
+        paint_icon(&icon, &data, &icons);
+        fill_name_line(&name, &data.name(), data.is_dir());
+        path.set_text(&data.path());
+        if zebra.get() && item.position() % 2 == 1 {
+            row.add_css_class("qfind-odd");
+        } else {
+            row.remove_css_class("qfind-odd");
+        }
+    });
+    factory
 }
 
 pub fn apply_list_metrics(row: &gtk::Widget, zoom: Zoom, spacing: u8) {

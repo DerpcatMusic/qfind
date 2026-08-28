@@ -1,6 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{mpsc, OnceLock};
 use std::thread;
@@ -33,19 +33,46 @@ const MAX_ROWS: usize = 5_000;
 static QFIND_ROOT: OnceLock<PathBuf> = OnceLock::new();
 
 fn main() -> glib::ExitCode {
-    if let Ok(root) = std::env::var("QFIND_ROOT") {
-        if !root.is_empty() {
-            let _ = QFIND_ROOT.set(PathBuf::from(root));
+    if let Some(root) = parse_here() {
+        let _ = QFIND_ROOT.set(root);
+    }
+    let app = gtk::Application::builder()
+        .application_id(APP_ID)
+        .flags(gio::ApplicationFlags::NON_UNIQUE)
+        .build();
+    app.connect_activate(build_ui);
+    let argv = [std::env::args().next().unwrap_or_else(|| "qfind-gtk".into())];
+    app.run_with_args(&argv)
+}
+
+fn parse_here() -> Option<PathBuf> {
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        if a == "--here" {
+            return args.next().filter(|s| !s.is_empty()).map(PathBuf::from);
+        }
+        if let Some(p) = a.strip_prefix("--here=") {
+            if !p.is_empty() {
+                return Some(PathBuf::from(p));
+            }
         }
     }
-    let app = gtk::Application::builder().application_id(APP_ID).build();
-    app.connect_activate(build_ui);
-    app.run()
+    std::env::var("QFIND_ROOT")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+}
+
+fn under_root(path: &Path, root: &Path) -> bool {
+    path == root || path.strip_prefix(root).is_ok()
 }
 
 struct State {
     catalog: Option<Catalog>,
     model: HitModel,
+    else_model: Option<HitModel>,
+    here_label: Option<gtk::Label>,
+    else_label: Option<gtk::Label>,
     status: gtk::Label,
     search: gtk::SearchEntry,
     scope: Scope,
@@ -170,7 +197,7 @@ fn build_ui(app: &gtk::Application) {
 
     let model = HitModel::new();
     let selection = gtk::SingleSelection::new(Some(model.clone()));
-    let factory = gtk::SignalListItemFactory::new();
+    let else_model = QFIND_ROOT.get().map(|_| HitModel::new());
     let zebra = Rc::new(Cell::new(cfg.zebra));
     let zoom = Rc::new(Cell::new(Zoom::new(cfg.zoom)));
     let spacing = Rc::new(Cell::new(cfg.spacing));
@@ -184,95 +211,15 @@ fn build_ui(app: &gtk::Application) {
     popover.set_has_arrow(false);
     popover.set_halign(gtk::Align::Start);
 
-    {
-        let zebra = Rc::clone(&zebra);
-        let selection_for_row = selection.clone();
-        let popover_for_row = popover.clone();
-        let hovered_setup = Rc::clone(&hovered);
-        factory.connect_setup(move |_, item| {
-            let Some(item) = item.downcast_ref::<gtk::ListItem>() else {
-                return;
-            };
-            let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-            row.set_margin_start(6);
-            row.set_margin_end(6);
-            row.add_css_class("qfind-row");
-            let icon = gtk::Image::from_icon_name("folder");
-            icon.set_pixel_size(16);
-            let name = surface::make_name_line(true);
-            let path = gtk::Label::new(None);
-            path.set_xalign(0.0);
-            path.add_css_class("dim-label");
-            path.set_ellipsize(gtk::pango::EllipsizeMode::Start);
-            path.set_width_chars(28);
-            row.append(&icon);
-            row.append(&name);
-            row.append(&path);
-            surface::attach_marquee(&row, &name);
-
-            let drag = gtk::DragSource::new();
-            drag.set_actions(gdk::DragAction::COPY);
-            let list_item = item.clone();
-            drag.connect_prepare(move |_, _, _| {
-                let item = list_item.downcast_ref::<gtk::ListItem>()?;
-                let data = item.item().and_downcast::<RowData>()?;
-                content_for_path(&data.path())
-            });
-            row.add_controller(drag);
-            surface::attach_hover(&row, item.clone(), Rc::clone(&hovered_setup));
-
-            let right = gtk::GestureClick::new();
-            right.set_button(gdk::BUTTON_SECONDARY);
-            let list_item = item.clone();
-            let selection = selection_for_row.clone();
-            let popover = popover_for_row.clone();
-            let row_for_pop = row.clone();
-            right.connect_pressed(move |_, _, x, y| {
-                let Some(li) = list_item.downcast_ref::<gtk::ListItem>() else {
-                    return;
-                };
-                selection.set_selected(li.position());
-                surface::popup_at(&popover, &row_for_pop, x, y);
-            });
-            row.add_controller(right);
-            item.set_child(Some(&row));
-        });
-        let zebra = Rc::clone(&zebra);
-        let icons = Rc::clone(&icons);
-        let zoom = Rc::clone(&zoom);
-        let spacing = Rc::clone(&spacing);
-        factory.connect_bind(move |_, item| {
-            let Some(item) = item.downcast_ref::<gtk::ListItem>() else {
-                return;
-            };
-            let Some(data) = item.item().and_downcast::<RowData>() else {
-                return;
-            };
-            let Some(row) = item.child().and_downcast::<gtk::Box>() else {
-                return;
-            };
-            let Some(icon) = row.first_child().and_downcast::<gtk::Image>() else {
-                return;
-            };
-            let Some(name) = icon.next_sibling().and_downcast::<gtk::Box>() else {
-                return;
-            };
-            let Some(path) = name.next_sibling().and_downcast::<gtk::Label>() else {
-                return;
-            };
-            let z = zoom.get();
-            surface::apply_list_metrics(row.upcast_ref(), z, spacing.get());
-            row.set_margin_start(6 + (data.depth() as i32) * 14);
-            surface::paint_icon(&icon, &data, &icons);
-            surface::fill_name_line(&name, &data.name(), data.is_dir());
-            path.set_text(&data.path());
-            if zebra.get() && item.position() % 2 == 1 {
-                row.add_css_class("qfind-odd");
-            } else {
-                row.remove_css_class("qfind-odd");
-            }
-        });
-    }
+    let factory = surface::make_list_factory(
+        selection.clone(),
+        popover.clone(),
+        Rc::clone(&hovered),
+        Rc::clone(&zebra),
+        Rc::clone(&zoom),
+        Rc::clone(&spacing),
+        Rc::clone(&icons),
+    );
 
     let list = gtk::ListView::new(Some(selection.clone()), Some(factory));
     list.set_vexpand(true);
@@ -342,7 +289,63 @@ fn build_ui(app: &gtk::Application) {
     let list_scroll = flick_scroll(&list);
     let grid_scroll = flick_scroll(&grid);
     let tree_scroll = flick_scroll(&tree);
-    stack.add_named(&list_scroll, Some("list"));
+
+    let mut else_list = None;
+    let mut here_label = None;
+    let mut else_label = None;
+    let list_page: gtk::Widget = if let (Some(root), Some(em)) = (QFIND_ROOT.get(), else_model.as_ref()) {
+        let else_sel = gtk::SingleSelection::new(Some(em.clone()));
+        let else_factory = surface::make_list_factory(
+            else_sel.clone(),
+            popover.clone(),
+            Rc::clone(&hovered),
+            Rc::clone(&zebra),
+            Rc::clone(&zoom),
+            Rc::clone(&spacing),
+            Rc::clone(&icons),
+        );
+        let elist = gtk::ListView::new(Some(else_sel.clone()), Some(else_factory));
+        elist.set_vexpand(true);
+        let win_else = window.clone();
+        let else_sel_open = else_sel.clone();
+        elist.connect_activate(move |_, _| {
+            if let Some(data) = else_sel_open.selected_item().and_downcast::<RowData>() {
+                open(&win_else, &data.path());
+            }
+        });
+        let hl = gtk::Label::new(Some(&format!("In {}", root.display())));
+        hl.set_xalign(0.0);
+        hl.add_css_class("heading");
+        hl.set_margin_start(10);
+        hl.set_margin_top(6);
+        let el = gtk::Label::new(Some("Elsewhere"));
+        el.set_xalign(0.0);
+        el.add_css_class("heading");
+        el.set_margin_start(10);
+        el.set_margin_top(6);
+        let top = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        top.append(&hl);
+        top.append(&list_scroll);
+        let bot = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        bot.append(&el);
+        bot.append(&flick_scroll(&elist));
+        let paned = gtk::Paned::new(gtk::Orientation::Vertical);
+        paned.set_start_child(Some(&top));
+        paned.set_end_child(Some(&bot));
+        paned.set_resize_start_child(true);
+        paned.set_resize_end_child(true);
+        paned.set_wide_handle(true);
+        paned.set_position(280);
+        paned.set_vexpand(true);
+        here_label = Some(hl);
+        else_label = Some(el);
+        else_list = Some(elist);
+        paned.upcast()
+    } else {
+        list_scroll.clone().upcast()
+    };
+
+    stack.add_named(&list_page, Some("list"));
     stack.add_named(&grid_scroll, Some("grid"));
     stack.add_named(&tree_scroll, Some("tree"));
 
@@ -353,6 +356,7 @@ fn build_ui(app: &gtk::Application) {
         root: gtk::Box::new(gtk::Orientation::Vertical, 0),
         stack: stack.clone(),
         list: list.clone(),
+        else_list: else_list.clone(),
         grid: grid.clone(),
         tree: tree.clone(),
         tree_store,
@@ -412,6 +416,21 @@ fn build_ui(app: &gtk::Application) {
         Rc::clone(&hovered),
         Rc::clone(&preview_mode),
     );
+    if let Some(elist) = host.else_list.as_ref() {
+        if let Some(m) = elist.model() {
+            if let Ok(sel) = m.downcast::<gtk::SingleSelection>() {
+                surface::attach_preview_on_hits(
+                    elist,
+                    sel,
+                    window.clone(),
+                    Rc::clone(&preview_slot),
+                    Rc::clone(&hovered),
+                    Rc::clone(&preview_mode),
+                );
+            }
+        }
+        surface::attach_zoom_scroll(elist, Rc::clone(&host));
+    }
     surface::attach_zoom_scroll(&list_scroll, Rc::clone(&host));
     surface::attach_zoom_scroll(&grid_scroll, Rc::clone(&host));
     surface::attach_zoom_scroll(&tree_scroll, Rc::clone(&host));
@@ -432,6 +451,9 @@ fn build_ui(app: &gtk::Application) {
     let state = Rc::new(RefCell::new(State {
         catalog: None,
         model: model.clone(),
+        else_model,
+        here_label,
+        else_label,
         status: status.clone(),
         search: search.clone(),
         scope: Scope::All,
@@ -518,6 +540,12 @@ fn build_ui(app: &gtk::Application) {
             let n = state.borrow().model.n_items();
             if n > 0 {
                 state.borrow().model.items_changed(0, n, n);
+            }
+            if let Some(em) = state.borrow().else_model.as_ref() {
+                let n = em.n_items();
+                if n > 0 {
+                    em.items_changed(0, n, n);
+                }
             }
         });
     }
@@ -845,14 +873,7 @@ fn spawn_search(state: &Rc<RefCell<State>>, seq: u64) {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let _ = tx.send(catalog.search_with(&q, opts).map(|h| {
-            let mut ids = h.ids().to_vec();
-            if let Some(root) = QFIND_ROOT.get() {
-                ids.retain(|&id| {
-                    catalog
-                        .hit(id)
-                        .is_some_and(|hit| hit.path().starts_with(root))
-                });
-            }
+            let ids = h.ids().to_vec();
             let n = ids.len();
             (ids, n)
         }));
@@ -870,7 +891,23 @@ fn spawn_search(state: &Rc<RefCell<State>>, seq: u64) {
                         (st.host.clone(), st.catalog.clone())
                     };
                     state.borrow_mut().last_ids = ids.clone();
-                    state.borrow().model.set_ids(ids.clone());
+                    if let Some(root) = QFIND_ROOT.get() {
+                        let (here_ids, else_ids) = partition_here(&catalog, &ids, root);
+                        let here_n = here_ids.len();
+                        let else_n = else_ids.len();
+                        state.borrow().model.set_ids(here_ids);
+                        if let Some(em) = state.borrow().else_model.as_ref() {
+                            em.set_ids(else_ids);
+                        }
+                        if let Some(l) = state.borrow().here_label.as_ref() {
+                            l.set_text(&format!("In {}  ·  {here_n}", root.display()));
+                        }
+                        if let Some(l) = state.borrow().else_label.as_ref() {
+                            l.set_text(&format!("Elsewhere  ·  {else_n}"));
+                        }
+                    } else {
+                        state.borrow().model.set_ids(ids.clone());
+                    }
                     if let (Some(host), Some(c)) = (host, catalog) {
                         surface::rebuild_tree(&host, &c, &ids);
                         surface::rebuild_weight(&host, &c, &ids);
@@ -894,11 +931,30 @@ fn spawn_search(state: &Rc<RefCell<State>>, seq: u64) {
     });
 }
 
+fn partition_here(catalog: &Option<Catalog>, ids: &[u32], root: &Path) -> (Vec<u32>, Vec<u32>) {
+    let Some(catalog) = catalog else {
+        return (ids.to_vec(), Vec::new());
+    };
+    let mut here = Vec::new();
+    let mut rest = Vec::new();
+    for &id in ids {
+        match catalog.hit(id) {
+            Some(hit) if under_root(hit.path().as_path(), root) => here.push(id),
+            Some(_) => rest.push(id),
+            None => {}
+        }
+    }
+    (here, rest)
+}
+
 fn adopt_catalog(state: &Rc<RefCell<State>>, catalog: Catalog) {
     let mtime = std::fs::metadata(catalog.path())
         .and_then(|m| m.modified())
         .ok();
     state.borrow().model.set_catalog(catalog.clone());
+    if let Some(em) = state.borrow().else_model.as_ref() {
+        em.set_catalog(catalog.clone());
+    }
     {
         let mut st = state.borrow_mut();
         st.snap_mtime = mtime;
