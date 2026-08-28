@@ -1,0 +1,21 @@
+[package]
+name = "qfind-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Qfind Catalog: rebuild and search filenames"
+
+[dependencies]
+crossbeam-channel.workspace = true
+dirs.workspace = true
+globset.workspace = true
+memmap2.workspace = true
+nucleo-matcher.workspace = true
+rayon.workspace = true
+rustix.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

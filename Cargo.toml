@@ -1,0 +1,32 @@
+[workspace]
+members = ["crates/core", "crates/cli", "crates/tui", "crates/gtk"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.88"
+publish = false
+
+[workspace.dependencies]
+qfind-core = { path = "crates/core" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+crossbeam-channel = "0.5"
+crossterm = "0.29"
+dirs = "6"
+globset = "0.4"
+gtk = { version = "0.11", package = "gtk4", features = ["v4_12"] }
+memmap2 = "0.9"
+nucleo-matcher = "0.3"
+ratatui = "0.30"
+rayon = "1"
+rustix = { version = "1", features = ["fs"] }
+tempfile = "3"
+thiserror = "2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

@@ -1,0 +1,13 @@
+[package]
+name = "qfind-gtk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Qfind GTK application"
+
+[dependencies]
+anyhow.workspace = true
+gtk.workspace = true
+qfind-core.workspace = true

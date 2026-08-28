@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Qfind
+Comment=Instant filename search
+Exec=qfind-gtk
+Icon=system-search
+Terminal=false
+Categories=Utility;Filesystem;
+Keywords=search;files;everything;locate;
+StartupWMClass=org.qfind.Qfind

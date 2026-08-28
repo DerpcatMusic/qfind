@@ -1,0 +1,7 @@
+/target
+**/*.rs.bk
+.qfind-catalog
+node_modules/
+dist/
+packaging/vicinae/search.js
+packaging/kde/build/

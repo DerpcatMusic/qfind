@@ -1,0 +1,730 @@
+//! Hits Surface adapter: list, grid, tree, WeightMap. Preview keys live here,
+//! not on the window — Query typing must keep Space.
+
+use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
+use std::rc::Rc;
+
+use gtk::gdk;
+use gtk::gio;
+use gtk::glib;
+use gtk::prelude::*;
+use qfind_core::{
+    folder_weights, fold_stems, split_filename, squarify, walk_visible, Catalog, HitRef, PreviewMode,
+    Surface, Tile, Zoom,
+};
+
+use crate::actions::{preview, selected_row};
+use crate::row::RowData;
+
+pub struct Host {
+    #[allow(dead_code)]
+    pub root: gtk::Box,
+    pub stack: gtk::Stack,
+    pub list: gtk::ListView,
+    pub grid: gtk::GridView,
+    #[allow(dead_code)]
+    pub tree: gtk::ListView,
+    pub tree_store: gio::ListStore,
+    pub weight: gtk::DrawingArea,
+    pub zoom_label: gtk::Label,
+    pub zoom: Rc<Cell<Zoom>>,
+    pub spacing: Rc<Cell<u8>>,
+    pub surface: Rc<Cell<Surface>>,
+    pub show_weight: Rc<Cell<bool>>,
+    pub collapsed: Rc<RefCell<HashSet<String>>>,
+    pub tree_src: RefCell<Option<(Catalog, Vec<u32>)>>,
+    pub tiles: Rc<RefCell<Vec<Tile>>>,
+}
+
+impl Host {
+    pub fn apply(&self) {
+        let zoom = self.zoom.get();
+        let surface = self.surface.get();
+        let name = match surface {
+            Surface::Tree => "tree",
+            Surface::Auto if zoom.is_grid() => "grid",
+            Surface::Auto => "list",
+        };
+        self.stack.set_visible_child_name(name);
+        self.zoom_label.set_text(&format!("{}%", zoom.get()));
+        self.weight.set_visible(self.show_weight.get());
+        self.weight.queue_draw();
+        self.fit_grid();
+        // Visible widgets only. items_changed on the same GObjects is a no-op
+        // in GTK4, which is why list Zoom used to look like it did nothing.
+        restyle_hits(&self.list, &self.grid, zoom, self.spacing.get());
+        self.fit_names();
+        self.list.queue_resize();
+        self.grid.queue_resize();
+    }
+
+    pub fn fit_names(&self) {
+        let fit = |w: &gtk::Widget| {
+            if w.has_css_class("qfind-name") {
+                if let Some(line) = w.downcast_ref::<gtk::Box>() {
+                    fit_name_line(line);
+                }
+            }
+        };
+        walk_apply(self.list.upcast_ref(), &fit);
+        walk_apply(self.grid.upcast_ref(), &fit);
+        walk_apply(self.tree.upcast_ref(), &fit);
+    }
+
+    pub fn fit_grid(&self) {
+        let zoom = self.zoom.get();
+        if !zoom.is_grid() {
+            return;
+        }
+        let w = self.grid.width();
+        if w <= 1 {
+            return;
+        }
+        let cols = zoom.columns_for(w);
+        if self.grid.min_columns() != cols || self.grid.max_columns() != cols {
+            self.grid.set_min_columns(cols);
+            self.grid.set_max_columns(cols);
+        }
+    }
+}
+
+pub fn attach_preview_on_hits(
+    widget: &impl IsA<gtk::Widget>,
+    selection: gtk::SingleSelection,
+    window: gtk::ApplicationWindow,
+    preview_slot: Rc<RefCell<Option<gtk::Window>>>,
+    hovered: Rc<RefCell<Option<String>>>,
+    mode: Rc<Cell<PreviewMode>>,
+) {
+    let keys = gtk::EventControllerKey::new();
+    keys.connect_key_pressed(move |_, key, _, _| {
+        if key == gdk::Key::space {
+            let path = match mode.get() {
+                PreviewMode::Hovered => hovered.borrow().clone(),
+                PreviewMode::Selected => selected_row(&selection).map(|r| r.path()),
+            }
+            .or_else(|| selected_row(&selection).map(|r| r.path()));
+            if let Some(path) = path {
+                preview(window.upcast_ref(), &path, &preview_slot);
+            }
+            return glib::Propagation::Stop;
+        }
+        glib::Propagation::Proceed
+    });
+    widget.add_controller(keys);
+}
+
+pub fn attach_hover(row: &impl IsA<gtk::Widget>, item: gtk::ListItem, hovered: Rc<RefCell<Option<String>>>) {
+    let motion = gtk::EventControllerMotion::new();
+    motion.connect_enter(move |_, _, _| {
+        if let Some(data) = item.item().and_downcast::<RowData>() {
+            hovered.replace(Some(data.path()));
+        }
+    });
+    row.add_controller(motion);
+}
+
+pub fn attach_zoom_scroll(widget: &impl IsA<gtk::Widget>, host: Rc<Host>) {
+    let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+    scroll.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let acc = Cell::new(0.0);
+    scroll.connect_scroll(move |ctrl, _dx, dy| {
+        if !ctrl
+            .current_event_state()
+            .contains(gdk::ModifierType::CONTROL_MASK)
+        {
+            return glib::Propagation::Proceed;
+        }
+        let a = acc.get() + dy;
+        if a.abs() < 0.35 {
+            acc.set(a);
+            return glib::Propagation::Stop;
+        }
+        acc.set(0.0);
+        let steps = if a < 0.0 { 1 } else { -1 };
+        host.zoom.set(host.zoom.get().bump(steps));
+        host.apply();
+        glib::Propagation::Stop
+    });
+    widget.add_controller(scroll);
+}
+
+pub fn rebuild_tree(host: &Host, catalog: &Catalog, ids: &[u32]) {
+    host.collapsed.borrow_mut().clear();
+    *host.tree_src.borrow_mut() = Some((catalog.clone(), ids.to_vec()));
+    fill_tree(host);
+}
+
+pub fn toggle_fold(host: &Host, path: &str) {
+    {
+        let mut collapsed = host.collapsed.borrow_mut();
+        if !collapsed.remove(path) {
+            collapsed.insert(path.to_string());
+        }
+    }
+    fill_tree(host);
+}
+
+fn fill_tree(host: &Host) {
+    let Some((catalog, ids)) = host.tree_src.borrow().clone() else {
+        return;
+    };
+    let items: Vec<HitRef> = ids
+        .iter()
+        .filter_map(|&id| {
+            let hit = catalog.hit(id)?;
+            Some(HitRef {
+                id: Some(id),
+                path: hit.path().to_string_lossy().into_owned(),
+                is_dir: hit.is_dir(),
+                weight: hit.size().max(1),
+            })
+        })
+        .collect();
+    let stems = fold_stems(&items);
+    let collapsed = host.collapsed.borrow();
+    let flat = walk_visible(&stems, &|p| !collapsed.contains(p));
+    drop(collapsed);
+    host.tree_store.remove_all();
+    for row in flat {
+        host.tree_store.append(&RowData::with_fold(
+            row.stem.name,
+            row.stem.path,
+            row.stem.is_dir,
+            row.depth,
+            row.has_kids,
+        ));
+    }
+}
+
+pub fn rebuild_weight(host: &Host, catalog: &Catalog, ids: &[u32]) {
+    let items: Vec<HitRef> = ids
+        .iter()
+        .filter_map(|&id| {
+            let hit = catalog.hit(id)?;
+            Some(HitRef {
+                id: Some(id),
+                path: hit.path().to_string_lossy().into_owned(),
+                is_dir: hit.is_dir(),
+                weight: hit.size().max(1),
+            })
+        })
+        .collect();
+    let folders = folder_weights(&items);
+    let tiles = squarify(
+        folders,
+        f64::from(host.weight.width().max(1)),
+        f64::from(host.weight.height().max(1)),
+    );
+    *host.tiles.borrow_mut() = tiles;
+    host.weight.queue_draw();
+}
+
+pub fn make_weight_area(tiles: Rc<RefCell<Vec<Tile>>>) -> gtk::DrawingArea {
+    let area = gtk::DrawingArea::new();
+    area.set_content_height(132);
+    area.set_hexpand(true);
+    let tiles_draw = Rc::clone(&tiles);
+    area.set_draw_func(move |_, cr, w, h| {
+        cr.set_source_rgb(0.08, 0.09, 0.11);
+        cr.rectangle(0.0, 0.0, f64::from(w), f64::from(h));
+        let _ = cr.fill();
+        let tiles = tiles_draw.borrow();
+        for (i, t) in tiles.iter().enumerate() {
+            let (r, g, b) = tile_color(i, &t.path);
+            cr.set_source_rgb(r, g, b);
+            cr.rectangle(t.x + 1.0, t.y + 1.0, (t.w - 2.0).max(0.0), (t.h - 2.0).max(0.0));
+            let _ = cr.fill();
+            if t.w > 48.0 && t.h > 16.0 {
+                cr.set_source_rgb(0.95, 0.96, 0.94);
+                cr.move_to(t.x + 6.0, t.y + 14.0);
+                let _ = cr.show_text(&t.name);
+            }
+        }
+    });
+    area
+}
+
+fn tile_color(i: usize, path: &str) -> (f64, f64, f64) {
+    let mut h = 216_613_6261u32;
+    for b in path.bytes() {
+        h ^= u32::from(b);
+        h = h.wrapping_mul(16777619);
+    }
+    h = h.wrapping_add(i as u32 * 17);
+    let hue = (h % 360) as f64;
+    hsl(hue, 0.42, 0.38)
+}
+
+fn hsl(h: f64, s: f64, l: f64) -> (f64, f64, f64) {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+    let m = l - c / 2.0;
+    let (r, g, b) = if h < 60.0 {
+        (c, x, 0.0)
+    } else if h < 120.0 {
+        (x, c, 0.0)
+    } else if h < 180.0 {
+        (0.0, c, x)
+    } else if h < 240.0 {
+        (0.0, x, c)
+    } else if h < 300.0 {
+        (x, 0.0, c)
+    } else {
+        (c, 0.0, x)
+    };
+    (r + m, g + m, b + m)
+}
+
+pub fn make_name_line(heading: bool) -> gtk::Box {
+    let line = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    line.add_css_class("qfind-name");
+    line.set_hexpand(true);
+    line.set_halign(gtk::Align::Fill);
+    let clip = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    clip.add_css_class("qfind-clip");
+    clip.set_hexpand(false);
+    clip.set_halign(gtk::Align::Start);
+    clip.set_overflow(gtk::Overflow::Hidden);
+    clip.set_width_request(0);
+    let stem = gtk::Label::new(None);
+    stem.set_widget_name("stem");
+    stem.set_xalign(0.0);
+    stem.set_halign(gtk::Align::Start);
+    stem.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    stem.set_single_line_mode(true);
+    stem.set_hexpand(false);
+    if heading {
+        stem.add_css_class("heading");
+    } else {
+        stem.add_css_class("caption");
+    }
+    clip.append(&stem);
+    let ext = gtk::Label::new(None);
+    ext.set_widget_name("ext");
+    ext.add_css_class("qfind-ext");
+    ext.set_xalign(0.0);
+    ext.set_halign(gtk::Align::Start);
+    ext.set_single_line_mode(true);
+    ext.set_hexpand(false);
+    let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    line.append(&clip);
+    line.append(&ext);
+    line.append(&spacer);
+    line.connect_realize(|l| {
+        schedule_fit(l);
+    });
+    line.connect_map(|l| {
+        schedule_fit(l);
+    });
+    line
+}
+
+pub fn fill_name_line(line: &gtk::Box, name: &str, is_dir: bool) {
+    let Some(clip) = line.first_child() else {
+        return;
+    };
+    let Some(stem) = clip.first_child().and_downcast::<gtk::Label>() else {
+        return;
+    };
+    let Some(ext) = clip.next_sibling().and_downcast::<gtk::Label>() else {
+        return;
+    };
+    let (stem_s, ext_s) = split_filename(name, is_dir);
+    stem.set_text(stem_s);
+    stem.set_margin_start(0);
+    stem.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    if ext_s.is_empty() {
+        ext.set_text("");
+        ext.set_visible(false);
+    } else {
+        ext.set_text(&format!(".{ext_s}"));
+        ext.set_visible(true);
+    }
+    schedule_fit(line);
+}
+
+fn fit_name_line(line: &gtk::Box) {
+    let Some(clip) = line.first_child() else {
+        return;
+    };
+    let Some(stem) = clip.first_child().and_downcast::<gtk::Label>() else {
+        return;
+    };
+    let Some(ext) = clip.next_sibling().and_downcast::<gtk::Label>() else {
+        return;
+    };
+    let avail = line.width();
+    if avail <= 1 {
+        return;
+    }
+    let ext_nat = if ext.is_visible() {
+        ext.measure(gtk::Orientation::Horizontal, -1).1
+    } else {
+        0
+    };
+    let stem_nat = stem.measure(gtk::Orientation::Horizontal, -1).1;
+    let gap = 0;
+    let clip_w = if stem_nat + ext_nat + gap <= avail {
+        stem_nat
+    } else {
+        (avail - ext_nat - gap).max(8)
+    };
+    clip.set_hexpand(false);
+    if clip.width_request() != clip_w {
+        clip.set_width_request(clip_w);
+    }
+}
+
+fn schedule_fit(line: &gtk::Box) {
+    fit_name_line(line);
+    let line = line.clone();
+    glib::idle_add_local_once(move || {
+        fit_name_line(&line);
+    });
+}
+
+pub fn attach_marquee(row: &impl IsA<gtk::Widget>, line: &gtk::Box) {
+    let Some(clip) = line.first_child() else {
+        return;
+    };
+    let Some(stem) = clip.first_child().and_downcast::<gtk::Label>() else {
+        return;
+    };
+    let slot: Rc<RefCell<Option<gtk::TickCallbackId>>> = Rc::new(RefCell::new(None));
+    let row_w = row.upcast_ref::<gtk::Widget>().clone();
+    let motion = gtk::EventControllerMotion::new();
+    {
+        let stem = stem.clone();
+        let clip = clip.clone();
+        let row_w = row_w.clone();
+        let slot = Rc::clone(&slot);
+        motion.connect_enter(move |_, _, _| {
+            start_marquee(&row_w, &stem, &clip, &slot);
+        });
+    }
+    {
+        let stem = stem.clone();
+        let slot = Rc::clone(&slot);
+        motion.connect_leave(move |_| {
+            stop_marquee(&stem, &slot);
+        });
+    }
+    row.add_controller(motion);
+    {
+        let stem = stem.clone();
+        let slot = Rc::clone(&slot);
+        row_w.connect_unmap(move |_| {
+            stop_marquee(&stem, &slot);
+        });
+    }
+}
+
+fn start_marquee(
+    row: &gtk::Widget,
+    stem: &gtk::Label,
+    clip: &gtk::Widget,
+    slot: &Rc<RefCell<Option<gtk::TickCallbackId>>>,
+) {
+    stop_marquee(stem, slot);
+    stem.set_ellipsize(gtk::pango::EllipsizeMode::None);
+    let stem = stem.clone();
+    let clip = clip.clone();
+    let last = Cell::new(0i64);
+    let offset = Cell::new(0.0f64);
+    let pause_until = Cell::new(0i64);
+    let id = row.add_tick_callback(move |_, clock| {
+        let now = clock.frame_time();
+        let prev = last.replace(now);
+        if prev == 0 {
+            return glib::ControlFlow::Continue;
+        }
+        if now < pause_until.get() {
+            return glib::ControlFlow::Continue;
+        }
+        let need = stem.measure(gtk::Orientation::Horizontal, -1).1;
+        let have = clip.width();
+        if need <= have {
+            offset.set(0.0);
+            stem.set_margin_start(0);
+            return glib::ControlFlow::Continue;
+        }
+        let dt = (now - prev) as f64 / 1_000_000.0;
+        let mut x = offset.get() - 36.0 * dt;
+        let min_x = f64::from(have - need - 12);
+        if x < min_x {
+            x = 0.0;
+            pause_until.set(now + 700_000);
+        }
+        offset.set(x);
+        stem.set_margin_start(x.round() as i32);
+        glib::ControlFlow::Continue
+    });
+    *slot.borrow_mut() = Some(id);
+}
+
+fn stop_marquee(stem: &gtk::Label, slot: &Rc<RefCell<Option<gtk::TickCallbackId>>>) {
+    if let Some(id) = slot.borrow_mut().take() {
+        id.remove();
+    }
+    stem.set_margin_start(0);
+    stem.set_ellipsize(gtk::pango::EllipsizeMode::End);
+}
+
+fn restyle_hits(list: &gtk::ListView, grid: &gtk::GridView, zoom: Zoom, spacing: u8) {
+    walk_apply(list.upcast_ref(), &|w| {
+        if w.has_css_class("qfind-row") {
+            apply_list_metrics(w, zoom, spacing);
+        }
+        if w.has_css_class("qfind-name") {
+            if let Some(line) = w.downcast_ref::<gtk::Box>() {
+                schedule_fit(line);
+            }
+        }
+    });
+    walk_apply(grid.upcast_ref(), &|w| {
+        if w.has_css_class("qfind-tile") {
+            apply_grid_metrics(w, zoom);
+        }
+        if w.has_css_class("qfind-name") {
+            if let Some(line) = w.downcast_ref::<gtk::Box>() {
+                schedule_fit(line);
+            }
+        }
+    });
+}
+
+fn walk_apply(w: &gtk::Widget, f: &impl Fn(&gtk::Widget)) {
+    f(w);
+    let mut child = w.first_child();
+    while let Some(n) = child {
+        walk_apply(&n, f);
+        child = n.next_sibling();
+    }
+}
+
+pub fn apply_list_metrics(row: &gtk::Widget, zoom: Zoom, spacing: u8) {
+    row.set_size_request(-1, zoom.row_px());
+    let pad = zoom.pad_px_with(spacing);
+    row.set_margin_top(pad);
+    row.set_margin_bottom(pad);
+    if let Some(icon) = row.first_child().and_downcast::<gtk::Image>() {
+        icon.set_pixel_size(zoom.icon_px());
+        if let Some(name) = icon.next_sibling().and_downcast::<gtk::Box>() {
+            schedule_fit(&name);
+        }
+    }
+}
+
+fn apply_grid_metrics(tile: &gtk::Widget, zoom: Zoom) {
+    let cell = zoom.cell_px();
+    tile.set_size_request(cell, cell);
+    if let Some(icon) = tile.first_child().and_downcast::<gtk::Image>() {
+        icon.set_pixel_size(zoom.icon_px());
+        if let Some(name) = icon.next_sibling().and_downcast::<gtk::Box>() {
+            schedule_fit(&name);
+        }
+    }
+}
+
+pub fn popup_at(popover: &gtk::PopoverMenu, widget: &impl IsA<gtk::Widget>, x: f64, y: f64) {
+    let widget = widget.as_ref();
+    match popover.parent() {
+        Some(parent) if &parent == widget => {}
+        Some(_) => {
+            popover.unparent();
+            popover.set_parent(widget);
+        }
+        None => popover.set_parent(widget),
+    }
+    popover.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+    popover.popup();
+}
+
+pub fn make_grid_factory(
+    selection: gtk::SingleSelection,
+    popover: gtk::PopoverMenu,
+    zoom: Rc<Cell<Zoom>>,
+    icons: Rc<RefCell<std::collections::HashMap<String, gio::Icon>>>,
+    hovered: Rc<RefCell<Option<String>>>,
+) -> gtk::SignalListItemFactory {
+    let factory = gtk::SignalListItemFactory::new();
+    {
+        let selection = selection.clone();
+        let popover = popover.clone();
+        let hovered = Rc::clone(&hovered);
+        factory.connect_setup(move |_, item| {
+            let Some(item) = item.downcast_ref::<gtk::ListItem>() else {
+                return;
+            };
+            let col = gtk::Box::new(gtk::Orientation::Vertical, 2);
+            col.add_css_class("qfind-tile");
+            col.set_overflow(gtk::Overflow::Hidden);
+            col.set_halign(gtk::Align::Fill);
+            col.set_valign(gtk::Align::Fill);
+            let icon = gtk::Image::from_icon_name("folder");
+            icon.set_pixel_size(48);
+            icon.set_vexpand(true);
+            icon.set_halign(gtk::Align::Center);
+            icon.set_valign(gtk::Align::Center);
+            let name = make_name_line(false);
+            name.set_margin_start(4);
+            name.set_margin_end(4);
+            name.set_margin_bottom(2);
+            col.append(&icon);
+            col.append(&name);
+            attach_marquee(&col, &name);
+            attach_hover(&col, item.clone(), Rc::clone(&hovered));
+            let drag = gtk::DragSource::new();
+            drag.set_actions(gdk::DragAction::COPY);
+            let list_item = item.clone();
+            drag.connect_prepare(move |_, _, _| {
+                let item = list_item.downcast_ref::<gtk::ListItem>()?;
+                let data = item.item().and_downcast::<RowData>()?;
+                crate::actions::content_for_path(&data.path())
+            });
+            col.add_controller(drag);
+            let right = gtk::GestureClick::new();
+            right.set_button(gdk::BUTTON_SECONDARY);
+            let list_item = item.clone();
+            let selection = selection.clone();
+            let popover = popover.clone();
+            let col_for_pop = col.clone();
+            right.connect_pressed(move |_, _, x, y| {
+                if let Some(li) = list_item.downcast_ref::<gtk::ListItem>() {
+                    selection.set_selected(li.position());
+                }
+                popup_at(&popover, &col_for_pop, x, y);
+            });
+            col.add_controller(right);
+            item.set_child(Some(&col));
+        });
+    }
+    factory.connect_bind(move |_, item| {
+        let Some(item) = item.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        let Some(data) = item.item().and_downcast::<RowData>() else {
+            return;
+        };
+        let Some(col) = item.child().and_downcast::<gtk::Box>() else {
+            return;
+        };
+        let Some(icon) = col.first_child().and_downcast::<gtk::Image>() else {
+            return;
+        };
+        let Some(name) = icon.next_sibling().and_downcast::<gtk::Box>() else {
+            return;
+        };
+        apply_grid_metrics(col.upcast_ref(), zoom.get());
+        paint_icon(&icon, &data, &icons);
+        fill_name_line(&name, &data.name(), data.is_dir());
+    });
+    factory
+}
+
+pub fn paint_icon(
+    icon: &gtk::Image,
+    data: &RowData,
+    icons: &Rc<RefCell<std::collections::HashMap<String, gio::Icon>>>,
+) {
+    if data.is_dir() {
+        icon.set_icon_name(Some("folder"));
+        return;
+    }
+    let key = data
+        .name()
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    let mut cache = icons.borrow_mut();
+    let gicon = cache
+        .entry(key)
+        .or_insert_with(|| {
+            let (ctype, _) = gio::content_type_guess(
+                Some(std::path::Path::new(&data.name())),
+                None::<&[u8]>,
+            );
+            gio::content_type_get_icon(&ctype)
+        })
+        .clone();
+    icon.set_from_gicon(&gicon);
+}
+
+pub fn make_tree_factory(
+    toggle: Rc<RefCell<Box<dyn Fn(&str)>>>,
+    collapsed: Rc<RefCell<HashSet<String>>>,
+    icons: Rc<RefCell<std::collections::HashMap<String, gio::Icon>>>,
+    hovered: Rc<RefCell<Option<String>>>,
+) -> gtk::SignalListItemFactory {
+    let factory = gtk::SignalListItemFactory::new();
+    {
+        let toggle = Rc::clone(&toggle);
+        let hovered = Rc::clone(&hovered);
+        factory.connect_setup(move |_, item| {
+            let Some(item) = item.downcast_ref::<gtk::ListItem>() else {
+                return;
+            };
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            row.set_margin_end(6);
+            let twist = gtk::Button::new();
+            twist.set_has_frame(false);
+            twist.add_css_class("flat");
+            twist.set_label("·");
+            twist.set_valign(gtk::Align::Center);
+            let list_item = item.clone();
+            let toggle = Rc::clone(&toggle);
+            twist.connect_clicked(move |_| {
+                let Some(data) = list_item.item().and_downcast::<RowData>() else {
+                    return;
+                };
+                if data.has_kids() {
+                    (toggle.borrow())(&data.path());
+                }
+            });
+            let icon = gtk::Image::from_icon_name("folder");
+            icon.set_pixel_size(16);
+            let name = make_name_line(true);
+            row.append(&twist);
+            row.append(&icon);
+            row.append(&name);
+            attach_marquee(&row, &name);
+            attach_hover(&row, item.clone(), Rc::clone(&hovered));
+            item.set_child(Some(&row));
+        });
+    }
+    factory.connect_bind(move |_, item| {
+        let Some(item) = item.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        let Some(data) = item.item().and_downcast::<RowData>() else {
+            return;
+        };
+        let Some(row) = item.child().and_downcast::<gtk::Box>() else {
+            return;
+        };
+        let Some(twist) = row.first_child().and_downcast::<gtk::Button>() else {
+            return;
+        };
+        let Some(icon) = twist.next_sibling().and_downcast::<gtk::Image>() else {
+            return;
+        };
+        let Some(name) = icon.next_sibling().and_downcast::<gtk::Box>() else {
+            return;
+        };
+        row.set_margin_start(6 + data.depth() as i32 * 16);
+        if data.has_kids() {
+            let open = !collapsed.borrow().contains(&data.path());
+            twist.set_label(if open { "▾" } else { "▸" });
+            twist.set_sensitive(true);
+        } else {
+            twist.set_label(if data.is_dir() { "▸" } else { "·" });
+            twist.set_sensitive(false);
+        }
+        paint_icon(&icon, &data, &icons);
+        fill_name_line(&name, &data.name(), data.is_dir());
+    });
+    factory
+}
