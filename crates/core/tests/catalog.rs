@@ -45,6 +45,21 @@ fn rebuild_and_search_through_catalog_interface() {
 
     let wavs = names(&catalog, "*.wav");
     assert!(wavs.iter().any(|n| n == "kick.wav"), "{wavs:?}");
+    let dot_wav = names(&catalog, ".wav");
+    assert!(
+        dot_wav.iter().any(|n| n == "kick.wav"),
+        ".wav should be an extension filter: {dot_wav:?}"
+    );
+    assert!(
+        dot_wav.iter().all(|n| n.ends_with(".wav")),
+        ".wav must not rank other extensions first: {dot_wav:?}"
+    );
+    let hello_txt = names(&catalog, "hello .txt");
+    assert!(hello_txt.iter().any(|n| n == "hello.txt"), "{hello_txt:?}");
+    assert!(
+        hello_txt.iter().all(|n| n.ends_with(".txt")),
+        "hello .txt must keep .txt first: {hello_txt:?}"
+    );
 
     let and = names(&catalog, "foo txt");
     assert!(and.iter().any(|n| n == "foo.txt"), "{and:?}");

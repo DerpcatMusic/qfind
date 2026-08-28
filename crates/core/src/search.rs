@@ -20,8 +20,11 @@ pub(crate) struct Ranked {
 pub(crate) fn search(snapshot: &Snapshot, query: &str, opts: SearchOpts) -> Result<Ranked> {
     let mut globs = Vec::new();
     let mut fuzzy_parts = Vec::new();
+    let mut exts = Vec::new();
     for token in query.split_whitespace() {
-        if token.contains(['*', '?']) {
+        if let Some(ext) = ext_token(token) {
+            exts.push(ext);
+        } else if token.contains(['*', '?']) {
             let glob = GlobBuilder::new(token)
                 .case_insensitive(true)
                 .literal_separator(false)
@@ -33,11 +36,9 @@ pub(crate) fn search(snapshot: &Snapshot, query: &str, opts: SearchOpts) -> Resu
         }
     }
     if fuzzy_parts.is_empty() {
-        if globs.is_empty() {
-            return Ok(scan(snapshot, opts));
-        }
         return Ok(scan_filtered(snapshot, opts, |name| {
-            globs.iter().all(|g| g.is_match(name))
+            (globs.is_empty() || globs.iter().all(|g| g.is_match(name)))
+                && (exts.is_empty() || name_has_ext(name, &exts))
         }));
     }
 
@@ -45,6 +46,9 @@ pub(crate) fn search(snapshot: &Snapshot, query: &str, opts: SearchOpts) -> Resu
     let cutoff = date_cutoff(opts.date);
     let keep = |id: u32| -> Option<&str> {
         let entry = snapshot.entry(id)?;
+        if !exts.is_empty() && entry.is_dir() {
+            return None;
+        }
         if !date_matches(opts.date, entry.mtime, cutoff) {
             return None;
         }
@@ -55,32 +59,36 @@ pub(crate) fn search(snapshot: &Snapshot, query: &str, opts: SearchOpts) -> Resu
         if !globs.is_empty() && !globs.iter().all(|g| g.is_match(name)) {
             return None;
         }
+        if !exts.is_empty() && !name_has_ext(name, &exts) {
+            return None;
+        }
         Some(name)
     };
 
     let need = prefilter::needle_mask(&fuzzy_parts);
     let masks = snapshot.letter_mask();
-    let (slice, base) = match opts.scope {
-        Scope::Folders => {
-            let n = snapshot.folder_count() as usize;
-            (&masks[..n.min(masks.len())], 0u32)
-        }
-        Scope::Files => {
-            let start = snapshot.folder_count() as usize;
-            let start = start.min(masks.len());
-            (&masks[start..], start as u32)
-        }
-        Scope::All => (masks, 0u32),
+    let files_only = !exts.is_empty() || opts.scope == Scope::Files;
+    let (slice, base) = if files_only {
+        let start = snapshot.folder_count() as usize;
+        let start = start.min(masks.len());
+        (&masks[start..], start as u32)
+    } else if opts.scope == Scope::Folders {
+        let n = snapshot.folder_count() as usize;
+        (&masks[..n.min(masks.len())], 0u32)
+    } else {
+        (masks, 0u32)
     };
     let mut cands = Vec::new();
     prefilter::scan_mask(slice, need, base, &mut cands);
-    let mut scored: Vec<(u32, u32)> = cands
-        .into_par_iter()
-        .filter_map(|id| {
-            let name = keep(id)?;
-            score_only(&pattern, name).map(|score| (score, id))
-        })
-        .collect();
+    let score_one = |id: u32| {
+        let name = keep(id)?;
+        score_only(&pattern, name).map(|score| (score, id))
+    };
+    let mut scored: Vec<(u32, u32)> = if cands.len() < 4096 {
+        cands.into_iter().filter_map(score_one).collect()
+    } else {
+        cands.into_par_iter().filter_map(score_one).collect()
+    };
 
     apply_sort(snapshot, &mut scored, opts);
     if opts.limit > 0 && scored.len() > opts.limit {
@@ -117,10 +125,6 @@ fn compile_pattern(text: &str, mode: MatchMode) -> Pattern {
             Pattern::new(text, CaseMatching::Ignore, Normalization::Smart, AtomKind::Exact)
         }
     }
-}
-
-fn scan(snapshot: &Snapshot, opts: SearchOpts) -> Ranked {
-    scan_filtered(snapshot, opts, |_| true)
 }
 
 fn scan_filtered(snapshot: &Snapshot, opts: SearchOpts, extra: impl Fn(&str) -> bool) -> Ranked {
@@ -167,6 +171,23 @@ fn scan_filtered(snapshot: &Snapshot, opts: SearchOpts, extra: impl Fn(&str) -> 
         scored.truncate(opts.limit);
     }
     take_ids(scored)
+}
+
+/// `.wav` / `.exe` — extension filter, not a fuzzy atom. Several of these are OR.
+fn ext_token(token: &str) -> Option<&str> {
+    let ext = token.strip_prefix('.')?;
+    if (1..=10).contains(&ext.len()) && ext.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        Some(ext)
+    } else {
+        None
+    }
+}
+
+fn name_has_ext(name: &str, exts: &[&str]) -> bool {
+    let Some((_, ext)) = name.rsplit_once('.') else {
+        return false;
+    };
+    !ext.is_empty() && exts.iter().any(|want| ext.eq_ignore_ascii_case(want))
 }
 
 fn take_ids(scored: Vec<(u32, u32)>) -> Ranked {

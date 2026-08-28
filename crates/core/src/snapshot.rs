@@ -33,7 +33,9 @@ impl Entry {
 }
 
 pub(crate) struct Snapshot {
+    path: PathBuf,
     bytes: Mmap,
+    mask_map: Option<Mmap>,
     folder_count: u32,
     file_count: u32,
     names_off: usize,
@@ -81,8 +83,11 @@ impl Snapshot {
                 reason: "truncated body",
             });
         }
+        let mask_map = mmap_mask(&path.with_extension("mask"), folder_count + file_count);
         Ok(Self {
+            path: path.to_path_buf(),
             bytes,
+            mask_map,
             folder_count,
             file_count,
             names_off,
@@ -124,8 +129,11 @@ impl Snapshot {
         std::str::from_utf8(self.bytes.get(start..end).unwrap_or(b"")).unwrap_or("")
     }
 
-    /// One `u64` letter/digit mask per id. Built once, then SIMD-scanned.
+    /// One `u64` letter/digit mask per id. Prefers the sidecar mmap written on Rebuild.
     pub(crate) fn letter_mask(&self) -> &[u64] {
+        if let Some(mapped) = self.mapped_masks() {
+            return mapped;
+        }
         self.letter_mask.get_or_init(|| {
             let n = self.len() as usize;
             let mut v = vec![0u64; n];
@@ -134,8 +142,14 @@ impl Snapshot {
                     *slot = prefilter::mask_name(self.name(e).as_bytes());
                 }
             }
+            let _ = write_mask_file(&self.path.with_extension("mask"), &v);
             v.into_boxed_slice()
         })
+    }
+
+    fn mapped_masks(&self) -> Option<&[u64]> {
+        let map = self.mask_map.as_ref()?;
+        mask_slice(map, self.len() as usize)
     }
 
     pub(crate) fn path(&self, id: u32) -> PathBuf {
@@ -289,6 +303,14 @@ impl Builder {
             w.flush().map_err(|e| Error::io(&tmp, e))?;
         }
         fs::rename(&tmp, path).map_err(|e| Error::io(path, e))?;
+        let mut masks = Vec::with_capacity(self.folders.len() + self.files.len());
+        for e in self.folders.iter().chain(self.files.iter()) {
+            let start = e.name_off as usize;
+            let end = start.saturating_add(e.name_len as usize);
+            let name = self.names.get(start..end).unwrap_or(b"");
+            masks.push(prefilter::mask_name(name));
+        }
+        let _ = write_mask_file(&path.with_extension("mask"), &masks);
         Ok(())
     }
 
@@ -309,6 +331,48 @@ impl Builder {
         w.write_all(&self.names)?;
         Ok(())
     }
+}
+
+const MASK_MAGIC: &[u8; 4] = b"QMSK";
+
+fn mmap_mask(path: &Path, n: u32) -> Option<Mmap> {
+    let file = File::open(path).ok()?;
+    // SAFETY: sidecar is rewritten next to the snapshot via temp+rename on Rebuild.
+    let map = unsafe { Mmap::map(&file).ok()? };
+    if mask_slice(&map, n as usize).is_some() {
+        Some(map)
+    } else {
+        None
+    }
+}
+
+fn mask_slice(bytes: &[u8], n: usize) -> Option<&[u64]> {
+    if bytes.len() != 8 + n * 8 || &bytes[..4] != MASK_MAGIC {
+        return None;
+    }
+    let count = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
+    if count as usize != n {
+        return None;
+    }
+    let data = &bytes[8..];
+    if data.as_ptr() as usize % 8 != 0 {
+        return None;
+    }
+    // SAFETY: length is n * 8, pointer 8-aligned, sidecar is immutable for this inode.
+    Some(unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<u64>(), n) })
+}
+
+fn write_mask_file(path: &Path, masks: &[u64]) -> std::io::Result<()> {
+    let mut buf = Vec::with_capacity(8 + masks.len() * 8);
+    buf.extend_from_slice(MASK_MAGIC);
+    buf.extend_from_slice(&(masks.len() as u32).to_le_bytes());
+    for m in masks {
+        buf.extend_from_slice(&m.to_le_bytes());
+    }
+    let tmp = path.with_extension("masktmp");
+    fs::write(&tmp, &buf)?;
+    fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 fn write_entry<W: Write>(w: &mut W, e: Entry) -> std::io::Result<()> {

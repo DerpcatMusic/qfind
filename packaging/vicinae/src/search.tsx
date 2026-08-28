@@ -8,12 +8,12 @@ const execFileAsync = promisify(execFile);
 type Hit = { name: string; path: string; dir: boolean };
 
 async function qfind(query: string): Promise<Hit[]> {
-  const args = ["--json", "--limit", "40"];
   const q = query.trim();
-  if (q) args.push(q);
-  const { stdout } = await execFileAsync("qfind", args, {
-    timeout: 4000,
-    maxBuffer: 2_000_000,
+  if (!q) return [];
+  const { stdout } = await execFileAsync("qfind", ["--json", "--limit", "32", "--files", q], {
+    timeout: 2500,
+    maxBuffer: 1_000_000,
+    env: { ...process.env, RAYON_NUM_THREADS: "1" },
   });
   return stdout
     .split("\n")
@@ -28,6 +28,11 @@ export default function Search() {
 
   useEffect(() => {
     let cancelled = false;
+    if (!query.trim()) {
+      setHits([]);
+      setIsLoading(false);
+      return;
+    }
     setIsLoading(true);
     qfind(query)
       .then((rows) => {
@@ -53,8 +58,8 @@ export default function Search() {
     >
       {hits.length === 0 ? (
         <List.EmptyView
-          title={query.trim() ? "No files found" : "Opening Catalog…"}
-          description="Uses the Qfind Catalog (qfind --json)"
+          title={query.trim() ? "No files found" : "Type a name — .wav filters by type"}
+          description="Qfind Catalog · .wav .png .exe prefer that extension"
         />
       ) : (
         hits.map((hit) => (
