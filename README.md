@@ -1,54 +1,70 @@
 # Qfind
 
-Instant filename search. One Catalog module: Rebuild from local Mounts, Query by name.
+Filename search for Linux. One Catalog: Rebuild from local disks, Query by name.
 
-Rebuild uses parallel `getdents64` (no per-file `stat`). Names-first, like Everything.
-Open mmaps `~/.cache/qfind/catalog` — the window shows before any search.
+Indexing walks `getdents64` in parallel and skips per-file `stat` (names first, Everything-style). The GTK window mmaps `~/.cache/qfind/catalog` and opens before you type.
 
-```
+```bash
 git clone https://github.com/DerpcatMusic/qfind.git
 cd qfind
-./packaging/install.sh   # binaries, desktop launcher, Nautilus, Vicinae
+./packaging/install.sh
 ```
 
-```
-qfind-gtk                # GTK app — drag files out of the list
-qfind                    # TUI
-qfind index              # Rebuild (~/.cache/qfind/catalog)
-qfind kick wav           # print paths
+That puts `qfind`, `qfind-tui`, and `qfind-gtk` in `~/.local/bin`, plus the desktop launcher. If Qt6 is installed, you also get `qfind-qt` (Breeze).
+
+```bash
+qfind-gtk                      # GUI
+qfind                          # TUI
+qfind index                    # rebuild Catalog
+qfind kick wav                 # print matching paths
 qfind --folders --class image cat
 ```
 
-### Nautilus and Vicinae
+## Nautilus and Vicinae
 
-`install.sh` installs both. Plugins only (CLI already on `PATH`):
+Plugins without rebuilding the binaries:
 
-```
+```bash
 ./packaging/install-plugins.sh
 ```
 
-| Plugin | After install | Use |
+| | After install | Use |
 |---|---|---|
-| **Nautilus / Files** | `nautilus -q`, open Files again | **Ctrl+F** in a folder, or right-click → Search with Qfind |
-| **Vicinae** | reopen Vicinae | command **Qfind** |
+| Nautilus / Files | `nautilus -q`, open Files | **Ctrl+F** in a folder, or right-click → Search with Qfind |
+| Vicinae | reopen Vicinae | command **Qfind** |
 
-Needs `nautilus-python` (Arch) / `python3-nautilus` (Debian) for Files, and Node/`npm` for the Vicinae build. Step-by-step: [docs/plugins.md](docs/plugins.md).
+Nautilus needs `nautilus-python` (Arch) or `python3-nautilus` (Debian). Vicinae needs Node/`npm`. Full steps: [docs/plugins.md](docs/plugins.md).
 
-Search is fuzzy (nucleo / fzf scoring). Switch to substring or exact on the search bar
-(GTK) / `--match` (CLI) / `Ctrl+M` (TUI). `*.wav` is still a glob. Empty Query
-browses files immediately.
+## Search
 
-GTK: type, double-click / Enter opens, **drag a row**, **right-click** (at the cursor) for
-Open / Open With / Preview / Show in Files / Copy path.
-**Space** previews (GNOME Sushi, else a built-in window). Sort is Score, Name,
-**Newest / Oldest / size** (live `stat` of Hits, like Files — not day/week buckets).
-Scroll uses virtual ListView/GridView, cached row GObjects, and **no `stat` on bind** (Zed/GPUI rule: the scroll hot path must not syscall). Permanent scrollbar + kinetic flick. GTK4 GSK already GPU-composites; we are not rewriting to GPUI (Wayland Drag needs GTK).
+Fuzzy by default (nucleo / fzf). Switch to substring or exact from the GTK search bar, CLI `--match`, or TUI `Ctrl+M`. `*.wav` is a glob; `.wav` with no star filters by extension. An empty query lists files.
 
-**Ctrl+scroll** zooms the Hits Surface like File Pilot: tight list → roomy list → grid.
+## GTK
 
-Settings (gear): extra Exclude / include Mounts, compactness (Zoom), spacing, Space previews **hovered** or selected, Reset to default. `~/.config/qfind/config.toml`.
+Type a name. Enter or double-click opens the file; drag a row out. Right-click at the cursor for Open, Open With, Preview, Show in Files, or Copy path.
 
-KDE: `qfind-qt` (Qt6 Widgets, Breeze) if Qt6 is installed.
-Experimental **tree** toggle; bottom **WeightMap** of folders (WizTree-style).
-TUI (`qfind`): **f3** preview, **f4** tree, **f6** WeightMap, **Ctrl+scroll / ^+ ^-** zoom,
-**^o** show in Files, **^y** copy path, **tab / f2 / ctrl-d** Drag (`ripdrag`).
+Hover a Hit and press Space for preview (GNOME Sushi DBus, else a built-in window). Esc or Space closes it. Settings can switch Space to the selected Hit.
+
+Sort: Score, Name, Newest, Oldest, Largest, Smallest. Date and size `stat` the Hits, not the whole Catalog. Newest/Oldest are recency, not day/week buckets.
+
+Ctrl+scroll zooms like File Pilot: tight list, roomy list, then a square grid.
+
+Gear: extra exclude names, include Mounts, default Zoom, spacing, Reset. Stored at `~/.config/qfind/config.toml`.
+
+Tree is experimental. WeightMap at the bottom is a WizTree-style folder heatmap.
+
+The list is a virtual GTK4 ListView/GridView. Bind does not `stat`. Scrollbars stay on; kinetic flick is on. GSK composites on the GPU. GTK stays GTK because Wayland drag needs it.
+
+## TUI
+
+`qfind` (or `qfind-tui`):
+
+| Key | Action |
+|---|---|
+| `F3` | preview |
+| `F4` | tree |
+| `F6` | WeightMap |
+| Ctrl+scroll, `+` / `-` | zoom |
+| `Ctrl+O` | show in Files |
+| `Ctrl+Y` | copy path |
+| Tab, `F2`, `Ctrl+D` | drag (`ripdrag`) |
