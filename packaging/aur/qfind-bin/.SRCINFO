@@ -1,6 +1,6 @@
 pkgbase = qfind-bin
 	pkgdesc = Instant filename search (prebuilt x86_64)
-	pkgver = 0.1.0
+	pkgver = 0.1.1
 	pkgrel = 1
 	url = https://github.com/DerpcatMusic/qfind
 	arch = x86_64
@@ -15,7 +15,7 @@ pkgbase = qfind-bin
 	provides = qfind
 	conflicts = qfind
 	options = !strip
-	source = qfind-0.1.0-x86_64.tar.zst::https://github.com/DerpcatMusic/qfind/releases/download/v0.1.0/qfind-0.1.0-x86_64.tar.zst
-	sha256sums = 96ae14d290e17127ff68a49d2d9a484a3be4b26099f8fa0cb3980af7fa6580cb
+	source = qfind-0.1.1-x86_64.tar.zst::https://github.com/DerpcatMusic/qfind/releases/download/v0.1.1/qfind-0.1.1-x86_64.tar.zst
+	sha256sums = 043944f29565760168eebc2814c10840478e0a987f0f12607511473ad2f211f5
 
 pkgname = qfind-bin

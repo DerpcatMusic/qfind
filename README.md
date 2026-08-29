@@ -13,7 +13,7 @@ cd qfind
 Prebuilt x86_64 binaries (GitHub Releases):
 
 ```bash
-curl -L https://github.com/DerpcatMusic/qfind/releases/download/v0.1.0/qfind-0.1.0-x86_64.tar.zst | tar -C /tmp -x --zstd
+curl -L https://github.com/DerpcatMusic/qfind/releases/download/v0.1.1/qfind-0.1.1-x86_64.tar.zst | tar -C /tmp -x --zstd
 sudo install -Dm755 /tmp/qfind /tmp/qfind-tui /tmp/qfind-gtk /tmp/qfind-qt -t /usr/local/bin
 sudo install -Dm644 /tmp/qfind.desktop /usr/local/share/applications/qfind.desktop
 ```

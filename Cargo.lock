@@ -1513,7 +1513,7 @@ dependencies = [
 
 [[package]]
 name = "qfind"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1523,7 +1523,7 @@ dependencies = [
 
 [[package]]
 name = "qfind-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "crossbeam-channel",
  "dirs",
@@ -1538,7 +1538,7 @@ dependencies = [
 
 [[package]]
 name = "qfind-gtk"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "gtk4",
@@ -1547,7 +1547,7 @@ dependencies = [
 
 [[package]]
 name = "qfind-tui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "crossterm",
