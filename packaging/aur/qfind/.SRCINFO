@@ -16,6 +16,6 @@ pkgbase = qfind
 	conflicts = qfind-bin
 	options = !lto
 	source = qfind-0.1.1.tar.gz::https://github.com/DerpcatMusic/qfind/archive/refs/tags/v0.1.1.tar.gz
-	sha256sums = SKIP
+	sha256sums = 20d69420b211b11302eccb31ec7f0b2ae85cabf0771b3631a47414434ca2010d
 
 pkgname = qfind
