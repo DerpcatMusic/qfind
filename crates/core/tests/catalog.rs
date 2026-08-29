@@ -12,6 +12,26 @@ fn write_file(path: &Path, body: &str) {
     f.write_all(body.as_bytes()).expect("write");
 }
 
+fn set_mtime(path: &Path, secs: i64) {
+    let ts = rustix::fs::Timestamps {
+        last_access: rustix::fs::Timespec {
+            tv_sec: secs,
+            tv_nsec: 0,
+        },
+        last_modification: rustix::fs::Timespec {
+            tv_sec: secs,
+            tv_nsec: 0,
+        },
+    };
+    rustix::fs::utimensat(
+        rustix::fs::CWD,
+        path,
+        &ts,
+        rustix::fs::AtFlags::empty(),
+    )
+    .expect("utimensat");
+}
+
 fn names(catalog: &Catalog, query: &str) -> Vec<String> {
     catalog
         .search(query)
@@ -258,15 +278,21 @@ fn search_with_scope_class_sort_and_limit() {
 fn newest_sort_uses_live_mtime() {
     let tmp = tempfile::tempdir().expect("tmpdir");
     let tree = tmp.path().join("tree");
-    write_file(&tree.join("old.txt"), "o");
-    std::thread::sleep(std::time::Duration::from_millis(1100));
-    write_file(&tree.join("new.txt"), "n");
+    let old = tree.join("old.txt");
+    let new = tree.join("new.txt");
+    write_file(&old, "o");
+    write_file(&new, "n");
+    // Do not sleep. The walk root is stored as its full path (…/tree), so
+    // fuzzy "txt" also matches that directory. Creating new.txt bumps the
+    // dir mtime; Newest live-stats seconds (st_mtime), and id 0 wins ties.
+    set_mtime(&old, 1_000_000);
+    set_mtime(&new, 2_000_000);
     let snapshot = tmp.path().join("catalog");
     let catalog =
         Catalog::rebuild(Rebuild::new(&snapshot).roots([tree.as_path()])).expect("rebuild");
     let hits = catalog
         .search_with(
-            "txt",
+            ".txt",
             SearchOpts {
                 sort: Sort::Newest,
                 highlight: false,
@@ -279,7 +305,7 @@ fn newest_sort_uses_live_mtime() {
 
     let oldest = catalog
         .search_with(
-            "txt",
+            ".txt",
             SearchOpts {
                 sort: Sort::Oldest,
                 highlight: false,
