@@ -16,7 +16,7 @@ provides=('qfind-gtk')
 conflicts=('qfind-gtk')
 options=('!strip')
 source=("qfind-$pkgver-x86_64.tar.zst::https://github.com/DerpcatMusic/qfind/releases/download/v$pkgver/qfind-$pkgver-x86_64.tar.zst")
-sha256sums=('043944f29565760168eebc2814c10840478e0a987f0f12607511473ad2f211f5')
+sha256sums=('8bfed7c47e0e7bb36c4fd6d1d30296499ff18917396c6bd7037e995447d93ce2')
 
 package() {
   cd "$srcdir"
