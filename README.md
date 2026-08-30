@@ -7,7 +7,13 @@ Fast filename search for Linux, with a keyboard-first TUI, GTK frontend, live pr
 [![Release](https://img.shields.io/github/v/release/DerpcatMusic/qfind?style=flat-square)](https://github.com/DerpcatMusic/qfind/releases/latest)
 [![License](https://img.shields.io/github/license/DerpcatMusic/qfind?style=flat-square)](LICENSE)
 
+[Features](#what-it-does) · [Install](#install) · [Controls](#tui-controls) · [Preview formats](#preview-support) · [Config](#config)
+
 </div>
+
+<p align="center">
+  <img src="docs/images/qfind-grid-preview.png" alt="Qfind grid search with image thumbnails and a large side Preview" width="920">
+</p>
 
 Qfind builds one memory-mapped Catalog at `~/.cache/qfind/catalog` from your local Mounts. Queries search filenames without walking the filesystem again. Rebuild reads `getdents64` entries in parallel and avoids a `stat` call for every file; metadata is loaded only when a Sort or Preview needs it.
 
@@ -136,6 +142,10 @@ The WeightMap follows the current Query or browsed folder. Size mode uses file b
 ## Config
 
 Press `F8` to edit appearance and Catalog visibility. Theme previews apply while moving through the list; confirmation is not required. Hidden-file and ignore-rule changes rerun the current Query immediately.
+
+<p align="center">
+  <img src="docs/images/qfind-settings.png" alt="Qfind Settings panel" width="640">
+</p>
 
 Config is stored at `~/.config/qfind/config.toml` or `$XDG_CONFIG_HOME/qfind/config.toml`:
 
