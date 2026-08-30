@@ -2,7 +2,7 @@
 
 # Qfind
 
-Fast filename search for Linux, with a keyboard-first TUI, GTK frontend, live previews, a folder browser, and an interactive WeightMap.
+instant filename search for Linux, with a keyboard-first TUI, GTK frontend, live previews, a folder browser, and an interactive WeightMap.
 
 [![Release](https://img.shields.io/github/v/release/DerpcatMusic/qfind?style=flat-square)](https://github.com/DerpcatMusic/qfind/releases/latest)
 [![License](https://img.shields.io/github/license/DerpcatMusic/qfind?style=flat-square)](LICENSE)
