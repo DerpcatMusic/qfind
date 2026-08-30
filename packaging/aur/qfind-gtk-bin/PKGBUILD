@@ -1,6 +1,6 @@
 # Maintainer: Derpcat <https://github.com/DerpcatMusic>
 pkgname=qfind-gtk-bin
-pkgver=0.1.1
+pkgver=0.1.2
 pkgrel=1
 pkgdesc="Instant filename search (prebuilt GTK, x86_64)"
 arch=('x86_64')

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gtk::prelude::*;
-use qfind_core::{Config, MatchMode, PreviewMode, Zoom};
+use qfind_core::{Config, MatchMode, OpenMode, PreviewMode, Zoom};
 
 pub struct Live {
     pub zoom: Rc<Cell<Zoom>>,
@@ -27,7 +27,10 @@ pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
         .modal(true)
         .build();
 
-    let exclude = list_editor("Exclude (names or globs, extra junk skipped on Rebuild)", &cfg.exclude);
+    let exclude = list_editor(
+        "Exclude (names or globs, extra junk skipped on Rebuild)",
+        &cfg.exclude,
+    );
     let include = list_editor(
         "Include Mounts (empty = discover all local disks)",
         &cfg.include
@@ -46,7 +49,8 @@ pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
     compact.set_hexpand(true);
     compact.set_tooltip_text(Some("Default Zoom (Ctrl+scroll still works in the list)"));
 
-    let preview_drop = gtk::DropDown::from_strings(&["Hovered Hit (Space)", "Selected Hit (Space)"]);
+    let preview_drop =
+        gtk::DropDown::from_strings(&["Hovered Hit (Space)", "Selected Hit (Space)"]);
     preview_drop.set_selected(match cfg.preview {
         PreviewMode::Hovered => 0,
         PreviewMode::Selected => 1,
@@ -64,6 +68,22 @@ pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
         MatchMode::Substring => 1,
         MatchMode::Exact => 2,
     });
+    let open_drop = gtk::DropDown::from_strings(&[
+        "Auto (EDITOR for text, desktop otherwise)",
+        "Desktop handler (xdg / MIME)",
+        "Editor ($EDITOR / $VISUAL)",
+    ]);
+    open_drop.set_tooltip_text(Some(
+        "Auto uses $EDITOR or $VISUAL for source and config files. Folders and media stay with the desktop handler.",
+    ));
+    open_drop.set_selected(match cfg.open {
+        OpenMode::Auto => 0,
+        OpenMode::Xdg => 1,
+        OpenMode::Editor => 2,
+    });
+    let editor_entry = gtk::Entry::new();
+    editor_entry.set_placeholder_text(Some("$EDITOR then $VISUAL"));
+    editor_entry.set_text(&cfg.editor);
 
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 10);
     vbox.set_margin_start(14);
@@ -80,6 +100,10 @@ pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
     vbox.append(&preview_drop);
     vbox.append(&label("Query matching"));
     vbox.append(&match_drop);
+    vbox.append(&label("Open Hits"));
+    vbox.append(&open_drop);
+    vbox.append(&label("Editor (empty = EDITOR, then VISUAL)"));
+    vbox.append(&editor_entry);
 
     let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     buttons.set_halign(gtk::Align::End);
@@ -106,9 +130,11 @@ pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
         let compact = compact.clone();
         let preview_drop = preview_drop.clone();
         let match_drop = match_drop.clone();
+        let open_drop = open_drop.clone();
+        let editor_entry = editor_entry.clone();
         let win = win.clone();
         save.connect_clicked(move |_| {
-            let mut cfg = Config::default();
+            let mut cfg = Config::load();
             cfg.exclude = exclude.items();
             cfg.include = include
                 .items()
@@ -130,6 +156,12 @@ pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
                 2 => MatchMode::Exact,
                 _ => MatchMode::Fuzzy,
             };
+            cfg.open = match open_drop.selected() {
+                1 => OpenMode::Xdg,
+                2 => OpenMode::Editor,
+                _ => OpenMode::Auto,
+            };
+            cfg.editor = editor_entry.text().to_string();
             let _ = cfg.save();
             live.zoom.set(Zoom::new(cfg.zoom));
             live.spacing.set(cfg.spacing);
@@ -146,6 +178,8 @@ pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
         let compact = compact.clone();
         let preview_drop = preview_drop.clone();
         let match_drop = match_drop.clone();
+        let open_drop = open_drop.clone();
+        let editor_entry = editor_entry.clone();
         reset.connect_clicked(move |_| {
             let cfg = Config::default();
             exclude.set_items(&cfg.exclude);
@@ -154,6 +188,8 @@ pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
             compact.set_value(f64::from(cfg.zoom));
             preview_drop.set_selected(0);
             match_drop.set_selected(0);
+            open_drop.set_selected(0);
+            editor_entry.set_text("");
         });
     }
 

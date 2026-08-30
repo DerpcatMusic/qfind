@@ -62,8 +62,12 @@ Folder rectangles for the current Hits, sized by weight (size, else count). WizT
 _Avoid_: heatmap, disk map, treemap (in UI copy)
 
 **Config**:
-User settings: extra Exclude, include Mounts, Zoom, spacing, PreviewMode, zebra, WeightMap. `$XDG_CONFIG_HOME/qfind/config.toml`.
+User settings: extra Exclude, include Mounts, Zoom, spacing, PreviewMode, zebra, WeightMap, OpenMode, editor. `$XDG_CONFIG_HOME/qfind/config.toml`.
 _Avoid_: preferences, options dump
+
+**OpenMode**:
+How Enter opens a Hit: Auto (`$EDITOR`/`$VISUAL` for text, desktop handler otherwise), Xdg (always MIME default), Editor (always the editor).
+_Avoid_: launcher, handler (alone)
 
 **PreviewMode**:
 Space previews the hovered Hit or the selected Hit.

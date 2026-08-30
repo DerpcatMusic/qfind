@@ -134,10 +134,7 @@ pub(crate) fn date_cutoff(age: DateAge) -> Option<i64> {
         DateAge::Month => 86_400 * 30,
         DateAge::Year => 86_400 * 365,
     };
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()?
-        .as_secs() as i64;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs() as i64;
     Some(now.saturating_sub(secs))
 }
 
@@ -169,8 +166,8 @@ pub(crate) fn classify(name: &str) -> FileClass {
             FileClass::Audio
         }
         b"mp4" | b"mkv" | b"webm" | b"mov" | b"avi" | b"m4v" => FileClass::Video,
-        b"pdf" | b"doc" | b"docx" | b"odt" | b"txt" | b"md" | b"rtf" | b"xls" | b"xlsx" | b"ppt"
-        | b"pptx" | b"csv" => FileClass::Document,
+        b"pdf" | b"doc" | b"docx" | b"odt" | b"txt" | b"md" | b"rtf" | b"xls" | b"xlsx"
+        | b"ppt" | b"pptx" | b"csv" => FileClass::Document,
         b"zip" | b"tar" | b"gz" | b"bz2" | b"xz" | b"7z" | b"rar" | b"zst" => FileClass::Archive,
         _ => FileClass::All,
     }

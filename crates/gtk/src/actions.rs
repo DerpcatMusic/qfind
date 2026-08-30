@@ -6,12 +6,14 @@
 //! built-in window.
 
 use std::path::Path;
+use std::process::Command;
 
 use gtk::gdk;
 use gtk::gio;
 use gtk::glib;
 use gtk::glib::prelude::ToVariant;
 use gtk::prelude::*;
+use qfind_core::{Config, OpenHow};
 
 use crate::row::RowData;
 
@@ -29,6 +31,13 @@ pub fn selected_row(selection: &gtk::SingleSelection) -> Option<RowData> {
 }
 
 pub fn open(window: &impl IsA<gtk::Window>, path: &str) {
+    let cfg = Config::load();
+    let is_dir = Path::new(path).is_dir();
+    if let OpenHow::Editor { program, args } = cfg.open_how(Path::new(path), is_dir) {
+        if Command::new(&program).args(&args).arg(path).spawn().is_ok() {
+            return;
+        }
+    }
     let file = gio::File::for_path(path);
     let launcher = gtk::FileLauncher::new(Some(&file));
     launcher.launch(Some(window), None::<&gio::Cancellable>, |_| {});
@@ -164,7 +173,12 @@ fn file_manager1(method: &str, file: &gio::File) -> bool {
 fn builtin_preview(parent: &gtk::Window, path: &str) -> gtk::Window {
     let win = gtk::Window::builder()
         .transient_for(parent)
-        .title(Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or("Preview"))
+        .title(
+            Path::new(path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("Preview"),
+        )
         .default_width(780)
         .default_height(560)
         .build();
@@ -244,7 +258,9 @@ fn fallback_preview(path: &Path, ctype: &str) -> gtk::Box {
     name.add_css_class("title-2");
     let meta = gtk::Label::new(Some(&format!(
         "{ctype}  ·  {}",
-        path.parent().map(|p| p.display().to_string()).unwrap_or_default()
+        path.parent()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
     )));
     meta.add_css_class("dim-label");
     v.append(&icon);

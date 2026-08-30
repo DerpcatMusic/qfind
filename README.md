@@ -23,7 +23,7 @@ GTK GUI: `cargo build --release -p qfind-gtk`.
 Prebuilt x86_64 binaries (GitHub Releases):
 
 ```bash
-curl -L https://github.com/DerpcatMusic/qfind/releases/download/v0.1.1/qfind-0.1.1-x86_64.tar.zst | tar -C /tmp -x --zstd
+curl -L https://github.com/DerpcatMusic/qfind/releases/download/v0.1.2/qfind-0.1.2-x86_64.tar.zst | tar -C /tmp -x --zstd
 sudo install -Dm755 /tmp/qfind /tmp/qfind-tui -t /usr/local/bin
 # optional GUI:
 sudo install -Dm755 /tmp/qfind-gtk -t /usr/local/bin
@@ -98,7 +98,18 @@ The list is a virtual GTK4 ListView/GridView: bind does not `stat`, scrollbars s
 | `F3` | preview |
 | `F4` | tree |
 | `F6` | WeightMap |
+| `F8` | cycle skin (titanium, grok, catppuccin, gruvbox, dracula, nord, aurora) |
+| `Ctrl+E` | cycle open: auto / xdg / editor |
 | Ctrl+scroll, `+` / `-` | zoom |
 | `Ctrl+O` | show in Files |
 | `Ctrl+Y` | copy path |
 | Tab, `F2`, `Ctrl+D` | drag (`ripdrag`) |
+
+First launch plays a splash, then an animated setup while the Catalog Rebuilds. `theme` and `splash` live in `~/.config/qfind/config.toml`. `QFIND_NOSPLASH` skips the intro.
+
+Enter uses `$EDITOR` or `$VISUAL` for text (`.rs`, `.toml`, `.md`, …) and `xdg-open` for folders and media. Override in config:
+
+```toml
+open = "auto"      # auto | xdg | editor
+editor = "nvim"    # empty = $EDITOR, then $VISUAL
+```

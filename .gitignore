@@ -1,6 +1,6 @@
 /target
-pkg/
-src/
+/pkg/
+/src/
 *.pkg.tar.*
 *.tar.zst
 **/*.rs.bk

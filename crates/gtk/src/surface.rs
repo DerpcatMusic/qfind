@@ -10,8 +10,8 @@ use gtk::gio;
 use gtk::glib;
 use gtk::prelude::*;
 use qfind_core::{
-    folder_weights, fold_stems, split_filename, squarify, walk_visible, Catalog, HitRef, PreviewMode,
-    Surface, Tile, Zoom,
+    Catalog, HitRef, PreviewMode, Surface, Tile, Zoom, fold_stems, folder_weights, split_filename,
+    squarify, walk_visible,
 };
 
 use crate::actions::{preview, selected_row};
@@ -135,7 +135,11 @@ pub fn preview_path(
     }
 }
 
-pub fn attach_hover(row: &impl IsA<gtk::Widget>, item: gtk::ListItem, hovered: Rc<RefCell<Option<String>>>) {
+pub fn attach_hover(
+    row: &impl IsA<gtk::Widget>,
+    item: gtk::ListItem,
+    hovered: Rc<RefCell<Option<String>>>,
+) {
     let motion = gtk::EventControllerMotion::new();
     {
         let item = item.clone();
@@ -261,7 +265,12 @@ pub fn make_weight_area(tiles: Rc<RefCell<Vec<Tile>>>) -> gtk::DrawingArea {
         for (i, t) in tiles.iter().enumerate() {
             let (r, g, b) = tile_color(i, &t.path);
             cr.set_source_rgb(r, g, b);
-            cr.rectangle(t.x + 1.0, t.y + 1.0, (t.w - 2.0).max(0.0), (t.h - 2.0).max(0.0));
+            cr.rectangle(
+                t.x + 1.0,
+                t.y + 1.0,
+                (t.w - 2.0).max(0.0),
+                (t.h - 2.0).max(0.0),
+            );
             let _ = cr.fill();
             if t.w > 48.0 && t.h > 16.0 {
                 cr.set_source_rgb(0.95, 0.96, 0.94);
@@ -765,10 +774,8 @@ pub fn paint_icon(
     let gicon = cache
         .entry(key)
         .or_insert_with(|| {
-            let (ctype, _) = gio::content_type_guess(
-                Some(std::path::Path::new(&data.name())),
-                None::<&[u8]>,
-            );
+            let (ctype, _) =
+                gio::content_type_guess(Some(std::path::Path::new(&data.name())), None::<&[u8]>);
             gio::content_type_get_icon(&ctype)
         })
         .clone();

@@ -1,7 +1,7 @@
 # Maintainer: Derpcat <https://github.com/DerpcatMusic>
 pkgname=qfind-bin
-pkgver=0.1.1
-pkgrel=2
+pkgver=0.1.2
+pkgrel=1
 pkgdesc="Instant filename search (prebuilt CLI and TUI, x86_64)"
 arch=('x86_64')
 url="https://github.com/DerpcatMusic/qfind"

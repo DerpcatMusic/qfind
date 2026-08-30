@@ -2,7 +2,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::{mpsc, OnceLock};
+use std::sync::{OnceLock, mpsc};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
@@ -11,8 +11,8 @@ use gtk::gio;
 use gtk::glib;
 use gtk::prelude::*;
 use qfind_core::{
-    default_snapshot_path, Catalog, Config, DateAge, FileClass, MatchMode, Scope, SearchOpts, Sort,
-    Surface, Zoom,
+    Catalog, Config, DateAge, FileClass, MatchMode, Scope, SearchOpts, Sort, Surface, Zoom,
+    default_snapshot_path,
 };
 
 mod actions;
@@ -21,8 +21,8 @@ mod row;
 mod settings;
 mod surface;
 use actions::{
-    content_for_path, copy_name, copy_path, copy_uri, open, open_folder, open_with, preview, reveal,
-    selected_row,
+    content_for_path, copy_name, copy_path, copy_uri, open, open_folder, open_with, preview,
+    reveal, selected_row,
 };
 use model::HitModel;
 use row::RowData;
@@ -41,7 +41,9 @@ fn main() -> glib::ExitCode {
         .flags(gio::ApplicationFlags::NON_UNIQUE)
         .build();
     app.connect_activate(build_ui);
-    let argv = [std::env::args().next().unwrap_or_else(|| "qfind-gtk".into())];
+    let argv = [std::env::args()
+        .next()
+        .unwrap_or_else(|| "qfind-gtk".into())];
     app.run_with_args(&argv)
 }
 
@@ -205,7 +207,6 @@ fn build_ui(app: &gtk::Application) {
     let hovered: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let icons: Rc<RefCell<HashMap<String, gio::Icon>>> = Rc::new(RefCell::new(HashMap::new()));
 
-
     let menu = hit_menu();
     let popover = gtk::PopoverMenu::from_model(Some(&menu));
     popover.set_has_arrow(false);
@@ -293,57 +294,58 @@ fn build_ui(app: &gtk::Application) {
     let mut else_list = None;
     let mut here_label = None;
     let mut else_label = None;
-    let list_page: gtk::Widget = if let (Some(root), Some(em)) = (QFIND_ROOT.get(), else_model.as_ref()) {
-        let else_sel = gtk::SingleSelection::new(Some(em.clone()));
-        let else_factory = surface::make_list_factory(
-            else_sel.clone(),
-            popover.clone(),
-            Rc::clone(&hovered),
-            Rc::clone(&zebra),
-            Rc::clone(&zoom),
-            Rc::clone(&spacing),
-            Rc::clone(&icons),
-        );
-        let elist = gtk::ListView::new(Some(else_sel.clone()), Some(else_factory));
-        elist.set_vexpand(true);
-        let win_else = window.clone();
-        let else_sel_open = else_sel.clone();
-        elist.connect_activate(move |_, _| {
-            if let Some(data) = else_sel_open.selected_item().and_downcast::<RowData>() {
-                open(&win_else, &data.path());
-            }
-        });
-        let hl = gtk::Label::new(Some(&format!("In {}", root.display())));
-        hl.set_xalign(0.0);
-        hl.add_css_class("heading");
-        hl.set_margin_start(10);
-        hl.set_margin_top(6);
-        let el = gtk::Label::new(Some("Elsewhere"));
-        el.set_xalign(0.0);
-        el.add_css_class("heading");
-        el.set_margin_start(10);
-        el.set_margin_top(6);
-        let top = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        top.append(&hl);
-        top.append(&list_scroll);
-        let bot = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        bot.append(&el);
-        bot.append(&flick_scroll(&elist));
-        let paned = gtk::Paned::new(gtk::Orientation::Vertical);
-        paned.set_start_child(Some(&top));
-        paned.set_end_child(Some(&bot));
-        paned.set_resize_start_child(true);
-        paned.set_resize_end_child(true);
-        paned.set_wide_handle(true);
-        paned.set_position(280);
-        paned.set_vexpand(true);
-        here_label = Some(hl);
-        else_label = Some(el);
-        else_list = Some(elist);
-        paned.upcast()
-    } else {
-        list_scroll.clone().upcast()
-    };
+    let list_page: gtk::Widget =
+        if let (Some(root), Some(em)) = (QFIND_ROOT.get(), else_model.as_ref()) {
+            let else_sel = gtk::SingleSelection::new(Some(em.clone()));
+            let else_factory = surface::make_list_factory(
+                else_sel.clone(),
+                popover.clone(),
+                Rc::clone(&hovered),
+                Rc::clone(&zebra),
+                Rc::clone(&zoom),
+                Rc::clone(&spacing),
+                Rc::clone(&icons),
+            );
+            let elist = gtk::ListView::new(Some(else_sel.clone()), Some(else_factory));
+            elist.set_vexpand(true);
+            let win_else = window.clone();
+            let else_sel_open = else_sel.clone();
+            elist.connect_activate(move |_, _| {
+                if let Some(data) = else_sel_open.selected_item().and_downcast::<RowData>() {
+                    open(&win_else, &data.path());
+                }
+            });
+            let hl = gtk::Label::new(Some(&format!("In {}", root.display())));
+            hl.set_xalign(0.0);
+            hl.add_css_class("heading");
+            hl.set_margin_start(10);
+            hl.set_margin_top(6);
+            let el = gtk::Label::new(Some("Elsewhere"));
+            el.set_xalign(0.0);
+            el.add_css_class("heading");
+            el.set_margin_start(10);
+            el.set_margin_top(6);
+            let top = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            top.append(&hl);
+            top.append(&list_scroll);
+            let bot = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            bot.append(&el);
+            bot.append(&flick_scroll(&elist));
+            let paned = gtk::Paned::new(gtk::Orientation::Vertical);
+            paned.set_start_child(Some(&top));
+            paned.set_end_child(Some(&bot));
+            paned.set_resize_start_child(true);
+            paned.set_resize_end_child(true);
+            paned.set_wide_handle(true);
+            paned.set_position(280);
+            paned.set_vexpand(true);
+            here_label = Some(hl);
+            else_label = Some(el);
+            else_list = Some(elist);
+            paned.upcast()
+        } else {
+            list_scroll.clone().upcast()
+        };
 
     stack.add_named(&list_page, Some("list"));
     stack.add_named(&grid_scroll, Some("grid"));
@@ -608,7 +610,10 @@ fn build_ui(app: &gtk::Application) {
                     Surface::Auto
                 });
                 host.apply();
-                if let (Some(c), ids) = (state.borrow().catalog.clone(), state.borrow().last_ids.clone()) {
+                if let (Some(c), ids) = (
+                    state.borrow().catalog.clone(),
+                    state.borrow().last_ids.clone(),
+                ) {
                     surface::rebuild_tree(host, &c, &ids);
                 }
             }
@@ -696,20 +701,14 @@ fn install_actions(
     };
 
     let win = window.clone();
-    add(
-        "open",
-        Box::new(move |row| open(&win, &row.path())),
-    );
+    add("open", Box::new(move |row| open(&win, &row.path())));
     let win = window.clone();
     add(
         "open-with",
         Box::new(move |row| open_with(&win, &row.path())),
     );
     let win = window.clone();
-    add(
-        "reveal",
-        Box::new(move |row| reveal(&win, &row.path())),
-    );
+    add("reveal", Box::new(move |row| reveal(&win, &row.path())));
     let win = window.clone();
     add(
         "open-folder",

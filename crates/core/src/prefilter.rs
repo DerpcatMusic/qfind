@@ -153,12 +153,17 @@ mod tests {
         let need = needle_mask(&["hlo"]);
         assert_eq!(mask_name(b"hello") & need, need);
         assert_ne!(mask_name(b"ho") & need, need);
-        assert_eq!(mask_name(b"mp3") & needle_mask(&["mp3"]), needle_mask(&["mp3"]));
+        assert_eq!(
+            mask_name(b"mp3") & needle_mask(&["mp3"]),
+            needle_mask(&["mp3"])
+        );
     }
 
     #[test]
     fn scan_matches_scalar_at_boundaries() {
-        for &len in &[0usize, 1, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65] {
+        for &len in &[
+            0usize, 1, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65,
+        ] {
             let mut masks = vec![0u64; len];
             for (i, slot) in masks.iter_mut().enumerate() {
                 *slot = if i % 3 == 0 {

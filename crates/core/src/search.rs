@@ -7,9 +7,7 @@ use rayon::prelude::*;
 
 use crate::error::{Error, Result};
 use crate::prefilter;
-use crate::query::{
-    class_matches, date_cutoff, date_matches, MatchMode, Scope, SearchOpts, Sort,
-};
+use crate::query::{MatchMode, Scope, SearchOpts, Sort, class_matches, date_cutoff, date_matches};
 use crate::snapshot::Snapshot;
 
 pub(crate) struct Ranked {
@@ -118,12 +116,18 @@ const STAT_CAP: usize = 20_000;
 fn compile_pattern(text: &str, mode: MatchMode) -> Pattern {
     match mode {
         MatchMode::Fuzzy => Pattern::parse(text, CaseMatching::Ignore, Normalization::Smart),
-        MatchMode::Substring => {
-            Pattern::new(text, CaseMatching::Ignore, Normalization::Smart, AtomKind::Substring)
-        }
-        MatchMode::Exact => {
-            Pattern::new(text, CaseMatching::Ignore, Normalization::Smart, AtomKind::Exact)
-        }
+        MatchMode::Substring => Pattern::new(
+            text,
+            CaseMatching::Ignore,
+            Normalization::Smart,
+            AtomKind::Substring,
+        ),
+        MatchMode::Exact => Pattern::new(
+            text,
+            CaseMatching::Ignore,
+            Normalization::Smart,
+            AtomKind::Exact,
+        ),
     }
 }
 
@@ -201,12 +205,12 @@ fn apply_sort(snapshot: &Snapshot, scored: &mut Vec<(u32, u32)>, opts: SearchOpt
     match opts.sort {
         // Stable on ties so empty Query can keep files-first insertion order.
         Sort::Score => scored.sort_by(|a, b| b.0.cmp(&a.0)),
-        Sort::Name => scored.sort_unstable_by(|a, b| {
-            cmp_name(snapshot, a.1, b.1).then(a.1.cmp(&b.1))
-        }),
-        Sort::NameDesc => scored.sort_unstable_by(|a, b| {
-            cmp_name(snapshot, b.1, a.1).then(a.1.cmp(&b.1))
-        }),
+        Sort::Name => {
+            scored.sort_unstable_by(|a, b| cmp_name(snapshot, a.1, b.1).then(a.1.cmp(&b.1)))
+        }
+        Sort::NameDesc => {
+            scored.sort_unstable_by(|a, b| cmp_name(snapshot, b.1, a.1).then(a.1.cmp(&b.1)))
+        }
         Sort::Newest | Sort::Oldest | Sort::Largest | Sort::Smallest => {
             if scored.len() > STAT_CAP {
                 scored.sort_unstable_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));

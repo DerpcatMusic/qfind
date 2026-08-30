@@ -9,4 +9,4 @@ mod zoom;
 
 pub use tree::{Flat, HitRef, Stem, fold_stems, walk_visible};
 pub use treemap::{Tile, Weighted, folder_weights, squarify};
-pub use zoom::{split_filename, Surface, Zoom};
+pub use zoom::{Surface, Zoom, split_filename};

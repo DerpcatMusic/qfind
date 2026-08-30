@@ -1,11 +1,11 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
+use gio::subclass::prelude::ListModelImpl;
 use gtk::gio;
 use gtk::glib;
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
-use gio::subclass::prelude::ListModelImpl;
 use qfind_core::Catalog;
 
 use crate::row::RowData;

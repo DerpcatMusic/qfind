@@ -12,8 +12,8 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use qfind_core::{
-    Catalog, Config, DateAge, FileClass, Hit, HitRef, MatchMode, Scope, SearchOpts, Sort, Surface,
-    Zoom, default_snapshot_path, folder_weights, squarify,
+    Catalog, Config, DateAge, FileClass, Hit, HitRef, MatchMode, OpenHow, OpenMode, Scope,
+    SearchOpts, Sort, Surface, Zoom, default_snapshot_path, folder_weights, squarify,
 };
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
@@ -23,10 +23,11 @@ use ratatui::widgets::{
 };
 use ratatui::{DefaultTerminal, Frame};
 
+mod splash;
 mod theme;
 use theme::{
-    ACCENT, BG, Chip, DIM, MATCH, PINK, PURPLE, SELECT_BG, SKY, SURFACE, TEXT, ZEBRA, chip,
-    compact, fit_chips, hsl_tile, icon_file, icon_folder, icon_prompt, powerline,
+    Chip, Theme, chip, compact, fit_chips, hsl_tile, icon_file, icon_folder, icon_prompt,
+    powerline, spin_frame,
 };
 
 const MAX_ROWS: usize = 2_000;
@@ -34,19 +35,24 @@ const MAX_ROWS: usize = 2_000;
 /// Open the Qfind TUI. Rebuilds the Catalog on first launch if missing.
 pub fn run() -> Result<()> {
     let snapshot = default_snapshot_path();
-    let catalog = if snapshot.exists() {
-        Catalog::open(&snapshot).with_context(|| format!("open {}", snapshot.display()))?
-    } else {
-        eprintln!("first launch: rebuilding Catalog (this can take a minute)…");
-        Catalog::rebuild(qfind_core::Rebuild::new(&snapshot))
-            .with_context(|| format!("rebuild {}", snapshot.display()))?
-    };
-    let warm = catalog.clone();
-    thread::spawn(move || warm.warm());
-    let mut app = App::new(catalog);
+    let cfg = Config::load();
+    let theme = Theme::parse(&cfg.theme);
     let mut terminal = ratatui::init();
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
-    let result = event_loop(&mut terminal, &mut app);
+    let result = (|| {
+        if cfg.splash {
+            splash::play(&mut terminal, &theme)?;
+        }
+        let catalog = if snapshot.exists() {
+            Catalog::open(&snapshot).with_context(|| format!("open {}", snapshot.display()))?
+        } else {
+            splash::rebuild_catalog(&mut terminal, &theme, qfind_core::Rebuild::new(&snapshot))?
+        };
+        let warm = catalog.clone();
+        thread::spawn(move || warm.warm());
+        let mut app = App::new(catalog, theme);
+        event_loop(&mut terminal, &mut app)
+    })();
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     result
@@ -95,10 +101,14 @@ struct App {
     inbox: Option<mpsc::Receiver<SearchMsg>>,
     dirty: bool,
     last_edit: Instant,
+    theme: Theme,
+    t0: Instant,
+    open: OpenMode,
+    editor: String,
 }
 
 impl App {
-    fn new(catalog: Catalog) -> Self {
+    fn new(catalog: Catalog, theme: Theme) -> Self {
         let cfg = Config::load();
         Self {
             status: format!(
@@ -127,7 +137,27 @@ impl App {
             inbox: None,
             dirty: true,
             last_edit: Instant::now(),
+            theme,
+            t0: Instant::now(),
+            open: cfg.open,
+            editor: cfg.editor,
         }
+    }
+
+    fn cycle_theme(&mut self) {
+        self.theme = self.theme.next();
+        let mut cfg = Config::load();
+        cfg.theme = self.theme.id.into();
+        let _ = cfg.save();
+        self.status = format!("skin  {}", self.theme.id);
+    }
+
+    fn cycle_open(&mut self) {
+        self.open = self.open.cycle();
+        let mut cfg = Config::load();
+        cfg.open = self.open;
+        let _ = cfg.save();
+        self.status = format!("open  {}", self.open.as_str());
     }
 
     fn opts(&self) -> SearchOpts {
@@ -200,8 +230,27 @@ impl App {
             return;
         };
         let path = row.path.clone();
-        match Command::new("xdg-open").arg(&path).spawn() {
-            Ok(_) => self.status = format!("opened {}", path.display()),
+        let is_dir = row.is_dir;
+        let mut cfg = Config::load();
+        cfg.open = self.open;
+        cfg.editor.clone_from(&self.editor);
+        match cfg.open_how(&path, is_dir) {
+            OpenHow::Desktop => self.spawn_desktop(&path),
+            OpenHow::Editor { program, args } => {
+                match Command::new(&program).args(&args).arg(&path).spawn() {
+                    Ok(_) => self.status = format!("{program}  {}", path.display()),
+                    Err(err) => {
+                        self.status = format!("{program}: {err}");
+                        self.spawn_desktop(&path);
+                    }
+                }
+            }
+        }
+    }
+
+    fn spawn_desktop(&mut self, path: &std::path::Path) {
+        match Command::new("xdg-open").arg(path).spawn() {
+            Ok(_) => self.status = format!("xdg-open  {}", path.display()),
             Err(err) => self.status = format!("xdg-open: {err}"),
         }
     }
@@ -364,6 +413,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             };
         }
         KeyCode::F(6) => app.show_weight = !app.show_weight,
+        KeyCode::F(8) => app.cycle_theme(),
+        KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.cycle_open();
+        }
         KeyCode::Char('=') | KeyCode::Char('+')
             if key.modifiers.contains(KeyModifiers::CONTROL) =>
         {
@@ -504,7 +557,8 @@ fn class_label(class: FileClass) -> &'static str {
 
 fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
-    frame.render_widget(Block::default().style(Style::default().bg(BG)), area);
+    let th = app.theme;
+    frame.render_widget(Block::default().style(Style::default().bg(th.bg)), area);
 
     let chunks = if app.show_weight {
         Layout::default()
@@ -544,7 +598,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     if app.help {
-        draw_help(frame, area);
+        draw_help(frame, area, th);
     }
 }
 
@@ -559,25 +613,27 @@ fn surface_label(app: &App) -> &'static str {
 }
 
 fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
+    let th = app.theme;
+    let brand = th.shimmer(app.t0.elapsed(), 0);
     let mut chips = vec![
-        Chip::new("Qfind", BG, ACCENT),
+        Chip::new("Qfind", th.bg, brand),
         Chip::new(
             format!("{} files", compact(app.catalog.file_count())),
-            TEXT,
-            SURFACE,
+            th.text,
+            th.surface,
         ),
     ];
     if area.width >= 48 {
-        chips.push(Chip::new(app.match_mode.as_str(), BG, PINK));
+        chips.push(Chip::new(app.match_mode.as_str(), th.bg, th.pink));
     }
     if area.width >= 60 {
-        chips.push(Chip::new(sort_label(app.sort), BG, PURPLE));
+        chips.push(Chip::new(sort_label(app.sort), th.bg, th.purple));
     }
     if area.width >= 74 {
         chips.push(Chip::new(
             format!("{}% {}", app.zoom.get(), surface_label(app)),
-            TEXT,
-            SURFACE,
+            th.text,
+            th.surface,
         ));
     }
     if area.width >= 90 {
@@ -586,39 +642,54 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
         } else {
             "all"
         };
-        chips.push(Chip::new(scope, BG, SKY));
+        chips.push(Chip::new(scope, th.bg, th.sky));
     }
     if area.width >= 104 && app.class != FileClass::All {
-        chips.push(Chip::new(class_label(app.class), TEXT, SURFACE));
+        chips.push(Chip::new(class_label(app.class), th.text, th.surface));
+    }
+    if area.width >= 118 {
+        chips.push(Chip::new(th.id, th.bg, th.border));
     }
     let chips = fit_chips(chips, area.width);
-    frame.render_widget(Paragraph::new(powerline(&chips, area.width, BG)), area);
+    frame.render_widget(Paragraph::new(powerline(&chips, area.width, th.bg)), area);
 }
 
 fn draw_prompt(frame: &mut Frame, area: Rect, app: &App) {
+    let th = app.theme;
+    let blink = (app.t0.elapsed().as_millis() / 450).is_multiple_of(2);
+    let cursor = if blink { "█" } else { " " };
+    let spin = if app.inbox.is_some() {
+        format!(" {} ", spin_frame(app.t0.elapsed()))
+    } else {
+        format!(" {}  ", icon_prompt())
+    };
     let line = Line::from(vec![
         Span::styled(
-            format!(" {}  ", icon_prompt()),
+            spin,
             Style::new()
-                .fg(ACCENT)
-                .bg(SURFACE)
+                .fg(th.accent)
+                .bg(th.surface)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(app.query.clone(), Style::new().fg(TEXT).bg(SURFACE)),
+        Span::styled(app.query.clone(), Style::new().fg(th.text).bg(th.surface)),
         Span::styled(
-            "█",
+            cursor,
             Style::new()
-                .fg(ACCENT)
-                .bg(SURFACE)
+                .fg(th.shimmer(app.t0.elapsed(), 2))
+                .bg(th.surface)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" ", Style::new().bg(SURFACE)),
+        Span::styled(" ", Style::new().bg(th.surface)),
     ]);
-    frame.render_widget(Paragraph::new(line).style(Style::new().bg(SURFACE)), area);
+    frame.render_widget(
+        Paragraph::new(line).style(Style::new().bg(th.surface)),
+        area,
+    );
 }
 
 fn draw_list(frame: &mut Frame, area: Rect, app: &mut App) {
-    frame.render_widget(Block::default().style(Style::new().bg(BG)), area);
+    let th = app.theme;
+    frame.render_widget(Block::default().style(Style::new().bg(th.bg)), area);
     app.hits_area = area;
     let height = area.height as usize;
     let mut start = 0usize;
@@ -632,17 +703,24 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &mut App) {
         let idx = start + i;
         let selected = idx == app.selected;
         let zebra = app.zebra && idx % 2 == 1;
-        lines.push(row_line(row, selected, zebra, area.width));
+        lines.push(row_line(
+            row,
+            selected,
+            zebra,
+            area.width,
+            th,
+            app.t0.elapsed(),
+        ));
     }
-    frame.render_widget(Paragraph::new(lines).style(Style::new().bg(BG)), area);
+    frame.render_widget(Paragraph::new(lines).style(Style::new().bg(th.bg)), area);
 
     if app.rows.len() > height {
         let mut state =
             ScrollbarState::new(app.rows.len().saturating_sub(1)).position(app.selected);
         frame.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .style(Style::new().fg(DIM))
-                .thumb_style(Style::new().fg(ACCENT)),
+                .style(Style::new().fg(th.dim))
+                .thumb_style(Style::new().fg(th.accent)),
             area,
             &mut state,
         );
@@ -650,7 +728,8 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn draw_grid(frame: &mut Frame, area: Rect, app: &mut App) {
-    frame.render_widget(Block::default().style(Style::new().bg(BG)), area);
+    let th = app.theme;
+    frame.render_widget(Block::default().style(Style::new().bg(th.bg)), area);
     let cell_w = (12 + u16::from(app.zoom.get()) / 5).max(10);
     let cell_h = (2 + u16::from(app.zoom.get().saturating_sub(40)) / 20).max(2);
     app.hits_area = area;
@@ -676,11 +755,11 @@ fn draw_grid(frame: &mut Frame, area: Rect, app: &mut App) {
             icon_file()
         };
         let (fg, bg) = if selected {
-            (ACCENT, SELECT_BG)
+            (th.accent, th.pulse(app.t0.elapsed()))
         } else if row.is_dir {
-            (ACCENT, hsl_tile(&row.name, i, 0.58, 0.18))
+            (th.accent, hsl_tile(&row.name, i, 0.58, 0.18))
         } else {
-            (TEXT, hsl_tile(&row.name, i, 0.52, 0.14))
+            (th.text, hsl_tile(&row.name, i, 0.52, 0.14))
         };
         let label = if selected {
             format!("{} {icon} {}", theme::BAR, row.name)
@@ -712,7 +791,8 @@ fn draw_tree(frame: &mut Frame, area: Rect, app: &mut App) {
         .collect();
     let stems = fold_stems(&items);
     let flat = walk_visible(&stems, &|_| true);
-    frame.render_widget(Block::default().style(Style::new().bg(BG)), area);
+    let th = app.theme;
+    frame.render_widget(Block::default().style(Style::new().bg(th.bg)), area);
     app.hits_area = area;
     app.list_start = 0;
     let lines: Vec<Line> = flat
@@ -738,17 +818,18 @@ fn draw_tree(frame: &mut Frame, area: Rect, app: &mut App) {
             Line::from(Span::styled(
                 format!("{pad}{mark} {label}"),
                 if f.stem.is_dir {
-                    Style::new().fg(ACCENT).bg(BG)
+                    Style::new().fg(th.accent).bg(th.bg)
                 } else {
-                    Style::new().fg(TEXT).bg(BG)
+                    Style::new().fg(th.text).bg(th.bg)
                 },
             ))
         })
         .collect();
-    frame.render_widget(Paragraph::new(lines).style(Style::new().bg(BG)), area);
+    frame.render_widget(Paragraph::new(lines).style(Style::new().bg(th.bg)), area);
 }
 
 fn draw_weight(frame: &mut Frame, area: Rect, app: &App) {
+    let th = app.theme;
     let items: Vec<HitRef> = app
         .rows
         .iter()
@@ -768,9 +849,9 @@ fn draw_weight(frame: &mut Frame, area: Rect, app: &App) {
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::new().fg(DIM))
-            .style(Style::new().bg(BG))
-            .title(chip("WeightMap", BG, ACCENT)),
+            .border_style(Style::new().fg(th.dim))
+            .style(Style::new().bg(th.bg))
+            .title(chip("WeightMap", th.bg, th.accent)),
         area,
     );
     if folders.is_empty() {
@@ -789,24 +870,35 @@ fn draw_weight(frame: &mut Frame, area: Rect, app: &App) {
         let h = h.min(inner.y + inner.height - y);
         let bg = hsl_tile(&t.name, i, 0.72, 0.30);
         frame.render_widget(
-            Paragraph::new(t.name).style(Style::new().bg(bg).fg(TEXT).add_modifier(Modifier::BOLD)),
+            Paragraph::new(t.name)
+                .style(Style::new().bg(bg).fg(th.text).add_modifier(Modifier::BOLD)),
             Rect::new(x, y, w, h),
         );
     }
 }
 
-fn row_line(row: &Row, selected: bool, zebra: bool, width: u16) -> Line<'static> {
+fn row_line(
+    row: &Row,
+    selected: bool,
+    zebra: bool,
+    width: u16,
+    th: Theme,
+    t: Duration,
+) -> Line<'static> {
     let bg = if selected {
-        SELECT_BG
+        th.pulse(t)
     } else if zebra {
-        ZEBRA
+        th.zebra
     } else {
-        BG
+        th.bg
     };
     let bar = if selected {
         Span::styled(
             format!("{} ", theme::BAR),
-            Style::new().fg(ACCENT).bg(bg).add_modifier(Modifier::BOLD),
+            Style::new()
+                .fg(th.accent)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD),
         )
     } else {
         Span::styled("  ", Style::new().bg(bg))
@@ -819,11 +911,11 @@ fn row_line(row: &Row, selected: bool, zebra: bool, width: u16) -> Line<'static>
     let icon = Span::styled(
         format!("{glyph} "),
         Style::new()
-            .fg(if row.is_dir { ACCENT } else { DIM })
+            .fg(if row.is_dir { th.accent } else { th.dim })
             .bg(bg),
     );
     let mut spans = vec![bar, icon];
-    spans.extend(highlight_chars(&row.name, &row.indices, bg));
+    spans.extend(highlight_chars(&row.name, &row.indices, bg, th));
     let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
     let path = row.path.display().to_string();
     let remain = (width as usize).saturating_sub(used + 1);
@@ -837,7 +929,7 @@ fn row_line(row: &Row, selected: bool, zebra: bool, width: u16) -> Line<'static>
         format!(" {path}")
     };
     let shown_cols = shown.chars().count();
-    spans.push(Span::styled(shown, Style::new().fg(DIM).bg(bg)));
+    spans.push(Span::styled(shown, Style::new().fg(th.dim).bg(bg)));
     let pad = (width as usize).saturating_sub(used + shown_cols);
     if pad > 0 {
         spans.push(Span::styled(" ".repeat(pad), Style::new().bg(bg)));
@@ -845,16 +937,24 @@ fn row_line(row: &Row, selected: bool, zebra: bool, width: u16) -> Line<'static>
     Line::from(spans)
 }
 
-fn highlight_chars(name: &str, indices: &[u32], bg: ratatui::style::Color) -> Vec<Span<'static>> {
+fn highlight_chars(
+    name: &str,
+    indices: &[u32],
+    bg: ratatui::style::Color,
+    th: Theme,
+) -> Vec<Span<'static>> {
     let set: HashSet<u32> = indices.iter().copied().collect();
     name.chars()
         .enumerate()
         .map(|(i, ch)| {
             let matched = set.contains(&(i as u32));
             let style = if matched {
-                Style::new().bg(bg).fg(MATCH).add_modifier(Modifier::BOLD)
+                Style::new()
+                    .bg(bg)
+                    .fg(th.match_fg)
+                    .add_modifier(Modifier::BOLD)
             } else {
-                Style::new().bg(bg).fg(TEXT)
+                Style::new().bg(bg).fg(th.text)
             };
             Span::styled(ch.to_string(), style)
         })
@@ -862,7 +962,12 @@ fn highlight_chars(name: &str, indices: &[u32], bg: ratatui::style::Color) -> Ve
 }
 
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
-    let status = format!(" {} ", app.status);
+    let th = app.theme;
+    let status = if app.inbox.is_some() {
+        format!(" {} searching… ", spin_frame(app.t0.elapsed()))
+    } else {
+        format!(" {} ", app.status)
+    };
     let sw = (status.chars().count() as u16)
         .min(area.width.saturating_sub(8))
         .max(1);
@@ -871,102 +976,110 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         .constraints([Constraint::Min(8), Constraint::Length(sw)])
         .split(area);
     let chips = if app.dragging {
-        vec![Chip::new("dragging… drop on a window", BG, MATCH)]
+        vec![Chip::new("dragging… drop on a window", th.bg, th.match_fg)]
     } else {
         vec![
-            Chip::new("↑↓ nav", TEXT, SURFACE),
-            Chip::new("⏎ open", BG, ACCENT),
-            Chip::new("F3 preview", TEXT, SURFACE),
-            Chip::new("F4 tree", BG, SKY),
-            Chip::new("F6 weight", TEXT, SURFACE),
-            Chip::new("? help", BG, PURPLE),
+            Chip::new("↑↓ nav", th.text, th.surface),
+            Chip::new("⏎ open", th.bg, th.accent),
+            Chip::new("F3 preview", th.text, th.surface),
+            Chip::new("F4 tree", th.bg, th.sky),
+            Chip::new("F8 skin", th.bg, th.pink),
+            Chip::new("? help", th.bg, th.purple),
         ]
     };
     let chips = fit_chips(chips, split[0].width);
     frame.render_widget(
-        Paragraph::new(powerline(&chips, split[0].width, BG)),
+        Paragraph::new(powerline(&chips, split[0].width, th.bg)),
         split[0],
     );
     frame.render_widget(
-        Paragraph::new(Span::styled(status, Style::new().fg(DIM).bg(BG)))
+        Paragraph::new(Span::styled(status, Style::new().fg(th.dim).bg(th.bg)))
             .alignment(Alignment::Right)
-            .style(Style::new().bg(BG)),
+            .style(Style::new().bg(th.bg)),
         split[1],
     );
 }
 
-fn draw_help(frame: &mut Frame, area: Rect) {
+fn draw_help(frame: &mut Frame, area: Rect, th: Theme) {
     let w = 62.min(area.width.saturating_sub(6));
-    let h = 18.min(area.height.saturating_sub(4));
+    let h = 20.min(area.height.saturating_sub(4));
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
     let popup = Rect::new(x, y, w, h);
     frame.render_widget(Clear, popup);
-    let dim = Style::new().fg(DIM).bg(SURFACE);
-    let txt = Style::new().fg(TEXT).bg(SURFACE);
+    let dim = Style::new().fg(th.dim).bg(th.surface);
+    let txt = Style::new().fg(th.text).bg(th.surface);
     let text = vec![
         Line::from(vec![
-            chip("keys", BG, ACCENT),
+            chip("keys", th.bg, th.accent),
             Span::styled("  same bindings  ", dim),
         ]),
         Line::from(""),
         Line::from(vec![
-            chip("type", BG, ACCENT),
+            chip("type", th.bg, th.accent),
             Span::styled(" query   ", txt),
-            chip("^m", BG, PINK),
+            chip("^m", th.bg, th.pink),
             Span::styled(" fuzzy / substring / exact", txt),
         ]),
         Line::from(vec![
-            chip("*.wav", TEXT, SURFACE),
+            chip("*.wav", th.text, th.surface),
             Span::styled(" glob token", dim),
         ]),
         Line::from(vec![
-            chip("tab", BG, MATCH),
-            chip("F2", BG, MATCH),
-            chip("^d", BG, MATCH),
+            chip("tab", th.bg, th.match_fg),
+            chip("F2", th.bg, th.match_fg),
+            chip("^d", th.bg, th.match_fg),
             Span::styled(" drag selected", txt),
         ]),
         Line::from(vec![
-            chip("^f", BG, SKY),
+            chip("^f", th.bg, th.sky),
             Span::styled(" folders only   ", txt),
-            chip("^s", BG, PURPLE),
+            chip("^s", th.bg, th.purple),
             Span::styled(" sort   ", txt),
-            chip("^t", TEXT, SURFACE),
+            chip("^t", th.text, th.surface),
             Span::styled(" type", txt),
         ]),
         Line::from(vec![
-            chip("F3", TEXT, SURFACE),
+            chip("F3", th.text, th.surface),
             Span::styled(" preview   ", txt),
-            chip("^o", TEXT, SURFACE),
+            chip("^o", th.text, th.surface),
             Span::styled(" files   ", txt),
-            chip("^y", TEXT, SURFACE),
+            chip("^y", th.text, th.surface),
             Span::styled(" copy", txt),
         ]),
         Line::from(vec![
-            chip("F4", BG, SKY),
+            chip("F4", th.bg, th.sky),
             Span::styled(" tree   ", txt),
-            chip("F6", TEXT, SURFACE),
+            chip("F6", th.text, th.surface),
             Span::styled(" weight   ", txt),
-            chip("^z", TEXT, SURFACE),
+            chip("^z", th.text, th.surface),
             Span::styled(" zebra", txt),
         ]),
         Line::from(vec![
-            chip("⏎", BG, ACCENT),
-            Span::styled(" open   ", txt),
-            chip("esc", TEXT, SURFACE),
+            chip("F8", th.bg, th.pink),
+            Span::styled(" cycle skin   ", txt),
+            chip("^e", th.bg, th.sky),
+            Span::styled(" open auto/xdg/editor", txt),
+        ]),
+        Line::from(vec![
+            chip("esc", th.text, th.surface),
             Span::styled(" quit", txt),
+        ]),
+        Line::from(vec![
+            chip("⏎", th.bg, th.accent),
+            Span::styled(" open", txt),
         ]),
     ];
     frame.render_widget(
         Paragraph::new(text)
-            .style(Style::new().fg(TEXT).bg(SURFACE))
+            .style(Style::new().fg(th.text).bg(th.surface))
             .block(
                 Block::default()
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
-                    .border_style(Style::new().fg(ACCENT))
-                    .style(Style::new().bg(SURFACE))
-                    .title(chip("help", BG, ACCENT)),
+                    .border_style(Style::new().fg(th.accent))
+                    .style(Style::new().bg(th.surface))
+                    .title(chip("help", th.bg, th.accent)),
             ),
         popup,
     );

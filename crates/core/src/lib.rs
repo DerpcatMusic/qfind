@@ -15,10 +15,10 @@ mod view;
 mod walk;
 
 pub use catalog::{Catalog, Hit, Hits, Rebuild, default_snapshot_path};
-pub use config::{Config, PreviewMode};
+pub use config::{Config, OpenHow, OpenMode, PreviewMode, is_text_path};
 pub use error::{Error, Result};
 pub use query::{DateAge, FileClass, MatchMode, Scope, SearchOpts, Sort};
 pub use view::{
-    Flat, HitRef, Stem, Surface, Tile, Weighted, Zoom, folder_weights, fold_stems, split_filename,
+    Flat, HitRef, Stem, Surface, Tile, Weighted, Zoom, fold_stems, folder_weights, split_filename,
     squarify, walk_visible,
 };

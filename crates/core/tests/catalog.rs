@@ -23,13 +23,8 @@ fn set_mtime(path: &Path, secs: i64) {
             tv_nsec: 0,
         },
     };
-    rustix::fs::utimensat(
-        rustix::fs::CWD,
-        path,
-        &ts,
-        rustix::fs::AtFlags::empty(),
-    )
-    .expect("utimensat");
+    rustix::fs::utimensat(rustix::fs::CWD, path, &ts, rustix::fs::AtFlags::empty())
+        .expect("utimensat");
 }
 
 fn names(catalog: &Catalog, query: &str) -> Vec<String> {
@@ -169,7 +164,10 @@ fn empty_query_returns_every_hit() {
         .expect("glob")
         .get(0)
         .expect("hit");
-    assert!(!glob_first.is_dir(), "glob-only Score browse is files-first");
+    assert!(
+        !glob_first.is_dir(),
+        "glob-only Score browse is files-first"
+    );
     assert!(glob_first.name().ends_with(".txt"));
 }
 
@@ -301,7 +299,11 @@ fn newest_sort_uses_live_mtime() {
         )
         .expect("newest");
     let names: Vec<_> = hits.iter().map(|h| h.name().to_string()).collect();
-    assert_eq!(names.first().map(String::as_str), Some("new.txt"), "{names:?}");
+    assert_eq!(
+        names.first().map(String::as_str),
+        Some("new.txt"),
+        "{names:?}"
+    );
 
     let oldest = catalog
         .search_with(
@@ -314,14 +316,21 @@ fn newest_sort_uses_live_mtime() {
         )
         .expect("oldest");
     let names: Vec<_> = oldest.iter().map(|h| h.name().to_string()).collect();
-    assert_eq!(names.first().map(String::as_str), Some("old.txt"), "{names:?}");
+    assert_eq!(
+        names.first().map(String::as_str),
+        Some("old.txt"),
+        "{names:?}"
+    );
 }
 
 #[test]
 fn nested_path_and_quoted_name_roundtrip() {
     let tmp = tempfile::tempdir().expect("tmpdir");
     let tree = tmp.path().join("tree");
-    write_file(&tree.join("a").join("b").join("c").join("quote\"x.txt"), "q");
+    write_file(
+        &tree.join("a").join("b").join("c").join("quote\"x.txt"),
+        "q",
+    );
     let snapshot = tmp.path().join("catalog");
     let catalog =
         Catalog::rebuild(Rebuild::new(&snapshot).roots([tree.as_path()])).expect("rebuild");

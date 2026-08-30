@@ -1,12 +1,12 @@
 //! User Config: include/exclude Mounts, Zoom, spacing, PreviewMode.
 //! Stored at `$XDG_CONFIG_HOME/qfind/config.toml`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::catalog::Rebuild;
+use crate::default_snapshot_path;
 use crate::query::MatchMode;
 use crate::view::Zoom;
-use crate::{default_snapshot_path};
 
 /// Whether Space previews the hovered Hit or the selected Hit.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -17,7 +17,8 @@ pub enum PreviewMode {
 }
 
 impl PreviewMode {
-    fn as_str(self) -> &'static str {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Hovered => "hovered",
             Self::Selected => "selected",
@@ -33,6 +34,54 @@ impl PreviewMode {
     }
 }
 
+/// How Enter opens a Hit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OpenMode {
+    /// `$EDITOR` / `$VISUAL` (or [`Config::editor`]) for text; desktop handler otherwise.
+    #[default]
+    Auto,
+    /// Always `xdg-open` / the desktop MIME default.
+    Xdg,
+    /// Always the editor. Falls back to the desktop handler if none is set.
+    Editor,
+}
+
+impl OpenMode {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Xdg => "xdg",
+            Self::Editor => "editor",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(s: &str) -> Self {
+        match s.trim().trim_matches('"') {
+            "xdg" | "desktop" => Self::Xdg,
+            "editor" => Self::Editor,
+            _ => Self::Auto,
+        }
+    }
+
+    #[must_use]
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Auto => Self::Xdg,
+            Self::Xdg => Self::Editor,
+            Self::Editor => Self::Auto,
+        }
+    }
+}
+
+/// Where to send a Hit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OpenHow {
+    Desktop,
+    Editor { program: String, args: Vec<String> },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     /// Extra Exclude names/globs on top of the built-in junk list.
@@ -46,6 +95,14 @@ pub struct Config {
     pub zebra: bool,
     pub weight_map: bool,
     pub match_mode: MatchMode,
+    /// TUI skin id: grok, titanium, catppuccin, gruvbox, dracula, nord, aurora.
+    pub theme: String,
+    /// TUI startup splash. `QFIND_NOSPLASH` also skips it.
+    pub splash: bool,
+    /// How Enter opens a Hit.
+    pub open: OpenMode,
+    /// Editor binary + args. Empty = `$EDITOR`, then `$VISUAL`.
+    pub editor: String,
 }
 
 impl Default for Config {
@@ -59,6 +116,10 @@ impl Default for Config {
             zebra: true,
             weight_map: true,
             match_mode: MatchMode::Fuzzy,
+            theme: "titanium".into(),
+            splash: true,
+            open: OpenMode::Auto,
+            editor: String::new(),
         }
     }
 }
@@ -92,7 +153,8 @@ impl Config {
 
     #[must_use]
     pub fn to_toml(&self) -> String {
-        let mut s = String::from("# Qfind Config — reset by deleting this file or Settings → Reset\n");
+        let mut s =
+            String::from("# Qfind Config — reset by deleting this file or Settings → Reset\n");
         s.push_str("exclude = [");
         s.push_str(&toml_list(&self.exclude));
         s.push_str("]\ninclude = [");
@@ -109,7 +171,57 @@ impl Config {
         s.push_str(&format!("zebra = {}\n", self.zebra));
         s.push_str(&format!("weight_map = {}\n", self.weight_map));
         s.push_str(&format!("match = \"{}\"\n", self.match_mode.as_str()));
+        s.push_str(&format!("theme = \"{}\"\n", self.theme));
+        s.push_str(&format!("splash = {}\n", self.splash));
+        s.push_str(&format!("open = \"{}\"\n", self.open.as_str()));
+        s.push_str(&format!(
+            "editor = \"{}\"\n",
+            self.editor.replace('"', "\\\"")
+        ));
         s
+    }
+
+    /// Decide desktop handler vs editor for this Hit.
+    #[must_use]
+    pub fn open_how(&self, path: &Path, is_dir: bool) -> OpenHow {
+        self.open_how_env(
+            path,
+            is_dir,
+            std::env::var("EDITOR").ok().as_deref(),
+            std::env::var("VISUAL").ok().as_deref(),
+        )
+    }
+
+    fn open_how_env(
+        &self,
+        path: &Path,
+        is_dir: bool,
+        env_editor: Option<&str>,
+        env_visual: Option<&str>,
+    ) -> OpenHow {
+        let editor = self.editor_cmd(env_editor, env_visual);
+        match self.open {
+            OpenMode::Xdg => OpenHow::Desktop,
+            OpenMode::Editor => editor.unwrap_or(OpenHow::Desktop),
+            OpenMode::Auto => {
+                if is_dir || !is_text_path(path) {
+                    OpenHow::Desktop
+                } else {
+                    editor.unwrap_or(OpenHow::Desktop)
+                }
+            }
+        }
+    }
+
+    fn editor_cmd(&self, env_editor: Option<&str>, env_visual: Option<&str>) -> Option<OpenHow> {
+        let raw = if !self.editor.trim().is_empty() {
+            self.editor.as_str()
+        } else if let Some(e) = env_editor.filter(|s| !s.trim().is_empty()) {
+            e
+        } else {
+            env_visual.filter(|s| !s.trim().is_empty())?
+        };
+        split_cmd(raw).map(|(program, args)| OpenHow::Editor { program, args })
     }
 
     #[must_use]
@@ -154,10 +266,141 @@ fn parse(src: &str) -> Config {
             "zebra" => cfg.zebra = v == "true",
             "weight_map" => cfg.weight_map = v == "true",
             "match" => cfg.match_mode = MatchMode::parse(v),
+            "theme" => cfg.theme = v.trim_matches('"').to_string(),
+            "splash" => cfg.splash = v != "false",
+            "open" => cfg.open = OpenMode::parse(v),
+            "editor" => cfg.editor = v.trim_matches('"').to_string(),
             _ => {}
         }
     }
     cfg
+}
+
+fn split_cmd(s: &str) -> Option<(String, Vec<String>)> {
+    let mut parts = s.split_whitespace();
+    let program = parts.next()?.to_string();
+    if program.is_empty() {
+        return None;
+    }
+    Some((program, parts.map(str::to_string).collect()))
+}
+
+/// Source, config, and other files `$EDITOR` should get. Not PDFs or images.
+#[must_use]
+pub fn is_text_path(path: &Path) -> bool {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if name.is_empty() {
+        return false;
+    }
+    if matches!(
+        name,
+        "Makefile"
+            | "makefile"
+            | "GNUmakefile"
+            | "Dockerfile"
+            | "Dockerfile.dev"
+            | "CMakeLists.txt"
+            | "Cargo.lock"
+            | "Gemfile"
+            | "Rakefile"
+            | "Justfile"
+            | "justfile"
+            | "README"
+            | "LICENSE"
+            | "COPYING"
+            | "CHANGELOG"
+            | "TODO"
+    ) {
+        return true;
+    }
+    if name.starts_with('.') && !name[1..].contains('.') {
+        return true;
+    }
+    let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+        return false;
+    };
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "rs" | "toml"
+            | "md"
+            | "txt"
+            | "py"
+            | "js"
+            | "ts"
+            | "tsx"
+            | "jsx"
+            | "json"
+            | "yml"
+            | "yaml"
+            | "c"
+            | "h"
+            | "cc"
+            | "hh"
+            | "cpp"
+            | "hpp"
+            | "cs"
+            | "go"
+            | "rb"
+            | "php"
+            | "sh"
+            | "bash"
+            | "zsh"
+            | "fish"
+            | "ps1"
+            | "css"
+            | "scss"
+            | "html"
+            | "htm"
+            | "xml"
+            | "ini"
+            | "cfg"
+            | "conf"
+            | "nix"
+            | "lua"
+            | "vim"
+            | "sql"
+            | "csv"
+            | "tsv"
+            | "log"
+            | "lock"
+            | "gradle"
+            | "cmake"
+            | "mk"
+            | "r"
+            | "swift"
+            | "kt"
+            | "kts"
+            | "scala"
+            | "hs"
+            | "erl"
+            | "ex"
+            | "exs"
+            | "clj"
+            | "lisp"
+            | "el"
+            | "pl"
+            | "pm"
+            | "raku"
+            | "jl"
+            | "zig"
+            | "v"
+            | "vue"
+            | "svelte"
+            | "astro"
+            | "tex"
+            | "bib"
+            | "org"
+            | "adoc"
+            | "rst"
+            | "patch"
+            | "diff"
+            | "gitignore"
+            | "dockerignore"
+            | "editorconfig"
+            | "env"
+            | "service"
+            | "desktop"
+    )
 }
 
 fn parse_list(v: &str) -> Vec<String> {
@@ -184,6 +427,8 @@ mod tests {
         cfg.preview = PreviewMode::Selected;
         cfg.zebra = false;
         cfg.match_mode = MatchMode::Substring;
+        cfg.theme = "catppuccin".into();
+        cfg.splash = false;
         let again = parse(&cfg.to_toml());
         assert_eq!(again.exclude, cfg.exclude);
         assert_eq!(again.include, cfg.include);
@@ -191,6 +436,68 @@ mod tests {
         assert_eq!(again.preview, PreviewMode::Selected);
         assert!(!again.zebra);
         assert_eq!(again.match_mode, MatchMode::Substring);
+        assert_eq!(again.theme, "catppuccin");
+        assert!(!again.splash);
+        cfg.open = OpenMode::Editor;
+        cfg.editor = "helix".into();
+        let again = parse(&cfg.to_toml());
+        assert_eq!(again.open, OpenMode::Editor);
+        assert_eq!(again.editor, "helix");
+    }
+
+    #[test]
+    fn auto_sends_text_to_editor_and_binaries_to_desktop() {
+        let mut cfg = Config::default();
+        cfg.editor = "nvim -p".into();
+        let how = cfg.open_how_env(Path::new("/tmp/foo.rs"), false, None, None);
+        assert_eq!(
+            how,
+            OpenHow::Editor {
+                program: "nvim".into(),
+                args: vec!["-p".into()],
+            }
+        );
+        assert_eq!(
+            cfg.open_how_env(Path::new("/tmp/shot.png"), false, None, None),
+            OpenHow::Desktop
+        );
+        assert_eq!(
+            cfg.open_how_env(Path::new("/tmp"), true, None, None),
+            OpenHow::Desktop
+        );
+    }
+
+    #[test]
+    fn xdg_ignores_editor_even_for_text() {
+        let mut cfg = Config::default();
+        cfg.open = OpenMode::Xdg;
+        cfg.editor = "nvim".into();
+        assert_eq!(
+            cfg.open_how_env(Path::new("main.rs"), false, Some("nvim"), None),
+            OpenHow::Desktop
+        );
+    }
+
+    #[test]
+    fn env_editor_used_when_config_editor_empty() {
+        let cfg = Config::default();
+        let how = cfg.open_how_env(Path::new(".bashrc"), false, Some("kak"), Some("gvim"));
+        assert_eq!(
+            how,
+            OpenHow::Editor {
+                program: "kak".into(),
+                args: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn missing_editor_falls_back_to_desktop() {
+        let cfg = Config::default();
+        assert_eq!(
+            cfg.open_how_env(Path::new("lib.rs"), false, None, None),
+            OpenHow::Desktop
+        );
     }
 
     #[test]

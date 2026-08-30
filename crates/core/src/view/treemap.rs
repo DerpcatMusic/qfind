@@ -52,7 +52,10 @@ fn parent_of(path: &str) -> String {
 }
 
 fn folder_name(path: &str) -> String {
-    path.rsplit('/').find(|s| !s.is_empty()).unwrap_or("/").to_string()
+    path.rsplit('/')
+        .find(|s| !s.is_empty())
+        .unwrap_or("/")
+        .to_string()
 }
 
 /// Squarified treemap (Bruls / Huizing / van Wijk). Coordinates in pixels.
@@ -106,11 +109,27 @@ fn squarify_rec(
     if vertical {
         let col_w = w * frac;
         fill_slice(&items[..end], x, y, col_w, h, row_sum, out);
-        squarify_rec(&items[end..], x + col_w, y, w - col_w, h, total - row_sum, out);
+        squarify_rec(
+            &items[end..],
+            x + col_w,
+            y,
+            w - col_w,
+            h,
+            total - row_sum,
+            out,
+        );
     } else {
         let row_h = h * frac;
         fill_slice(&items[..end], x, y, w, row_h, row_sum, out);
-        squarify_rec(&items[end..], x, y + row_h, w, h - row_h, total - row_sum, out);
+        squarify_rec(
+            &items[end..],
+            x,
+            y + row_h,
+            w,
+            h - row_h,
+            total - row_sum,
+            out,
+        );
     }
 }
 
@@ -202,28 +221,32 @@ mod tests {
     #[test]
     fn empty_and_zero_size_are_blank() {
         assert!(squarify(Vec::new(), 100.0, 50.0).is_empty());
-        assert!(squarify(
-            vec![Weighted {
-                name: "z".into(),
-                path: "/z".into(),
-                weight: 0,
-                id: None,
-            }],
-            100.0,
-            50.0
-        )
-        .is_empty());
-        assert!(squarify(
-            vec![Weighted {
-                name: "a".into(),
-                path: "/a".into(),
-                weight: 1,
-                id: None,
-            }],
-            0.0,
-            10.0
-        )
-        .is_empty());
+        assert!(
+            squarify(
+                vec![Weighted {
+                    name: "z".into(),
+                    path: "/z".into(),
+                    weight: 0,
+                    id: None,
+                }],
+                100.0,
+                50.0
+            )
+            .is_empty()
+        );
+        assert!(
+            squarify(
+                vec![Weighted {
+                    name: "a".into(),
+                    path: "/a".into(),
+                    weight: 1,
+                    id: None,
+                }],
+                0.0,
+                10.0
+            )
+            .is_empty()
+        );
     }
 
     #[test]
