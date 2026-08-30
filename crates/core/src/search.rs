@@ -321,11 +321,26 @@ fn cmp_name(snapshot: &Snapshot, a: u32, b: u32) -> std::cmp::Ordering {
     na.cmp(nb)
 }
 
+#[cfg(unix)]
 fn live_meta(path: &std::path::Path) -> (u64, i64) {
     match rustix::fs::stat(path) {
         Ok(st) => (st.st_size.max(0) as u64, st.st_mtime as i64),
         Err(_) => (0, 0),
     }
+}
+
+#[cfg(not(unix))]
+fn live_meta(path: &std::path::Path) -> (u64, i64) {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return (0, 0);
+    };
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|age| i64::try_from(age.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or(0);
+    (meta.len(), mtime)
 }
 
 fn score_only(pattern: &Pattern, name: &str) -> Option<u32> {

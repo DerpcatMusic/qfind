@@ -528,12 +528,12 @@ impl App {
                 } else {
                     row.path
                         .parent()
-                        .unwrap_or_else(|| Path::new("/"))
+                        .unwrap_or_else(|| Path::new("."))
                         .to_path_buf()
                 }
             })
             .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("/"));
+            .unwrap_or_else(|| PathBuf::from("."));
         self.browse(path);
     }
 
@@ -711,9 +711,10 @@ impl App {
     }
 
     fn spawn_desktop(&mut self, path: &std::path::Path) {
-        match Command::new("xdg-open").arg(path).spawn() {
-            Ok(_) => self.status = format!("xdg-open  {}", path.display()),
-            Err(err) => self.status = format!("xdg-open: {err}"),
+        let (name, result) = desktop_open(path);
+        match result {
+            Ok(_) => self.status = format!("{name}  {}", path.display()),
+            Err(err) => self.status = format!("{name}: {err}"),
         }
     }
 
@@ -722,14 +723,22 @@ impl App {
             return;
         };
         let path = row.path.clone();
+        #[cfg(target_os = "linux")]
         if Command::new("sushi").arg(&path).spawn().is_ok() {
             self.status = format!("preview  {}", path.display());
             return;
         }
-        match Command::new("xdg-open").arg(&path).spawn() {
-            Ok(_) => self.status = format!("opened {}", path.display()),
-            Err(err) => self.status = format!("preview: {err}"),
+        #[cfg(target_os = "macos")]
+        if Command::new("qlmanage")
+            .arg("-p")
+            .arg(&path)
+            .spawn()
+            .is_ok()
+        {
+            self.status = format!("Quick Look  {}", path.display());
+            return;
         }
+        self.spawn_desktop(&path);
     }
 
     fn reveal_selected(&mut self) {
@@ -737,33 +746,60 @@ impl App {
             return;
         };
         let path = row.path.clone();
-        let uri = format!("file://{}", path.display());
-        let dbus = Command::new("gdbus")
-            .args([
-                "call",
-                "--session",
-                "--dest",
-                "org.freedesktop.FileManager1",
-                "--object-path",
-                "/org/freedesktop/FileManager1",
-                "--method",
-                "org.freedesktop.FileManager1.ShowItems",
-                &format!("['{uri}']"),
-                "",
-            ])
-            .spawn();
-        if dbus.is_ok() {
-            self.status = format!("show in files  {}", path.display());
+        #[cfg(target_os = "linux")]
+        {
+            let uri = format!("file://{}", path.display());
+            let dbus = Command::new("gdbus")
+                .args([
+                    "call",
+                    "--session",
+                    "--dest",
+                    "org.freedesktop.FileManager1",
+                    "--object-path",
+                    "/org/freedesktop/FileManager1",
+                    "--method",
+                    "org.freedesktop.FileManager1.ShowItems",
+                    &format!("['{uri}']"),
+                    "",
+                ])
+                .spawn();
+            if dbus.is_ok() {
+                self.status = format!("show in files  {}", path.display());
+                return;
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            match Command::new("open").arg("-R").arg(&path).spawn() {
+                Ok(_) => self.status = format!("show in Finder  {}", path.display()),
+                Err(err) => self.status = format!("reveal: {err}"),
+            }
             return;
         }
-        let folder = if row.is_dir {
-            path.clone()
-        } else {
-            path.parent().unwrap_or(path.as_path()).to_path_buf()
-        };
-        match Command::new("xdg-open").arg(&folder).spawn() {
-            Ok(_) => self.status = format!("folder  {}", folder.display()),
-            Err(err) => self.status = format!("reveal: {err}"),
+        #[cfg(target_os = "windows")]
+        {
+            match Command::new("explorer.exe")
+                .arg("/select,")
+                .arg(&path)
+                .spawn()
+            {
+                Ok(_) => self.status = format!("show in Explorer  {}", path.display()),
+                Err(err) => self.status = format!("reveal: {err}"),
+            }
+            return;
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let folder = if row.is_dir {
+                path.clone()
+            } else {
+                path.parent().unwrap_or(path.as_path()).to_path_buf()
+            };
+            let (name, result) = desktop_open(&folder);
+            match result {
+                Ok(_) => self.status = format!("{name}  {}", folder.display()),
+                Err(err) => self.status = format!("reveal: {err}"),
+            }
         }
     }
 
@@ -772,12 +808,25 @@ impl App {
             return;
         };
         let text = row.path.to_string_lossy().into_owned();
-        let ok = pipe_copy("wl-copy", &[], &text)
-            || pipe_copy("xclip", &["-selection", "clipboard"], &text);
+        #[cfg(target_os = "linux")]
+        let (ok, hint) = (
+            pipe_copy("wl-copy", &[], &text)
+                || pipe_copy("xclip", &["-selection", "clipboard"], &text),
+            "copy: install wl-copy or xclip",
+        );
+        #[cfg(target_os = "macos")]
+        let (ok, hint) = (pipe_copy("pbcopy", &[], &text), "copy: pbcopy unavailable");
+        #[cfg(target_os = "windows")]
+        let (ok, hint) = (
+            pipe_copy("clip.exe", &[], &text),
+            "copy: clip.exe unavailable",
+        );
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        let (ok, hint) = (false, "copy unavailable");
         self.status = if ok {
             format!("copied  {text}")
         } else {
-            "copy: install wl-copy or xclip".into()
+            hint.into()
         };
     }
 }
@@ -1929,6 +1978,27 @@ fn pipe_copy(bin: &str, args: &[&str], text: &str) -> bool {
         let _ = stdin.write_all(text.as_bytes());
     }
     child.wait().map(|s| s.success()).unwrap_or(false)
+}
+
+fn desktop_open(path: &Path) -> (&'static str, std::io::Result<std::process::Child>) {
+    #[cfg(target_os = "windows")]
+    {
+        return (
+            "open",
+            Command::new("cmd.exe")
+                .args(["/C", "start", ""])
+                .arg(path)
+                .spawn(),
+        );
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return ("open", Command::new("open").arg(path).spawn());
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        ("xdg-open", Command::new("xdg-open").arg(path).spawn())
+    }
 }
 
 fn next_sort(sort: Sort) -> Sort {

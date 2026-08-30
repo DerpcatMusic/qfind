@@ -2,7 +2,7 @@
 
 # Qfind
 
-instant filename search for Linux, with a keyboard-first TUI, GTK frontend, live previews, a folder browser, and an interactive WeightMap.
+Instant filename search for Linux, macOS, and Windows, with a keyboard-first TUI, live previews, a folder browser, and an interactive WeightMap.
 
 [![Release](https://img.shields.io/github/v/release/DerpcatMusic/qfind?style=flat-square)](https://github.com/DerpcatMusic/qfind/releases/latest)
 [![License](https://img.shields.io/github/license/DerpcatMusic/qfind?style=flat-square)](LICENSE)
@@ -15,7 +15,7 @@ instant filename search for Linux, with a keyboard-first TUI, GTK frontend, live
   <img src="docs/images/qfind-grid-preview.png" alt="Qfind grid search with image thumbnails and a large side Preview" width="920">
 </p>
 
-Qfind builds one memory-mapped Catalog at `~/.cache/qfind/catalog` from your local Mounts. Queries search filenames without walking the filesystem again. Rebuild reads `getdents64` entries in parallel and avoids a `stat` call for every file; metadata is loaded only when a Sort or Preview needs it.
+Qfind builds one memory-mapped Catalog from your local disks. Queries search filenames without walking the filesystem again. Linux and macOS use the parallel Unix directory path; Windows walks all available drive letters in parallel. Metadata is loaded only when a Sort or Preview needs it.
 
 ## What it does
 
@@ -33,7 +33,7 @@ Qfind has no startup splash. Config changes made in the TUI are saved and applie
 
 ## Install
 
-### Prebuilt x86_64 release
+### Prebuilt Linux x86_64 release
 
 ```bash
 curl -L https://github.com/DerpcatMusic/qfind/releases/download/v0.2.0/qfind-0.2.0-x86_64.tar.zst \
@@ -46,7 +46,7 @@ sudo install -Dm644 /tmp/qfind.desktop /usr/local/share/applications/qfind.deskt
 
 The archive also contains `qfind-gtk`, the desktop file, Nautilus integration, and `qfind-qt` when Qt6 was available on the release builder.
 
-### Build from source
+### Linux
 
 Requires Rust 1.88 or newer.
 
@@ -65,6 +65,33 @@ cargo build --release
 ```
 
 Build the GTK frontend separately with `cargo build --release -p qfind-gtk`.
+
+### macOS
+
+Requires Rust 1.88 or newer. No GTK dependencies are needed for the TUI.
+
+```bash
+git clone https://github.com/DerpcatMusic/qfind.git
+cd qfind
+cargo build --release -p qfind -p qfind-tui
+sudo install -m755 target/release/qfind target/release/qfind-tui /usr/local/bin/
+```
+
+Qfind indexes `/`, including mounted disks under `/Volumes`. Enter opens the macOS default app, `Space` can hand the selection to Quick Look, `Ctrl+O` reveals it in Finder, and `Ctrl+Y` uses `pbcopy`. Build a native Intel or Apple Silicon archive with `./packaging/release-macos.sh`.
+
+### Windows
+
+Install Rust with rustup, then build from PowerShell:
+
+```powershell
+git clone https://github.com/DerpcatMusic/qfind.git
+cd qfind
+cargo build --release -p qfind -p qfind-tui
+.\target\release\qfind.exe index
+.\target\release\qfind.exe
+```
+
+Qfind indexes available drive letters and skips Windows system stores, the Recycle Bin, and System Volume Information. Enter uses the registered Windows app, `Ctrl+O` reveals the file in Explorer, and `Ctrl+Y` uses the Windows clipboard. Create a ZIP with `.\packaging\release-windows.ps1`.
 
 ### Arch Linux
 
@@ -114,7 +141,7 @@ An empty Query in the TUI lists the Catalog. Fuzzy matching is the default; use 
 | right-click | Open, Preview, copy, and file-manager actions |
 | mouse drag | hand a Hit to another desktop app in Kitty 0.47+ |
 
-Drag uses Kitty's native OSC 72 protocol. Visual files reuse the current Preview as the cursor image; other files use a compact icon-and-name card. Dragging a Preview divider or scrollbar never starts a file Drag.
+Drag uses Kitty's native OSC 72 protocol on Linux and macOS. Visual files reuse the current Preview as the cursor image; other files use a compact icon-and-name card. Windows terminals do not currently expose a compatible native file-drag protocol.
 
 The Preview pane can be resized with its divider. Scrolling over it scrolls wrapped Preview content; scrolling over Hits moves the selection and updates the Preview. Grid density can be reduced until tiles become compact text cards or increased for larger visual thumbnails.
 
@@ -132,6 +159,7 @@ Raster images and text work without helper programs. Qfind uses installed deskto
 | fonts | ImageMagick `magick` |
 
 Preview work runs away from input handling, stale jobs are discarded, and external helpers have a two-second deadline.
+Helpers are optional and discovered on `PATH`; `Space` falls back to Quick Look on macOS or the registered desktop app on Windows.
 
 ## Folder browser and WeightMap
 
@@ -147,7 +175,15 @@ Press `F8` to edit appearance and Catalog visibility. Theme previews apply while
   <img src="docs/images/qfind-settings.png" alt="Qfind Settings panel" width="640">
 </p>
 
-Config is stored at `~/.config/qfind/config.toml` or `$XDG_CONFIG_HOME/qfind/config.toml`:
+Config and Catalog locations follow each platform:
+
+| Platform | Config | Catalog |
+|---|---|---|
+| Linux | `$XDG_CONFIG_HOME/qfind/config.toml` or `~/.config/qfind/config.toml` | `$XDG_CACHE_HOME/qfind/catalog` or `~/.cache/qfind/catalog` |
+| macOS | `~/Library/Application Support/qfind/config.toml` | `~/Library/Caches/qfind/catalog` |
+| Windows | `%APPDATA%\qfind\config.toml` | `%LOCALAPPDATA%\qfind\catalog` |
+
+Example:
 
 ```toml
 theme = "grok"             # grok | titanium | catppuccin | gruvbox | dracula | nord | aurora
@@ -157,11 +193,11 @@ weight_map = true
 show_hidden = true
 respect_gitignore = false
 respect_ignore = false
-open = "auto"              # auto | xdg | editor
+open = "auto"              # auto | desktop (legacy: xdg) | editor
 editor = "nvim"            # empty = $EDITOR, then $VISUAL
 ```
 
-Auto opening sends text files to the configured editor and folders or media to `xdg-open`. Selected folders can be added to or removed from exact Catalog Excludes from Search or the F4 browser.
+Auto opening sends text files to the configured editor and folders or media to the platform default app. Selected folders can be added to or removed from exact Catalog Excludes from Search or the F4 browser.
 
 ## Desktop integrations
 
@@ -185,7 +221,7 @@ See [docs/plugins.md](docs/plugins.md) for manual installation and the script-on
 
 ## Packages
 
-- `qfind` / `qfind-bin`: CLI and TUI
+- `qfind`: portable CLI and TUI for Linux, macOS, and Windows
 - `qfind-gtk` / `qfind-gtk-bin`: GTK frontend and desktop integration
 - `qfind-qt`: optional Qt6/Breeze frontend built by the installer and release script
 

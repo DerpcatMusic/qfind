@@ -25,8 +25,23 @@ const NAME_EXCLUDES: &[&str] = &[
     "System Volume Information",
 ];
 
+#[cfg(target_os = "windows")]
+const PLATFORM_NAME_EXCLUDES: &[&str] = &[];
+
+#[cfg(target_os = "macos")]
+const PLATFORM_NAME_EXCLUDES: &[&str] = &[
+    ".DocumentRevisions-V100",
+    ".Spotlight-V100",
+    ".Trashes",
+    ".fseventsd",
+];
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+const PLATFORM_NAME_EXCLUDES: &[&str] = &[];
+
 /// Path globs skipped in addition to [`NAME_EXCLUDES`].
-const PATH_EXCLUDES: &[&str] = &[
+#[cfg(target_os = "linux")]
+const PLATFORM_PATH_EXCLUDES: &[&str] = &[
     "/proc",
     "/sys",
     "/dev",
@@ -38,14 +53,29 @@ const PATH_EXCLUDES: &[&str] = &[
     "/var/lib/docker",
     "/var/lib/containers",
     "/var/lib/flatpak",
-    "**/Windows/System32/**",
-    "**/Windows/SysWOW64/**",
-    "**/Windows/WinSxS/**",
-    "**/Windows/assembly/**",
-    "**/Windows/Installer/**",
-    "**/Windows/servicing/**",
-    "**/Windows.old/**",
+    "**/Windows/assembly",
+    "**/Windows/Installer",
+    "**/Windows/servicing",
+    "**/Windows.old",
 ];
+
+#[cfg(target_os = "macos")]
+const PLATFORM_PATH_EXCLUDES: &[&str] = &[
+    "/System/Volumes/Data",
+    "/private/var/folders",
+    "**/Library/Caches",
+];
+
+#[cfg(target_os = "windows")]
+const PLATFORM_PATH_EXCLUDES: &[&str] = &[
+    "**/Windows/assembly",
+    "**/Windows/Installer",
+    "**/Windows/servicing",
+    "**/Windows.old",
+];
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+const PLATFORM_PATH_EXCLUDES: &[&str] = &[];
 
 #[derive(Clone)]
 pub(crate) struct Excludes {
@@ -61,9 +91,13 @@ impl Excludes {
     }
 
     pub(crate) fn with_paths(extra: &[String], paths: &[PathBuf]) -> Result<Self> {
-        let mut names: Vec<String> = NAME_EXCLUDES.iter().map(|s| (*s).to_string()).collect();
+        let mut names: Vec<String> = NAME_EXCLUDES
+            .iter()
+            .chain(PLATFORM_NAME_EXCLUDES)
+            .map(|s| (*s).to_string())
+            .collect();
         let mut builder = GlobSetBuilder::new();
-        for pat in PATH_EXCLUDES
+        for pat in PLATFORM_PATH_EXCLUDES
             .iter()
             .copied()
             .chain(extra.iter().map(String::as_str))

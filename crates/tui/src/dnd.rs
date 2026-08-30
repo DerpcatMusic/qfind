@@ -91,15 +91,22 @@ fn write_osc(meta: &str, payload: &str) -> io::Result<()> {
 }
 
 fn supported() -> bool {
+    if cfg!(windows) {
+        return false;
+    }
     std::env::var_os("KITTY_WINDOW_ID").is_some()
         || std::env::var_os("TERM").is_some_and(|term| term == "xterm-kitty")
 }
 
 fn file_uri(path: &Path) -> String {
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let mut uri = String::from("file://");
-    for &byte in path.as_os_str().as_encoded_bytes() {
-        if byte.is_ascii_alphanumeric() || b"-._~/".contains(&byte) {
+    #[cfg(windows)]
+    let raw = path.to_string_lossy().replace('\\', "/").into_bytes();
+    #[cfg(not(windows))]
+    let raw = path.as_os_str().as_encoded_bytes().to_vec();
+    let mut uri = String::from(if cfg!(windows) { "file:///" } else { "file://" });
+    for byte in raw {
+        if byte.is_ascii_alphanumeric() || b"-._~/:".contains(&byte) {
             uri.push(byte as char);
         } else {
             use std::fmt::Write as _;

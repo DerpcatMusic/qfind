@@ -201,7 +201,7 @@ impl Catalog {
     }
 }
 
-/// Default snapshot path: `$XDG_CACHE_HOME/qfind/catalog`.
+/// Default platform cache directory plus `qfind/catalog`.
 #[must_use]
 pub fn default_snapshot_path() -> PathBuf {
     let cache = dirs::cache_dir().unwrap_or_else(|| PathBuf::from("."));

@@ -239,6 +239,9 @@ fn run() -> Result<ExitCode> {
                         hit.is_dir()
                     )?;
                 } else if cli.nul {
+                    #[cfg(windows)]
+                    out.write_all(path.to_string_lossy().as_bytes())?;
+                    #[cfg(not(windows))]
                     out.write_all(path.as_os_str().as_encoded_bytes())?;
                     out.write_all(&[0])?;
                 } else {

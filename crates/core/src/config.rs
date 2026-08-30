@@ -1,15 +1,16 @@
 //! User Config: include/exclude Mounts, Zoom, spacing, PreviewMode.
-//! Stored at `$XDG_CONFIG_HOME/qfind/config.toml`.
+//! Stored below the platform config directory as `qfind/config.toml`.
 
 use std::path::{Path, PathBuf};
 
 use crate::catalog::Rebuild;
 use crate::default_snapshot_path;
+use crate::mounts;
 use crate::query::MatchMode;
 use crate::view::Zoom;
 
 /// Lazily loads hierarchical Git and ripgrep ignore rules for queried paths.
-pub struct IgnoreMatcher(ignore::IncrementalIgnore);
+pub struct IgnoreMatcher(Vec<ignore::IncrementalIgnore>);
 
 impl IgnoreMatcher {
     #[must_use]
@@ -17,23 +18,40 @@ impl IgnoreMatcher {
         if !respect_gitignore && !respect_ignore {
             return None;
         }
-        let mut builder = ignore::WalkBuilder::new(Path::new("/"));
-        builder
-            .standard_filters(false)
-            .hidden(false)
-            .parents(true)
-            .ignore(respect_ignore)
-            .git_ignore(respect_gitignore)
-            .git_global(respect_gitignore)
-            .git_exclude(respect_gitignore)
-            .require_git(true)
-            .follow_links(false);
-        builder.build_matchers().pop().map(Self)
+        let matchers = mounts::discover()
+            .into_iter()
+            .flat_map(|root| {
+                let mut builder = ignore::WalkBuilder::new(root);
+                builder
+                    .standard_filters(false)
+                    .hidden(false)
+                    .parents(true)
+                    .ignore(respect_ignore)
+                    .git_ignore(respect_gitignore)
+                    .git_global(respect_gitignore)
+                    .git_exclude(respect_gitignore)
+                    .require_git(true)
+                    .follow_links(false);
+                builder.build_matchers()
+            })
+            .collect::<Vec<_>>();
+        (!matchers.is_empty()).then_some(Self(matchers))
     }
 
     pub fn is_ignored(&mut self, path: &Path, is_dir: bool) -> bool {
-        let relative = path.strip_prefix(self.0.root()).unwrap_or(path);
-        self.0.matched(relative, is_dir).is_ignore()
+        let Some(index) = self
+            .0
+            .iter()
+            .enumerate()
+            .filter(|(_, matcher)| path.starts_with(matcher.root()))
+            .max_by_key(|(_, matcher)| matcher.root().as_os_str().len())
+            .map(|(index, _)| index)
+        else {
+            return false;
+        };
+        let matcher = &mut self.0[index];
+        let relative = path.strip_prefix(matcher.root()).unwrap_or(path);
+        matcher.matched(relative, is_dir).is_ignore()
     }
 }
 
@@ -69,7 +87,7 @@ pub enum OpenMode {
     /// `$EDITOR` / `$VISUAL` (or [`Config::editor`]) for text; desktop handler otherwise.
     #[default]
     Auto,
-    /// Always `xdg-open` / the desktop MIME default.
+    /// Always use the platform desktop handler.
     Xdg,
     /// Always the editor. Falls back to the desktop handler if none is set.
     Editor,
@@ -80,7 +98,7 @@ impl OpenMode {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Auto => "auto",
-            Self::Xdg => "xdg",
+            Self::Xdg => "desktop",
             Self::Editor => "editor",
         }
     }

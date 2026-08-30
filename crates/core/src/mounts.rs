@@ -1,7 +1,10 @@
+#[cfg(target_os = "linux")]
 use std::fs::File;
+#[cfg(target_os = "linux")]
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
+#[cfg(target_os = "linux")]
 const SKIP_FS: &[&str] = &[
     "proc",
     "sysfs",
@@ -34,6 +37,7 @@ const SKIP_FS: &[&str] = &[
     "configfs",
 ];
 
+#[cfg(target_os = "linux")]
 const KEEP_FS: &[&str] = &[
     "ext4", "ext3", "ext2", "btrfs", "xfs", "f2fs", "zfs", "ntfs", "ntfs3", "fuseblk", "vfat",
     "exfat", "jfs", "reiserfs",
@@ -45,7 +49,19 @@ pub(crate) fn discover() -> Vec<PathBuf> {
     {
         discover_linux()
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    {
+        let roots: Vec<_> = (b'A'..=b'Z')
+            .map(|drive| PathBuf::from(format!("{}:\\", drive as char)))
+            .filter(|path| path.is_dir())
+            .collect();
+        if roots.is_empty() {
+            vec![PathBuf::from(r"C:\")]
+        } else {
+            roots
+        }
+    }
+    #[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
     {
         vec![PathBuf::from("/")]
     }
@@ -86,6 +102,7 @@ fn discover_linux() -> Vec<PathBuf> {
     out
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn unescape_mount(s: &str) -> String {
     s.replace("\\040", " ")
         .replace("\\011", "\t")
@@ -94,13 +111,21 @@ fn unescape_mount(s: &str) -> String {
 }
 
 pub(crate) fn is_under_skip_mount(path: &Path) -> bool {
-    matches!(
-        path.to_str(),
-        Some("/proc" | "/sys" | "/dev" | "/run" | "/snap")
-    ) || path.starts_with("/proc")
-        || path.starts_with("/sys")
-        || path.starts_with("/dev")
-        || path.starts_with("/run")
+    #[cfg(target_os = "linux")]
+    {
+        matches!(
+            path.to_str(),
+            Some("/proc" | "/sys" | "/dev" | "/run" | "/snap")
+        ) || path.starts_with("/proc")
+            || path.starts_with("/sys")
+            || path.starts_with("/dev")
+            || path.starts_with("/run")
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        false
+    }
 }
 
 #[cfg(test)]
