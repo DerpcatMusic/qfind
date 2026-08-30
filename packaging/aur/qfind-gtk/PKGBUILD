@@ -15,7 +15,7 @@ optdepends=(
 conflicts=('qfind-gtk-bin')
 options=('!lto')
 source=("qfind-$pkgver.tar.gz::https://github.com/DerpcatMusic/qfind/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('6906c6e6f78d65fc6e98b692257b94584e5a7f889db48e386ce335bda0acb3a6')
 
 prepare() {
   cd "qfind-$pkgver"
