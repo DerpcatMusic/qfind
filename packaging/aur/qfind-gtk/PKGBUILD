@@ -1,0 +1,40 @@
+# Maintainer: Derpcat <https://github.com/DerpcatMusic>
+pkgname=qfind-gtk
+pkgver=0.1.1
+pkgrel=1
+pkgdesc="Instant filename search (GTK)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/DerpcatMusic/qfind"
+license=('MIT')
+depends=('qfind' 'gtk4' 'gcc-libs' 'glibc')
+makedepends=('cargo')
+optdepends=(
+  'nautilus: Ctrl+F and Search with Qfind'
+  'python-gobject: Nautilus plugin'
+)
+conflicts=('qfind-gtk-bin')
+options=('!lto')
+source=("qfind-$pkgver.tar.gz::https://github.com/DerpcatMusic/qfind/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('20d69420b211b11302eccb31ec7f0b2ae85cabf0771b3631a47414434ca2010d')
+
+prepare() {
+  cd "qfind-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "qfind-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release -p qfind-gtk
+}
+
+package() {
+  cd "qfind-$pkgver"
+  install -Dm755 target/release/qfind-gtk -t "$pkgdir/usr/bin"
+  install -Dm644 packaging/qfind.desktop "$pkgdir/usr/share/applications/qfind.desktop"
+  install -Dm644 packaging/nautilus/qfind.py \
+    "$pkgdir/usr/share/nautilus-python/extensions/qfind.py"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

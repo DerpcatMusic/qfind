@@ -8,7 +8,7 @@ cd qfind
 ./packaging/install.sh
 ```
 
-That builds `qfind` / `qfind-gtk` into `~/.local/bin` **and** installs both plugins. If the binaries are already installed, plugins only:
+That builds `qfind` into `~/.local/bin` (and `qfind-gtk` if gtk4 is available) **and** installs both plugins. Nautilus needs `qfind-gtk` on `PATH`. If the binaries are already installed, plugins only:
 
 ```bash
 ./packaging/install-plugins.sh

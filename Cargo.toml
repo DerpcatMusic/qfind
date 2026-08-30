@@ -1,5 +1,7 @@
 [workspace]
 members = ["crates/core", "crates/cli", "crates/tui", "crates/gtk"]
+# CLI/TUI only. `cargo build -p qfind-gtk` or `--workspace` pulls gtk4.
+default-members = ["crates/core", "crates/cli", "crates/tui"]
 resolver = "2"
 
 [workspace.package]

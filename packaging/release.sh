@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a stripped x86_64 tarball for GitHub Releases / AUR qfind-bin.
+# Build a stripped tarball for GitHub Releases / AUR qfind-bin and qfind-gtk-bin.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 ver="${1:-$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -1)}"

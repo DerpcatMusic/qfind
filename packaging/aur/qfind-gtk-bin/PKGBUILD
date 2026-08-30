@@ -1,0 +1,30 @@
+# Maintainer: Derpcat <https://github.com/DerpcatMusic>
+pkgname=qfind-gtk-bin
+pkgver=0.1.1
+pkgrel=1
+pkgdesc="Instant filename search (prebuilt GTK, x86_64)"
+arch=('x86_64')
+url="https://github.com/DerpcatMusic/qfind"
+license=('MIT')
+depends=('qfind' 'gtk4' 'gcc-libs' 'glibc')
+optdepends=(
+  'nautilus: Ctrl+F and Search with Qfind'
+  'python-gobject: Nautilus plugin'
+  'qt6-widgets: qfind-qt'
+)
+provides=('qfind-gtk')
+conflicts=('qfind-gtk')
+options=('!strip')
+source=("qfind-$pkgver-x86_64.tar.zst::https://github.com/DerpcatMusic/qfind/releases/download/v$pkgver/qfind-$pkgver-x86_64.tar.zst")
+sha256sums=('043944f29565760168eebc2814c10840478e0a987f0f12607511473ad2f211f5')
+
+package() {
+  cd "$srcdir"
+  install -Dm755 qfind-gtk -t "$pkgdir/usr/bin"
+  if [[ -x qfind-qt ]]; then
+    install -Dm755 qfind-qt "$pkgdir/usr/bin/qfind-qt"
+  fi
+  install -Dm644 qfind.desktop "$pkgdir/usr/share/applications/qfind.desktop"
+  install -Dm644 qfind.py "$pkgdir/usr/share/nautilus-python/extensions/qfind.py"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

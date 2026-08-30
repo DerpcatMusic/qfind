@@ -6,7 +6,7 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 name="${1:-}"
 if [[ -z "$name" || ! -d "$root/packaging/aur/$name" ]]; then
-  echo "usage: $0 qfind-bin|qfind" >&2
+  echo "usage: $0 qfind|qfind-gtk|qfind-bin|qfind-gtk-bin" >&2
   exit 1
 fi
 src="$root/packaging/aur/$name"

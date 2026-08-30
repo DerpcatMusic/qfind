@@ -10,24 +10,41 @@ cd qfind
 ./packaging/install.sh
 ```
 
+That puts `qfind` and `qfind-tui` in `~/.local/bin`. If gtk4 is available (`pkg-config --exists gtk4`), it also builds `qfind-gtk`, the desktop launcher, and the Nautilus plugin. If Qt6 is installed, you also get `qfind-qt` (Breeze).
+
+CLI and TUI only, no gtk4:
+
+```bash
+cargo build --release
+```
+
+GTK GUI: `cargo build --release -p qfind-gtk`.
+
 Prebuilt x86_64 binaries (GitHub Releases):
 
 ```bash
 curl -L https://github.com/DerpcatMusic/qfind/releases/download/v0.1.1/qfind-0.1.1-x86_64.tar.zst | tar -C /tmp -x --zstd
-sudo install -Dm755 /tmp/qfind /tmp/qfind-tui /tmp/qfind-gtk /tmp/qfind-qt -t /usr/local/bin
+sudo install -Dm755 /tmp/qfind /tmp/qfind-tui -t /usr/local/bin
+# optional GUI:
+sudo install -Dm755 /tmp/qfind-gtk -t /usr/local/bin
 sudo install -Dm644 /tmp/qfind.desktop /usr/local/share/applications/qfind.desktop
 ```
 
-Arch, from this tree (uses the GitHub release tarball):
+Arch (AUR PKGBUILDs in this tree):
 
 ```bash
-cd packaging/aur/qfind-bin
-makepkg -si
+# CLI/TUI, no gtk4 — source
+cd packaging/aur/qfind && makepkg -si
+# or prebuilt
+cd packaging/aur/qfind-bin && makepkg -si
+
+# GTK GUI (depends on qfind + gtk4)
+cd packaging/aur/qfind-gtk && makepkg -si
+# or prebuilt
+cd packaging/aur/qfind-gtk-bin && makepkg -si
 ```
 
-`packaging/aur/qfind` builds from the source tag instead. To publish either to the AUR: add an SSH key at https://aur.archlinux.org/account/ then `./packaging/aur/publish.sh qfind-bin`.
-
-That puts `qfind`, `qfind-tui`, and `qfind-gtk` in `~/.local/bin`, plus the desktop launcher. If Qt6 is installed, you also get `qfind-qt` (Breeze).
+`qfind` / `qfind-bin` are CLI and TUI. `qfind-gtk` / `qfind-gtk-bin` add the GUI. To publish to the AUR: add an SSH key at https://aur.archlinux.org/account/ then `./packaging/aur/publish.sh qfind`.
 
 ```bash
 qfind-gtk                      # GUI
