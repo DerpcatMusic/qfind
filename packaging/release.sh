@@ -18,10 +18,11 @@ install -Dm644 "$root/LICENSE" "$stage/LICENSE"
 if command -v cmake >/dev/null && pkg-config --exists Qt6Widgets 2>/dev/null; then
   cmake -S "$root/packaging/kde" -B "$root/target/kde-build" -DCMAKE_BUILD_TYPE=Release
   cmake --build "$root/target/kde-build" -j
-  install -Dm755 "$root/target/kde-build/qfind-qt" "$stage/qfind-qt"
+  install -Dm755 -s "$root/target/kde-build/qfind-qt" "$stage/qfind-qt"
 fi
 
 out="$root/target/dist/qfind-${ver}-${arch}.tar.zst"
+rm -f "$out"
 tar -C "$stage" -c . | zstd -19 -o "$out"
 echo "$out"
 sha256sum "$out"

@@ -8,6 +8,35 @@ use crate::default_snapshot_path;
 use crate::query::MatchMode;
 use crate::view::Zoom;
 
+/// Lazily loads hierarchical Git and ripgrep ignore rules for queried paths.
+pub struct IgnoreMatcher(ignore::IncrementalIgnore);
+
+impl IgnoreMatcher {
+    #[must_use]
+    pub fn new(respect_gitignore: bool, respect_ignore: bool) -> Option<Self> {
+        if !respect_gitignore && !respect_ignore {
+            return None;
+        }
+        let mut builder = ignore::WalkBuilder::new(Path::new("/"));
+        builder
+            .standard_filters(false)
+            .hidden(false)
+            .parents(true)
+            .ignore(respect_ignore)
+            .git_ignore(respect_gitignore)
+            .git_global(respect_gitignore)
+            .git_exclude(respect_gitignore)
+            .require_git(true)
+            .follow_links(false);
+        builder.build_matchers().pop().map(Self)
+    }
+
+    pub fn is_ignored(&mut self, path: &Path, is_dir: bool) -> bool {
+        let relative = path.strip_prefix(self.0.root()).unwrap_or(path);
+        self.0.matched(relative, is_dir).is_ignore()
+    }
+}
+
 /// Whether Space previews the hovered Hit or the selected Hit.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PreviewMode {
@@ -86,18 +115,28 @@ pub enum OpenHow {
 pub struct Config {
     /// Extra Exclude names/globs on top of the built-in junk list.
     pub exclude: Vec<String>,
+    /// Exact directory trees excluded from the Catalog.
+    pub exclude_paths: Vec<PathBuf>,
     /// Mounts to Rebuild. Empty = discover local Mounts.
     pub include: Vec<PathBuf>,
+    /// Show dotfiles and entries below dot-directories in Query results.
+    pub show_hidden: bool,
+    /// Respect `.gitignore`, Git's global excludes, and `.git/info/exclude`.
+    pub respect_gitignore: bool,
+    /// Respect ripgrep-style `.ignore` files.
+    pub respect_ignore: bool,
     pub zoom: u8,
     /// Extra row padding in pixels (0–24).
     pub spacing: u8,
     pub preview: PreviewMode,
+    /// Side preview width as a percentage of the Hits surface (20–70).
+    pub preview_width: u8,
     pub zebra: bool,
     pub weight_map: bool,
     pub match_mode: MatchMode,
-    /// TUI skin id: grok, titanium, catppuccin, gruvbox, dracula, nord, aurora.
+    /// TUI theme id: grok, titanium, catppuccin, gruvbox, dracula, nord, aurora.
     pub theme: String,
-    /// TUI startup splash. `QFIND_NOSPLASH` also skips it.
+    /// Deprecated compatibility setting. Startup now opens immediately.
     pub splash: bool,
     /// How Enter opens a Hit.
     pub open: OpenMode,
@@ -109,15 +148,20 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             exclude: Vec::new(),
+            exclude_paths: Vec::new(),
             include: Vec::new(),
+            show_hidden: true,
+            respect_gitignore: false,
+            respect_ignore: false,
             zoom: Zoom::default().get(),
             spacing: 0,
             preview: PreviewMode::Hovered,
+            preview_width: 36,
             zebra: true,
             weight_map: true,
             match_mode: MatchMode::Fuzzy,
-            theme: "titanium".into(),
-            splash: true,
+            theme: "grok".into(),
+            splash: false,
             open: OpenMode::Auto,
             editor: String::new(),
         }
@@ -157,6 +201,13 @@ impl Config {
             String::from("# Qfind Config — reset by deleting this file or Settings → Reset\n");
         s.push_str("exclude = [");
         s.push_str(&toml_list(&self.exclude));
+        s.push_str("]\nexclude_paths = [");
+        let excluded: Vec<String> = self
+            .exclude_paths
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        s.push_str(&toml_list(&excluded));
         s.push_str("]\ninclude = [");
         let inc: Vec<String> = self
             .include
@@ -165,9 +216,16 @@ impl Config {
             .collect();
         s.push_str(&toml_list(&inc));
         s.push_str("]\n");
+        s.push_str(&format!("show_hidden = {}\n", self.show_hidden));
+        s.push_str(&format!("respect_gitignore = {}\n", self.respect_gitignore));
+        s.push_str(&format!("respect_ignore = {}\n", self.respect_ignore));
         s.push_str(&format!("zoom = {}\n", self.zoom.min(100)));
         s.push_str(&format!("spacing = {}\n", self.spacing.min(24)));
         s.push_str(&format!("preview = \"{}\"\n", self.preview.as_str()));
+        s.push_str(&format!(
+            "preview_width = {}\n",
+            self.preview_width.clamp(20, 70)
+        ));
         s.push_str(&format!("zebra = {}\n", self.zebra));
         s.push_str(&format!("weight_map = {}\n", self.weight_map));
         s.push_str(&format!("match = \"{}\"\n", self.match_mode.as_str()));
@@ -226,12 +284,20 @@ impl Config {
 
     #[must_use]
     pub fn rebuild(&self) -> Rebuild {
-        let mut r = Rebuild::new(default_snapshot_path());
+        self.rebuild_to(default_snapshot_path())
+    }
+
+    #[must_use]
+    pub fn rebuild_to(&self, snapshot: impl Into<PathBuf>) -> Rebuild {
+        let mut r = Rebuild::new(snapshot);
         if !self.include.is_empty() {
             r = r.roots(self.include.clone());
         }
         for e in &self.exclude {
             r = r.exclude(e);
+        }
+        for path in &self.exclude_paths {
+            r = r.exclude_path(path);
         }
         r
     }
@@ -259,10 +325,19 @@ fn parse(src: &str) -> Config {
         let v = v.trim();
         match k {
             "exclude" => cfg.exclude = parse_list(v),
+            "exclude_paths" => {
+                cfg.exclude_paths = parse_list(v).into_iter().map(PathBuf::from).collect();
+            }
             "include" => cfg.include = parse_list(v).into_iter().map(PathBuf::from).collect(),
+            "show_hidden" => cfg.show_hidden = v != "false",
+            "respect_gitignore" => cfg.respect_gitignore = v == "true",
+            "respect_ignore" => cfg.respect_ignore = v == "true",
             "zoom" => cfg.zoom = v.parse().unwrap_or(cfg.zoom).min(100),
             "spacing" => cfg.spacing = v.parse().unwrap_or(cfg.spacing).min(24),
             "preview" => cfg.preview = PreviewMode::parse(v.trim_matches('"')),
+            "preview_width" => {
+                cfg.preview_width = v.parse().unwrap_or(cfg.preview_width).clamp(20, 70);
+            }
             "zebra" => cfg.zebra = v == "true",
             "weight_map" => cfg.weight_map = v == "true",
             "match" => cfg.match_mode = MatchMode::parse(v),

@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use qfind_core::{
-    Catalog, Config, DateAge, FileClass, MatchMode, Rebuild, Scope, SearchOpts, Sort,
+    Catalog, Config, DateAge, FileClass, IgnoreMatcher, MatchMode, Scope, SearchOpts, Sort,
     default_snapshot_path,
 };
 
@@ -135,14 +135,9 @@ fn run() -> Result<ExitCode> {
         Some(Command::Index { roots, snapshot }) => {
             let snapshot = snapshot.unwrap_or_else(default_snapshot_path);
             let cfg = Config::load();
-            let mut rebuild = Rebuild::new(&snapshot);
+            let mut rebuild = cfg.rebuild_to(&snapshot);
             if !roots.is_empty() {
                 rebuild = rebuild.roots(roots);
-            } else if !cfg.include.is_empty() {
-                rebuild = rebuild.roots(cfg.include.clone());
-            }
-            for e in &cfg.exclude {
-                rebuild = rebuild.exclude(e);
             }
             let catalog = Catalog::rebuild(rebuild)
                 .with_context(|| format!("rebuild {}", snapshot.display()))?;
@@ -177,7 +172,7 @@ fn run() -> Result<ExitCode> {
                 format!("open {} (run `qfind index` first)", snapshot.display())
             })?;
             let query = cli.query.join(" ");
-            let opts = SearchOpts {
+            let mut opts = SearchOpts {
                 scope: if cli.folders {
                     Scope::Folders
                 } else if cli.files {
@@ -217,10 +212,24 @@ fn run() -> Result<ExitCode> {
                     MatchArg::Exact => MatchMode::Exact,
                 },
             };
-            let hits = catalog.search_with(&query, opts)?;
+            let cfg = Config::load();
+            let mut ignores = IgnoreMatcher::new(cfg.respect_gitignore, cfg.respect_ignore);
+            let limit = opts.limit;
+            if ignores.is_some() && limit > 0 {
+                opts.limit = limit.saturating_mul(8);
+            }
+            let show_hidden = cfg.show_hidden;
+            let hits = catalog.search_with_hidden_cancel(&query, opts, show_hidden, || false)?;
             let mut out = io::stdout().lock();
+            let mut emitted = 0usize;
             for hit in hits.iter() {
                 let path = hit.path();
+                if ignores
+                    .as_mut()
+                    .is_some_and(|matcher| matcher.is_ignored(&path, hit.is_dir()))
+                {
+                    continue;
+                }
                 if cli.json {
                     writeln!(
                         out,
@@ -234,6 +243,10 @@ fn run() -> Result<ExitCode> {
                     out.write_all(&[0])?;
                 } else {
                     writeln!(out, "{}", path.display())?;
+                }
+                emitted += 1;
+                if limit > 0 && emitted >= limit {
+                    break;
                 }
             }
             Ok(ExitCode::SUCCESS)

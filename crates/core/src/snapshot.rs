@@ -40,6 +40,7 @@ pub(crate) struct Snapshot {
     file_count: u32,
     names_off: usize,
     letter_mask: OnceLock<Box<[u64]>>,
+    hidden: OnceLock<Box<[bool]>>,
 }
 
 impl Snapshot {
@@ -92,6 +93,7 @@ impl Snapshot {
             file_count,
             names_off,
             letter_mask: OnceLock::new(),
+            hidden: OnceLock::new(),
         })
     }
 
@@ -176,6 +178,41 @@ impl Snapshot {
             path.push(p);
         }
         path
+    }
+
+    pub(crate) fn is_hidden(&self, id: u32) -> bool {
+        self.hidden
+            .get_or_init(|| {
+                let mut hidden = vec![false; self.len() as usize];
+                for current in 0..self.len() {
+                    let Some(entry) = self.entry(current) else {
+                        continue;
+                    };
+                    let name = self.name(entry);
+                    let own = if entry.parent == Entry::ROOT_PARENT {
+                        Path::new(name).components().any(|part| {
+                            part.as_os_str()
+                                .as_encoded_bytes()
+                                .first()
+                                .is_some_and(|byte| *byte == b'.')
+                        })
+                    } else {
+                        name.as_bytes().first().is_some_and(|byte| *byte == b'.')
+                    };
+                    let inherited = entry
+                        .parent
+                        .try_into()
+                        .ok()
+                        .and_then(|parent: usize| hidden.get(parent))
+                        .copied()
+                        .unwrap_or(false);
+                    hidden[current as usize] = own || inherited;
+                }
+                hidden.into_boxed_slice()
+            })
+            .get(id as usize)
+            .copied()
+            .unwrap_or(false)
     }
 }
 

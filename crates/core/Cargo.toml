@@ -11,6 +11,7 @@ description = "Qfind Catalog: rebuild and search filenames"
 crossbeam-channel.workspace = true
 dirs.workspace = true
 globset.workspace = true
+ignore.workspace = true
 memmap2.workspace = true
 nucleo-matcher.workspace = true
 rayon.workspace = true

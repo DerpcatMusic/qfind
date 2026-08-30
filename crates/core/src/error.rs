@@ -16,6 +16,8 @@ pub enum Error {
     Snapshot { path: PathBuf, reason: &'static str },
     #[error("invalid query: {0}")]
     Query(String),
+    #[error("query cancelled")]
+    Cancelled,
     #[error("exclude pattern {pattern}: {source}")]
     Exclude {
         pattern: String,

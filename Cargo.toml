@@ -5,7 +5,7 @@ default-members = ["crates/core", "crates/cli", "crates/tui"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 rust-version = "1.88"
@@ -14,19 +14,26 @@ publish = false
 [workspace.dependencies]
 qfind-core = { path = "crates/core" }
 anyhow = "1"
+base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 crossbeam-channel = "0.5"
 crossterm = "0.29"
 dirs = "6"
 globset = "0.4"
+ignore = "0.4"
 gtk = { version = "0.11", package = "gtk4", features = ["v4_12"] }
+image = { version = "0.25.6", default-features = false, features = ["bmp", "gif", "ico", "jpeg", "png", "tiff", "webp"] }
 memmap2 = "0.9"
 nucleo-matcher = "0.3"
 ratatui = "0.30"
+ratatui-image = { version = "11.0.6", default-features = false, features = ["crossterm"] }
 rayon = "1"
 rustix = { version = "1", features = ["fs"] }
 tempfile = "3"
 thiserror = "2"
+
+[patch.crates-io]
+crossterm = { path = "vendor/crossterm" }
 
 [profile.release]
 lto = "thin"

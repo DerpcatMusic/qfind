@@ -4,6 +4,7 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 prefix="${PREFIX:-$HOME/.local}"
 cargo build --release --manifest-path "$root/Cargo.toml" -p qfind -p qfind-tui
 install -Dm755 "$root/target/release/qfind" "$prefix/bin/qfind"
+install -Dm755 "$root/target/release/qfind" "$prefix/bin/qfind-cli"
 install -Dm755 "$root/target/release/qfind-tui" "$prefix/bin/qfind-tui"
 if command -v pkg-config >/dev/null && pkg-config --exists gtk4; then
   cargo build --release --manifest-path "$root/Cargo.toml" -p qfind-gtk

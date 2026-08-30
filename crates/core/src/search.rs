@@ -16,12 +16,22 @@ pub(crate) struct Ranked {
 }
 
 pub(crate) fn search(snapshot: &Snapshot, query: &str, opts: SearchOpts) -> Result<Ranked> {
+    search_with_cancel(snapshot, query, opts, true, &|| false)
+}
+
+pub(crate) fn search_with_cancel(
+    snapshot: &Snapshot,
+    query: &str,
+    opts: SearchOpts,
+    show_hidden: bool,
+    cancelled: &(impl Fn() -> bool + Sync),
+) -> Result<Ranked> {
     let mut globs = Vec::new();
     let mut fuzzy_parts = Vec::new();
     let mut exts = Vec::new();
     for token in query.split_whitespace() {
         if let Some(ext) = ext_token(token) {
-            exts.push(ext);
+            exts.push(ext.to_ascii_lowercase());
         } else if token.contains(['*', '?']) {
             let glob = GlobBuilder::new(token)
                 .case_insensitive(true)
@@ -29,21 +39,26 @@ pub(crate) fn search(snapshot: &Snapshot, query: &str, opts: SearchOpts) -> Resu
                 .build()
                 .map_err(|e| Error::Query(e.to_string()))?;
             globs.push(glob.compile_matcher());
+        } else if bare_ext_token(token) {
+            exts.push(token.to_ascii_lowercase());
         } else {
             fuzzy_parts.push(token);
         }
     }
     if fuzzy_parts.is_empty() {
-        return Ok(scan_filtered(snapshot, opts, |name| {
+        return scan_filtered(snapshot, opts, show_hidden, cancelled, |name| {
             (globs.is_empty() || globs.iter().all(|g| g.is_match(name)))
                 && (exts.is_empty() || name_has_ext(name, &exts))
-        }));
+        });
     }
 
     let pattern = compile_pattern(&fuzzy_parts.join(" "), opts.match_mode);
     let cutoff = date_cutoff(opts.date);
     let keep = |id: u32| -> Option<&str> {
         let entry = snapshot.entry(id)?;
+        if !show_hidden && snapshot.is_hidden(id) {
+            return None;
+        }
         if !exts.is_empty() && entry.is_dir() {
             return None;
         }
@@ -78,7 +93,13 @@ pub(crate) fn search(snapshot: &Snapshot, query: &str, opts: SearchOpts) -> Resu
     };
     let mut cands = Vec::new();
     prefilter::scan_mask(slice, need, base, &mut cands);
+    if cancelled() {
+        return Err(Error::Cancelled);
+    }
     let score_one = |id: u32| {
+        if cancelled() {
+            return None;
+        }
         let name = keep(id)?;
         score_only(&pattern, name).map(|score| (score, id))
     };
@@ -88,7 +109,11 @@ pub(crate) fn search(snapshot: &Snapshot, query: &str, opts: SearchOpts) -> Resu
         cands.into_par_iter().filter_map(score_one).collect()
     };
 
-    apply_sort(snapshot, &mut scored, opts);
+    if cancelled() {
+        return Err(Error::Cancelled);
+    }
+
+    apply_sort(snapshot, &mut scored, opts, cancelled)?;
     if opts.limit > 0 && scored.len() > opts.limit {
         scored.truncate(opts.limit);
     }
@@ -100,6 +125,9 @@ pub(crate) fn search(snapshot: &Snapshot, query: &str, opts: SearchOpts) -> Resu
     let mut ids = Vec::with_capacity(scored.len());
     let mut indices = Vec::with_capacity(scored.len());
     for (_, id) in scored {
+        if cancelled() {
+            return Err(Error::Cancelled);
+        }
         let idx = snapshot
             .entry(id)
             .and_then(|e| highlight(&pattern, snapshot.name(e)))
@@ -131,7 +159,13 @@ fn compile_pattern(text: &str, mode: MatchMode) -> Pattern {
     }
 }
 
-fn scan_filtered(snapshot: &Snapshot, opts: SearchOpts, extra: impl Fn(&str) -> bool) -> Ranked {
+fn scan_filtered(
+    snapshot: &Snapshot,
+    opts: SearchOpts,
+    show_hidden: bool,
+    cancelled: &(impl Fn() -> bool + Sync),
+    extra: impl Fn(&str) -> bool,
+) -> Result<Ranked> {
     let cutoff = date_cutoff(opts.date);
     // Empty / glob-only + Score: files first so browse isn't 5k folders and zero files.
     // Stop at `cap` so we don't allocate the whole Catalog.
@@ -146,12 +180,18 @@ fn scan_filtered(snapshot: &Snapshot, opts: SearchOpts, extra: impl Fn(&str) -> 
     }
     let mut push_range = |start: u32, end: u32| {
         for id in start..end {
+            if cancelled() {
+                break;
+            }
             if scored.len() >= cap {
                 break;
             }
             let Some(entry) = snapshot.entry(id) else {
                 continue;
             };
+            if !show_hidden && snapshot.is_hidden(id) {
+                continue;
+            }
             if !date_matches(opts.date, entry.mtime, cutoff) {
                 continue;
             }
@@ -170,11 +210,14 @@ fn scan_filtered(snapshot: &Snapshot, opts: SearchOpts, extra: impl Fn(&str) -> 
             push_range(0, snapshot.folder_count());
         }
     }
-    apply_sort(snapshot, &mut scored, opts);
+    if cancelled() {
+        return Err(Error::Cancelled);
+    }
+    apply_sort(snapshot, &mut scored, opts, cancelled)?;
     if opts.limit > 0 && scored.len() > opts.limit {
         scored.truncate(opts.limit);
     }
-    take_ids(scored)
+    Ok(take_ids(scored))
 }
 
 /// `.wav` / `.exe` — extension filter, not a fuzzy atom. Several of these are OR.
@@ -187,7 +230,20 @@ fn ext_token(token: &str) -> Option<&str> {
     }
 }
 
-fn name_has_ext(name: &str, exts: &[&str]) -> bool {
+fn bare_ext_token(token: &str) -> bool {
+    const COMMON: &[&str] = &[
+        "7z", "aac", "ai", "aiff", "apk", "avi", "blend", "bmp", "c", "cpp", "cs", "css", "csv",
+        "doc", "docx", "dylib", "epub", "exe", "fish", "flac", "gif", "go", "gz", "h", "hpp",
+        "html", "ico", "java", "jpeg", "jpg", "js", "json", "jsonl", "jsx", "kt", "log", "lua",
+        "m4a", "md", "mkv", "mov", "mp3", "mp4", "ogg", "opus", "pdf", "php", "png", "ppt", "pptx",
+        "psd", "py", "rar", "rb", "rs", "scss", "sh", "so", "sql", "svg", "swift", "tar", "toml",
+        "ts", "tsx", "txt", "wav", "webm", "webp", "woff", "woff2", "xls", "xlsx", "xml", "xz",
+        "yaml", "yml", "zip", "zsh",
+    ];
+    COMMON.iter().any(|ext| token.eq_ignore_ascii_case(ext))
+}
+
+fn name_has_ext(name: &str, exts: &[String]) -> bool {
     let Some((_, ext)) = name.rsplit_once('.') else {
         return false;
     };
@@ -201,7 +257,12 @@ fn take_ids(scored: Vec<(u32, u32)>) -> Ranked {
     }
 }
 
-fn apply_sort(snapshot: &Snapshot, scored: &mut Vec<(u32, u32)>, opts: SearchOpts) {
+fn apply_sort(
+    snapshot: &Snapshot,
+    scored: &mut Vec<(u32, u32)>,
+    opts: SearchOpts,
+    cancelled: &(impl Fn() -> bool + Sync),
+) -> Result<()> {
     match opts.sort {
         // Stable on ties so empty Query can keep files-first insertion order.
         Sort::Score => scored.sort_by(|a, b| b.0.cmp(&a.0)),
@@ -218,11 +279,17 @@ fn apply_sort(snapshot: &Snapshot, scored: &mut Vec<(u32, u32)>, opts: SearchOpt
             }
             let mut meta: Vec<(u32, u32, u64, i64)> = scored
                 .par_iter()
-                .map(|&(score, id)| {
+                .filter_map(|&(score, id)| {
+                    if cancelled() {
+                        return None;
+                    }
                     let (size, mtime) = live_meta(&snapshot.path(id));
-                    (score, id, size, mtime)
+                    Some((score, id, size, mtime))
                 })
                 .collect();
+            if cancelled() {
+                return Err(Error::Cancelled);
+            }
             match opts.sort {
                 Sort::Newest => {
                     meta.sort_unstable_by(|a, b| b.3.cmp(&a.3).then(a.1.cmp(&b.1)));
@@ -240,6 +307,11 @@ fn apply_sort(snapshot: &Snapshot, scored: &mut Vec<(u32, u32)>, opts: SearchOpt
             }
             *scored = meta.into_iter().map(|(s, id, _, _)| (s, id)).collect();
         }
+    }
+    if cancelled() {
+        Err(Error::Cancelled)
+    } else {
+        Ok(())
     }
 }
 

@@ -1,5 +1,5 @@
 use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
@@ -51,10 +51,16 @@ const PATH_EXCLUDES: &[&str] = &[
 pub(crate) struct Excludes {
     names: Vec<String>,
     globs: GlobSet,
+    paths: Vec<PathBuf>,
 }
 
 impl Excludes {
+    #[cfg(test)]
     pub(crate) fn new(extra: &[String]) -> Result<Self> {
+        Self::with_paths(extra, &[])
+    }
+
+    pub(crate) fn with_paths(extra: &[String], paths: &[PathBuf]) -> Result<Self> {
         let mut names: Vec<String> = NAME_EXCLUDES.iter().map(|s| (*s).to_string()).collect();
         let mut builder = GlobSetBuilder::new();
         for pat in PATH_EXCLUDES
@@ -76,11 +82,15 @@ impl Excludes {
             pattern: "<set>".into(),
             source,
         })?;
-        Ok(Self { names, globs })
+        Ok(Self {
+            names,
+            globs,
+            paths: paths.to_vec(),
+        })
     }
 
     pub(crate) fn skip(&self, path: &Path) -> bool {
-        if self.globs.is_match(path) {
+        if self.globs.is_match(path) || self.paths.iter().any(|root| path.starts_with(root)) {
             return true;
         }
         path.components().any(|c| {

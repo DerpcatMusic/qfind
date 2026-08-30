@@ -1,14 +1,10 @@
-//! Skins, powerline chips, Nerd glyphs with unicode fallbacks.
-//! Palettes follow Oh My Pi / Prime Agent: named tokens, cycleable skins.
+//! Qfind's compact visual system and Nerd glyph fallbacks.
 
+use std::path::Path;
 use std::sync::OnceLock;
-use std::time::Duration;
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-
-const SPIN: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const SPIN_ASCII: &[&str] = &["|", "/", "-", "\\"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Theme {
@@ -30,18 +26,18 @@ pub struct Theme {
 impl Theme {
     pub const GROK: Self = Self {
         id: "grok",
-        bg: Color::Rgb(0x0b, 0x0e, 0x14),
-        surface: Color::Rgb(0x12, 0x15, 0x1c),
-        accent: Color::Rgb(0x5e, 0xea, 0xd4),
-        match_fg: Color::Rgb(0xfb, 0x92, 0x3c),
-        pink: Color::Rgb(0xf4, 0x72, 0xb6),
-        purple: Color::Rgb(0xc0, 0x84, 0xfc),
-        sky: Color::Rgb(0x38, 0xbd, 0xf8),
-        dim: Color::Rgb(0x64, 0x74, 0x8b),
-        text: Color::Rgb(0xe2, 0xe8, 0xf0),
-        select_bg: Color::Rgb(0x13, 0x4e, 0x4a),
-        zebra: Color::Rgb(0x11, 0x18, 0x27),
-        border: Color::Rgb(0x2a, 0x33, 0x44),
+        bg: Color::Rgb(0x0a, 0x0b, 0x10),
+        surface: Color::Rgb(0x12, 0x14, 0x1c),
+        accent: Color::Rgb(0x9b, 0xad, 0xff),
+        match_fg: Color::Rgb(0xd1, 0x9f, 0xff),
+        pink: Color::Rgb(0xea, 0x8c, 0xb5),
+        purple: Color::Rgb(0xa9, 0x8b, 0xe8),
+        sky: Color::Rgb(0x9b, 0xc5, 0xee),
+        dim: Color::Rgb(0x7d, 0x81, 0x90),
+        text: Color::Rgb(0xf1, 0xf2, 0xf7),
+        select_bg: Color::Rgb(0x20, 0x25, 0x38),
+        zebra: Color::Rgb(0x0a, 0x0b, 0x10),
+        border: Color::Rgb(0x2b, 0x30, 0x40),
     };
 
     /// Oh My Pi default dark skin.
@@ -54,7 +50,7 @@ impl Theme {
         pink: Color::Rgb(0xf0, 0xc0, 0x40),
         purple: Color::Rgb(0xd4, 0xc0, 0x90),
         sky: Color::Rgb(0x00, 0xff, 0x88),
-        dim: Color::Rgb(0x6b, 0x72, 0x80),
+        dim: Color::Rgb(0x9c, 0xa3, 0xaf),
         text: Color::Rgb(0xe8, 0xec, 0xf4),
         select_bg: Color::Rgb(0x00, 0x50, 0x70),
         zebra: Color::Rgb(0x15, 0x18, 0x20),
@@ -70,7 +66,7 @@ impl Theme {
         pink: Color::Rgb(0xf5, 0xc2, 0xe7),
         purple: Color::Rgb(0xcb, 0xa6, 0xf7),
         sky: Color::Rgb(0x89, 0xdc, 0xeb),
-        dim: Color::Rgb(0x6c, 0x70, 0x86),
+        dim: Color::Rgb(0xa6, 0xad, 0xc8),
         text: Color::Rgb(0xcd, 0xd6, 0xf4),
         select_bg: Color::Rgb(0x45, 0x47, 0x5a),
         zebra: Color::Rgb(0x18, 0x18, 0x25),
@@ -86,7 +82,7 @@ impl Theme {
         pink: Color::Rgb(0xd3, 0x86, 0x9b),
         purple: Color::Rgb(0xd3, 0x86, 0x9b),
         sky: Color::Rgb(0x83, 0xa5, 0x98),
-        dim: Color::Rgb(0x92, 0x83, 0x74),
+        dim: Color::Rgb(0xa8, 0x99, 0x84),
         text: Color::Rgb(0xeb, 0xdb, 0xb2),
         select_bg: Color::Rgb(0x50, 0x49, 0x45),
         zebra: Color::Rgb(0x32, 0x30, 0x2f),
@@ -102,7 +98,7 @@ impl Theme {
         pink: Color::Rgb(0xff, 0x79, 0xc6),
         purple: Color::Rgb(0xbd, 0x93, 0xf9),
         sky: Color::Rgb(0x50, 0xfa, 0x7b),
-        dim: Color::Rgb(0x62, 0x72, 0xa4),
+        dim: Color::Rgb(0x9a, 0xa3, 0xc7),
         text: Color::Rgb(0xf8, 0xf8, 0xf2),
         select_bg: Color::Rgb(0x44, 0x47, 0x5a),
         zebra: Color::Rgb(0x21, 0x22, 0x2c),
@@ -118,7 +114,7 @@ impl Theme {
         pink: Color::Rgb(0xb4, 0x8e, 0xad),
         purple: Color::Rgb(0xb4, 0x8e, 0xad),
         sky: Color::Rgb(0x81, 0xa1, 0xc1),
-        dim: Color::Rgb(0x4c, 0x56, 0x6a),
+        dim: Color::Rgb(0xae, 0xb8, 0xc8),
         text: Color::Rgb(0xec, 0xef, 0xf4),
         select_bg: Color::Rgb(0x43, 0x4c, 0x5e),
         zebra: Color::Rgb(0x3b, 0x42, 0x52),
@@ -134,7 +130,7 @@ impl Theme {
         pink: Color::Rgb(0xf4, 0x72, 0xb6),
         purple: Color::Rgb(0xa7, 0x8b, 0xfa),
         sky: Color::Rgb(0x22, 0xd3, 0xee),
-        dim: Color::Rgb(0x64, 0x74, 0x8b),
+        dim: Color::Rgb(0x94, 0xa3, 0xb8),
         text: Color::Rgb(0xe2, 0xe8, 0xf0),
         select_bg: Color::Rgb(0x06, 0x4e, 0x3b),
         zebra: Color::Rgb(0x0f, 0x17, 0x2a),
@@ -162,26 +158,27 @@ impl Theme {
     }
 
     #[must_use]
+    #[allow(dead_code)]
     pub fn next(self) -> Self {
         let i = Self::ALL.iter().position(|t| t.id == self.id).unwrap_or(0);
         Self::ALL[(i + 1) % Self::ALL.len()]
     }
 
     #[must_use]
-    pub fn shimmer(self, t: Duration, i: usize) -> Color {
-        let phase = t.as_secs_f32() * 2.4 + (i as f32) * 0.45;
-        let w = (phase.sin() * 0.5 + 0.5).clamp(0.0, 1.0) * 0.45;
-        lerp(self.accent, self.text, w)
+    pub fn map_tile(self, i: usize) -> Color {
+        let color = [self.accent, self.purple, self.sky, self.pink][i % 4];
+        lerp(self.surface, color, 0.46)
     }
 
     #[must_use]
-    pub fn pulse(self, t: Duration) -> Color {
-        let w = ((t.as_secs_f32() * 3.2).sin() * 0.5 + 0.5).clamp(0.0, 1.0) * 0.35;
-        lerp(self.select_bg, self.accent, w)
+    pub fn glow(self, t: f32) -> Color {
+        if t < 0.5 {
+            lerp(self.accent, self.purple, t * 2.0)
+        } else {
+            lerp(self.purple, self.pink, (t - 0.5) * 2.0)
+        }
     }
 }
-
-pub const BAR: &str = "▎";
 
 pub struct Chip {
     pub text: String,
@@ -220,12 +217,8 @@ pub fn nerd() -> bool {
     })
 }
 
-pub fn sep() -> &'static str {
-    if nerd() { "\u{e0b0}" } else { ">" }
-}
-
 pub fn icon_prompt() -> &'static str {
-    if nerd() { "\u{f0349}" } else { "❯" }
+    if nerd() { "\u{f0349}" } else { "⌕" }
 }
 
 pub fn icon_folder() -> &'static str {
@@ -236,11 +229,33 @@ pub fn icon_file() -> &'static str {
     if nerd() { "\u{f0214}" } else { "·" }
 }
 
-#[must_use]
-pub fn spin_frame(t: Duration) -> &'static str {
-    let frames = if nerd() { SPIN } else { SPIN_ASCII };
-    let ms = if nerd() { 80 } else { 120 };
-    frames[(t.as_millis() / ms) as usize % frames.len()]
+pub fn icon_for(path: &Path, is_dir: bool) -> &'static str {
+    if is_dir {
+        return icon_folder();
+    }
+    if !nerd() {
+        return icon_file();
+    }
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "ico" => "\u{f03e}",
+        "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aiff" => "\u{f001}",
+        "mp4" | "mkv" | "mov" | "avi" | "webm" => "\u{f03d}",
+        "zip" | "gz" | "xz" | "7z" | "rar" | "tar" => "\u{f410}",
+        "pdf" => "\u{f1c1}",
+        "rs" => "\u{e7a8}",
+        "toml" | "yaml" | "yml" | "json" | "ini" | "conf" => "\u{e615}",
+        "sh" | "bash" | "zsh" | "fish" => "\u{f489}",
+        "c" | "h" | "cpp" | "hpp" | "js" | "jsx" | "ts" | "tsx" | "py" | "go" | "java" | "html"
+        | "css" => "\u{f121}",
+        "md" | "txt" | "rst" | "doc" | "docx" => "\u{f15c}",
+        _ => icon_file(),
+    }
 }
 
 #[must_use]
@@ -251,13 +266,6 @@ pub fn compact(n: u32) -> String {
         n if n >= 1_000 => format!("{:.1}k", f64::from(n) / 1000.0),
         n => n.to_string(),
     }
-}
-
-pub fn chip(text: &str, fg: Color, bg: Color) -> Span<'static> {
-    Span::styled(
-        format!(" {text} "),
-        Style::new().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
-    )
 }
 
 pub fn fit_chips(chips: Vec<Chip>, width: u16) -> Vec<Chip> {
@@ -275,13 +283,12 @@ pub fn fit_chips(chips: Vec<Chip>, width: u16) -> Vec<Chip> {
     out
 }
 
-pub fn powerline(chips: &[Chip], width: u16, trail: Color) -> Line<'static> {
+pub fn toolbar(chips: &[Chip], width: u16, trail: Color) -> Line<'static> {
     let mut spans = Vec::with_capacity(chips.len() * 2 + 1);
     let mut used = 0usize;
     for (i, chip) in chips.iter().enumerate() {
         let body = format!(" {} ", chip.text);
-        used += body.chars().count() + 1;
-        let next = chips.get(i + 1).map(|c| c.bg).unwrap_or(trail);
+        used += body.chars().count();
         spans.push(Span::styled(
             body,
             Style::new()
@@ -289,45 +296,16 @@ pub fn powerline(chips: &[Chip], width: u16, trail: Color) -> Line<'static> {
                 .bg(chip.bg)
                 .add_modifier(Modifier::BOLD),
         ));
-        spans.push(Span::styled(sep(), Style::new().fg(chip.bg).bg(next)));
+        if i + 1 < chips.len() {
+            spans.push(Span::styled(" ", Style::new().bg(trail)));
+            used += 1;
+        }
     }
     let pad = (width as usize).saturating_sub(used);
     if pad > 0 {
         spans.push(Span::styled(" ".repeat(pad), Style::new().bg(trail)));
     }
     Line::from(spans)
-}
-
-pub fn hsl(h: f32, s: f32, l: f32) -> Color {
-    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
-    let hp = (h.rem_euclid(360.0)) / 60.0;
-    let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
-    let m = l - c / 2.0;
-    let (r, g, b) = match hp as i32 {
-        0 => (c, x, 0.0),
-        1 => (x, c, 0.0),
-        2 => (0.0, c, x),
-        3 => (0.0, x, c),
-        4 => (x, 0.0, c),
-        _ => (c, 0.0, x),
-    };
-    Color::Rgb(
-        ((r + m) * 255.0).round().clamp(0.0, 255.0) as u8,
-        ((g + m) * 255.0).round().clamp(0.0, 255.0) as u8,
-        ((b + m) * 255.0).round().clamp(0.0, 255.0) as u8,
-    )
-}
-
-pub fn hsl_tile(seed: &str, i: usize, s: f32, l: f32) -> Color {
-    let mut h = 17u32;
-    for (n, b) in seed.bytes().enumerate() {
-        h = h
-            .wrapping_mul(31)
-            .wrapping_add(u32::from(b))
-            .wrapping_add(n as u32);
-    }
-    h = h.wrapping_add((i as u32).wrapping_mul(47));
-    hsl((h % 360) as f32, s, l)
 }
 
 fn lerp(a: Color, b: Color, t: f32) -> Color {

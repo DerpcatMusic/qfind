@@ -11,3 +11,9 @@ packaging/vicinae/search.js
 packaging/kde/build/
 __pycache__/
 *.pyc
+.impeccable/
+vendor/crossterm/*
+!vendor/crossterm/Cargo.toml
+!vendor/crossterm/LICENSE
+!vendor/crossterm/src/
+!vendor/crossterm/src/**

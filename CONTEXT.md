@@ -14,6 +14,7 @@ _Avoid_: result, match, document, record, entry
 
 **Query**:
 The text the user typed to filter the Catalog.
+Only the most recently typed Query is current; older Query work must never replace its Hits.
 _Avoid_: pattern, filter (as the typed thing), search string
 
 **Exclude**:
@@ -58,11 +59,11 @@ _Avoid_: view (the GTK widget), layout, mode
 _Avoid_: scale (alone), magnification
 
 **WeightMap**:
-Folder rectangles for the current Hits, sized by weight (size, else count). WizTree-style strip, not the whole disk.
+Rectangles for the current Hits or browsed folder. Size uses live file bytes; File Types uses the number of files per extension. WizTree-style strip, not the whole disk.
 _Avoid_: heatmap, disk map, treemap (in UI copy)
 
 **Config**:
-User settings: extra Exclude, include Mounts, Zoom, spacing, PreviewMode, zebra, WeightMap, OpenMode, editor. `$XDG_CONFIG_HOME/qfind/config.toml`.
+User settings: extra Exclude paths/rules, include Mounts, hidden visibility, Git/`.ignore` rules, Zoom, spacing, PreviewMode, zebra, WeightMap, OpenMode, editor. `$XDG_CONFIG_HOME/qfind/config.toml`.
 _Avoid_: preferences, options dump
 
 **OpenMode**:
@@ -72,3 +73,7 @@ _Avoid_: launcher, handler (alone)
 **PreviewMode**:
 Space previews the hovered Hit or the selected Hit.
 _Avoid_: quick look setting
+
+**Preview**:
+The text, image, or generated visual shown for the current Hit. A Preview from an older Hit is never current.
+_Avoid_: thumbnail (except the smaller image inside a grid tile), quick look

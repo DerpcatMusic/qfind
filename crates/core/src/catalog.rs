@@ -14,6 +14,7 @@ pub struct Rebuild {
     snapshot: PathBuf,
     roots: Option<Vec<PathBuf>>,
     extra_excludes: Vec<String>,
+    extra_exclude_paths: Vec<PathBuf>,
 }
 
 impl Rebuild {
@@ -23,6 +24,7 @@ impl Rebuild {
             snapshot: snapshot.into(),
             roots: None,
             extra_excludes: Vec::new(),
+            extra_exclude_paths: Vec::new(),
         }
     }
 
@@ -36,6 +38,12 @@ impl Rebuild {
     #[must_use]
     pub fn exclude(mut self, pattern: impl Into<String>) -> Self {
         self.extra_excludes.push(pattern.into());
+        self
+    }
+
+    #[must_use]
+    pub fn exclude_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.extra_exclude_paths.push(path.into());
         self
     }
 }
@@ -66,7 +74,7 @@ impl Catalog {
     /// # Errors
     /// Returns I/O or Exclude errors. Permission errors on individual files are skipped.
     pub fn rebuild(rebuild: Rebuild) -> Result<Self> {
-        let excludes = Excludes::new(&rebuild.extra_excludes)?;
+        let excludes = Excludes::with_paths(&rebuild.extra_excludes, &rebuild.extra_exclude_paths)?;
         let roots = match rebuild.roots {
             Some(r) => r,
             None => mounts::discover()
@@ -130,6 +138,44 @@ impl Catalog {
     /// Returns [`Error::Query`] for a malformed glob.
     pub fn search_with(&self, query: &str, opts: crate::SearchOpts) -> Result<Hits<'_>> {
         let ranked = search::search(&self.snapshot, query, opts)?;
+        Ok(Hits {
+            catalog: self,
+            ids: ranked.ids,
+            indices: ranked.indices,
+        })
+    }
+
+    /// Filter while allowing a caller to stop stale Query work.
+    ///
+    /// # Errors
+    /// Returns [`Error::Cancelled`](crate::Error::Cancelled) when `cancelled` becomes true.
+    pub fn search_with_cancel(
+        &self,
+        query: &str,
+        opts: crate::SearchOpts,
+        cancelled: impl Fn() -> bool + Sync,
+    ) -> Result<Hits<'_>> {
+        let ranked = search::search_with_cancel(&self.snapshot, query, opts, true, &cancelled)?;
+        Ok(Hits {
+            catalog: self,
+            ids: ranked.ids,
+            indices: ranked.indices,
+        })
+    }
+
+    /// Filter while optionally hiding dotfiles and allowing stale work to stop.
+    ///
+    /// # Errors
+    /// Returns [`Error::Cancelled`](crate::Error::Cancelled) when `cancelled` becomes true.
+    pub fn search_with_hidden_cancel(
+        &self,
+        query: &str,
+        opts: crate::SearchOpts,
+        show_hidden: bool,
+        cancelled: impl Fn() -> bool + Sync,
+    ) -> Result<Hits<'_>> {
+        let ranked =
+            search::search_with_cancel(&self.snapshot, query, opts, show_hidden, &cancelled)?;
         Ok(Hits {
             catalog: self,
             ids: ranked.ids,

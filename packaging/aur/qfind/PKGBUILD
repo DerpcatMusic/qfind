@@ -1,6 +1,6 @@
 # Maintainer: Derpcat <https://github.com/DerpcatMusic>
 pkgname=qfind
-pkgver=0.1.2
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="Instant filename search (CLI and TUI)"
 arch=('x86_64' 'aarch64')
@@ -8,14 +8,11 @@ url="https://github.com/DerpcatMusic/qfind"
 license=('MIT')
 depends=('gcc-libs' 'glibc')
 makedepends=('cargo')
-optdepends=(
-  'qfind-gtk: GTK interface'
-  'ripdrag: drag from the TUI'
-)
+optdepends=('qfind-gtk: GTK interface')
 conflicts=('qfind-bin')
 options=('!lto')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/DerpcatMusic/qfind/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('48071c46a114b4593b089ffc42308353b9b355f5ac49195a157b67172807dbc8')
+sha256sums=('SKIP')
 
 prepare() {
   cd "$pkgname-$pkgver"
