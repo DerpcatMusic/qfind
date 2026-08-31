@@ -3,7 +3,12 @@ $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $Version = if ($args.Count) { $args[0] } else {
     (Select-String -Path "$Root\Cargo.toml" -Pattern '^version = "(.+)"$').Matches[0].Groups[1].Value
 }
-$Name = "qfind-$Version-windows-x86_64"
+$Arch = switch ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()) {
+    "X64" { "x86_64" }
+    "Arm64" { "arm64" }
+    default { throw "Unsupported architecture: $([Runtime.InteropServices.RuntimeInformation]::OSArchitecture)" }
+}
+$Name = "qfind-$Version-windows-$Arch"
 $Stage = "$Root\target\dist\$Name"
 
 Remove-Item $Stage -Recurse -Force -ErrorAction SilentlyContinue

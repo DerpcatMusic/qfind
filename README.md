@@ -33,7 +33,31 @@ Qfind has no startup splash. Config changes made in the TUI are saved and applie
 
 ## Install
 
-### Prebuilt Linux x86_64 release
+### Linux and macOS
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://raw.githubusercontent.com/DerpcatMusic/qfind/main/install.sh | sh
+```
+
+This installs `qfind` and `qfind-tui` into `~/.local/bin`. Override it with `QFIND_INSTALL_DIR=/your/bin`, or install a particular release with `QFIND_VERSION=v0.3.0`.
+
+### Windows PowerShell
+
+```powershell
+irm https://raw.githubusercontent.com/DerpcatMusic/qfind/main/install.ps1 | iex
+```
+
+This installs both executables in `%LOCALAPPDATA%\Programs\qfind` and adds that directory to your user `PATH`. Set `$env:QFIND_INSTALL_DIR` or `$env:QFIND_VERSION` first to override those defaults.
+
+After installation:
+
+```bash
+qfind index
+qfind
+```
+
+### Manual Linux x86_64 release
 
 ```bash
 curl -L https://github.com/DerpcatMusic/qfind/releases/download/v0.2.0/qfind-0.2.0-x86_64.tar.zst \
@@ -77,7 +101,7 @@ cargo build --release -p qfind -p qfind-tui
 sudo install -m755 target/release/qfind target/release/qfind-tui /usr/local/bin/
 ```
 
-Qfind indexes `/`, including mounted disks under `/Volumes`. Enter opens the macOS default app, `Space` can hand the selection to Quick Look, `Ctrl+O` reveals it in Finder, and `Ctrl+Y` uses `pbcopy`. Build a native Intel or Apple Silicon archive with `./packaging/release-macos.sh`.
+Qfind indexes `/`, including mounted disks under `/Volumes`. Enter opens the macOS default app, `Space` can hand the selection to Quick Look, `Ctrl+O` reveals it in Finder, and `Ctrl+Y` uses `pbcopy`. Build a native Intel or Apple Silicon archive with `./packaging/release-tui.sh`.
 
 ### Windows
 

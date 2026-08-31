@@ -1769,7 +1769,7 @@ checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
 name = "qfind"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1779,7 +1779,7 @@ dependencies = [
 
 [[package]]
 name = "qfind-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "crossbeam-channel",
  "dirs",
@@ -1795,7 +1795,7 @@ dependencies = [
 
 [[package]]
 name = "qfind-gtk"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "gtk4",
@@ -1804,7 +1804,7 @@ dependencies = [
 
 [[package]]
 name = "qfind-tui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "base64",

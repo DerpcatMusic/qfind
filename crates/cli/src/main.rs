@@ -10,7 +10,11 @@ use qfind_core::{
 };
 
 #[derive(Parser)]
-#[command(name = "qfind", about = "Search filenames in the Qfind Catalog")]
+#[command(
+    name = "qfind",
+    version,
+    about = "Search filenames in the Qfind Catalog"
+)]
 struct Cli {
     /// Print paths NUL-separated
     #[arg(short = '0', long = "nul", global = true)]

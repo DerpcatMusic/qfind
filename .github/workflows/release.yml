@@ -1,0 +1,48 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  unix:
+    strategy:
+      matrix:
+        runner: [ubuntu-24.04, macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - run: ./packaging/release-tui.sh "${GITHUB_REF_NAME#v}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qfind-${{ matrix.runner }}
+          path: target/dist/*.tar.gz
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - shell: pwsh
+        run: .\packaging\release-windows.ps1 ($env:GITHUB_REF_NAME.TrimStart('v'))
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qfind-windows
+          path: target/dist/*.zip
+
+  publish:
+    needs: [unix, windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          path: dist
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
+          mapfile -d '' assets < <(find dist -type f -print0)
+          gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
