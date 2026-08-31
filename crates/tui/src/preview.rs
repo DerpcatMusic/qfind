@@ -516,6 +516,7 @@ fn external_thumbnail(
 
 fn run(command: &mut Command, cancelled: impl Fn() -> bool) -> Result<(), String> {
     let mut child = command
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()

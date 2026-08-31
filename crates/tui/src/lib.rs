@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -44,7 +44,7 @@ pub fn run() -> Result<()> {
     let mut terminal = ratatui::init();
     let picker = graphics_picker();
     let _ = enable_mouse();
-    let result = (|| {
+    let result = (|| -> Result<Option<(String, Vec<String>, PathBuf)>> {
         let catalog = if snapshot.exists() {
             Catalog::open(&snapshot).with_context(|| format!("open {}", snapshot.display()))?
         } else {
@@ -55,11 +55,15 @@ pub fn run() -> Result<()> {
         let (mut reactor, events) = reactor::Reactor::new();
         let mut app = App::new(catalog, theme, picker, events);
         app.kick_search();
-        event_loop(&mut terminal, &mut app, &mut reactor)
+        event_loop(&mut terminal, &mut app, &mut reactor)?;
+        Ok(app.exit_command.take())
     })();
     let _ = disable_mouse();
     ratatui::restore();
-    result
+    match result? {
+        Some((program, args, path)) => launch_editor(&program, &args, &path),
+        None => Ok(()),
+    }
 }
 
 fn graphics_picker() -> Picker {
@@ -238,6 +242,7 @@ struct App {
     events: reactor::Sender<WorkEvent>,
     rebuilding: bool,
     rebuild_pending: bool,
+    exit_command: Option<(String, Vec<String>, PathBuf)>,
 }
 
 #[derive(Clone, Copy)]
@@ -346,6 +351,7 @@ impl App {
             events,
             rebuilding: false,
             rebuild_pending: false,
+            exit_command: None,
         }
     }
 
@@ -699,13 +705,7 @@ impl App {
         match cfg.open_how(&path, is_dir) {
             OpenHow::Desktop => self.spawn_desktop(&path),
             OpenHow::Editor { program, args } => {
-                match Command::new(&program).args(&args).arg(&path).spawn() {
-                    Ok(_) => self.status = format!("{program}  {}", path.display()),
-                    Err(err) => {
-                        self.status = format!("{program}: {err}");
-                        self.spawn_desktop(&path);
-                    }
-                }
+                self.exit_command = Some((program, args, path));
             }
         }
     }
@@ -724,19 +724,22 @@ impl App {
         };
         let path = row.path.clone();
         #[cfg(target_os = "linux")]
-        if Command::new("sushi").arg(&path).spawn().is_ok() {
-            self.status = format!("preview  {}", path.display());
-            return;
+        {
+            let mut command = Command::new("sushi");
+            command.arg(&path);
+            if spawn_detached(&mut command).is_ok() {
+                self.status = format!("preview  {}", path.display());
+                return;
+            }
         }
         #[cfg(target_os = "macos")]
-        if Command::new("qlmanage")
-            .arg("-p")
-            .arg(&path)
-            .spawn()
-            .is_ok()
         {
-            self.status = format!("Quick Look  {}", path.display());
-            return;
+            let mut command = Command::new("qlmanage");
+            command.arg("-p").arg(&path);
+            if spawn_detached(&mut command).is_ok() {
+                self.status = format!("Quick Look  {}", path.display());
+                return;
+            }
         }
         self.spawn_desktop(&path);
     }
@@ -749,20 +752,20 @@ impl App {
         #[cfg(target_os = "linux")]
         {
             let uri = format!("file://{}", path.display());
-            let dbus = Command::new("gdbus")
-                .args([
-                    "call",
-                    "--session",
-                    "--dest",
-                    "org.freedesktop.FileManager1",
-                    "--object-path",
-                    "/org/freedesktop/FileManager1",
-                    "--method",
-                    "org.freedesktop.FileManager1.ShowItems",
-                    &format!("['{uri}']"),
-                    "",
-                ])
-                .spawn();
+            let mut command = Command::new("gdbus");
+            command.args([
+                "call",
+                "--session",
+                "--dest",
+                "org.freedesktop.FileManager1",
+                "--object-path",
+                "/org/freedesktop/FileManager1",
+                "--method",
+                "org.freedesktop.FileManager1.ShowItems",
+                &format!("['{uri}']"),
+                "",
+            ]);
+            let dbus = spawn_detached(&mut command);
             if dbus.is_ok() {
                 self.status = format!("show in files  {}", path.display());
                 return;
@@ -770,7 +773,9 @@ impl App {
         }
         #[cfg(target_os = "macos")]
         {
-            match Command::new("open").arg("-R").arg(&path).spawn() {
+            let mut command = Command::new("open");
+            command.arg("-R").arg(&path);
+            match spawn_detached(&mut command) {
                 Ok(_) => self.status = format!("show in Finder  {}", path.display()),
                 Err(err) => self.status = format!("reveal: {err}"),
             }
@@ -778,11 +783,9 @@ impl App {
         }
         #[cfg(target_os = "windows")]
         {
-            match Command::new("explorer.exe")
-                .arg("/select,")
-                .arg(&path)
-                .spawn()
-            {
+            let mut command = Command::new("explorer.exe");
+            command.arg("/select,").arg(&path);
+            match spawn_detached(&mut command) {
                 Ok(_) => self.status = format!("show in Explorer  {}", path.display()),
                 Err(err) => self.status = format!("reveal: {err}"),
             }
@@ -938,6 +941,9 @@ fn event_loop(
             }
             reactor::Event::Terminal(Event::Resize(_, _)) => dirty = true,
             reactor::Event::Terminal(_) => {}
+        }
+        if app.exit_command.is_some() {
+            break;
         }
     }
     Ok(())
@@ -1964,7 +1970,6 @@ fn next_class(class: FileClass) -> FileClass {
 
 fn pipe_copy(bin: &str, args: &[&str], text: &str) -> bool {
     use std::io::Write;
-    use std::process::Stdio;
     let Ok(mut child) = Command::new(bin)
         .args(args)
         .stdin(Stdio::piped())
@@ -1980,24 +1985,49 @@ fn pipe_copy(bin: &str, args: &[&str], text: &str) -> bool {
     child.wait().map(|s| s.success()).unwrap_or(false)
 }
 
+fn spawn_detached(command: &mut Command) -> std::io::Result<std::process::Child> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+}
+
+fn launch_editor(program: &str, args: &[String], path: &Path) -> Result<()> {
+    let mut command = Command::new(program);
+    command.args(args).arg(path);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let error = command.exec();
+        Err(error).with_context(|| format!("open {} with {program}", path.display()))
+    }
+    #[cfg(not(unix))]
+    {
+        spawn_detached(&mut command)
+            .with_context(|| format!("open {} with {program}", path.display()))?;
+        Ok(())
+    }
+}
+
 fn desktop_open(path: &Path) -> (&'static str, std::io::Result<std::process::Child>) {
     #[cfg(target_os = "windows")]
     {
-        return (
-            "open",
-            Command::new("cmd.exe")
-                .args(["/C", "start", ""])
-                .arg(path)
-                .spawn(),
-        );
+        let mut command = Command::new("cmd.exe");
+        command.args(["/C", "start", ""]).arg(path);
+        return ("open", spawn_detached(&mut command));
     }
     #[cfg(target_os = "macos")]
     {
-        return ("open", Command::new("open").arg(path).spawn());
+        let mut command = Command::new("open");
+        command.arg(path);
+        return ("open", spawn_detached(&mut command));
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        ("xdg-open", Command::new("xdg-open").arg(path).spawn())
+        let mut command = Command::new("xdg-open");
+        command.arg(path);
+        ("xdg-open", spawn_detached(&mut command))
     }
 }
 
