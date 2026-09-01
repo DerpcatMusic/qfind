@@ -16,7 +16,7 @@ pub(crate) struct Ranked {
 }
 
 pub(crate) fn search(snapshot: &Snapshot, query: &str, opts: SearchOpts) -> Result<Ranked> {
-    search_with_cancel(snapshot, query, opts, true, &|| false)
+    search_with_cancel(snapshot, query, opts, true, None, false, &|| false)
 }
 
 pub(crate) fn search_with_cancel(
@@ -24,6 +24,8 @@ pub(crate) fn search_with_cancel(
     query: &str,
     opts: SearchOpts,
     show_hidden: bool,
+    folder: Option<u32>,
+    direct_children: bool,
     cancelled: &(impl Fn() -> bool + Sync),
 ) -> Result<Ranked> {
     let mut globs = Vec::new();
@@ -46,16 +48,34 @@ pub(crate) fn search_with_cancel(
         }
     }
     if fuzzy_parts.is_empty() {
-        return scan_filtered(snapshot, opts, show_hidden, cancelled, |name| {
-            (globs.is_empty() || globs.iter().all(|g| g.is_match(name)))
-                && (exts.is_empty() || name_has_ext(name, &exts))
-        });
+        return scan_filtered(
+            snapshot,
+            opts,
+            show_hidden,
+            folder,
+            direct_children,
+            cancelled,
+            |name| {
+                (globs.is_empty() || globs.iter().all(|g| g.is_match(name)))
+                    && (exts.is_empty() || name_has_ext(name, &exts))
+            },
+        );
     }
 
     let pattern = compile_pattern(&fuzzy_parts.join(" "), opts.match_mode);
     let cutoff = date_cutoff(opts.date);
     let keep = |id: u32| -> Option<&str> {
         let entry = snapshot.entry(id)?;
+        if let Some(folder) = folder {
+            let belongs = if direct_children {
+                entry.parent == folder
+            } else {
+                snapshot.is_descendant_of(id, folder)
+            };
+            if !belongs {
+                return None;
+            }
+        }
         if !show_hidden && snapshot.is_hidden(id) {
             return None;
         }
@@ -163,6 +183,8 @@ fn scan_filtered(
     snapshot: &Snapshot,
     opts: SearchOpts,
     show_hidden: bool,
+    folder: Option<u32>,
+    direct_children: bool,
     cancelled: &(impl Fn() -> bool + Sync),
     extra: impl Fn(&str) -> bool,
 ) -> Result<Ranked> {
@@ -189,6 +211,16 @@ fn scan_filtered(
             let Some(entry) = snapshot.entry(id) else {
                 continue;
             };
+            if let Some(folder) = folder {
+                let belongs = if direct_children {
+                    entry.parent == folder
+                } else {
+                    snapshot.is_descendant_of(id, folder)
+                };
+                if !belongs {
+                    continue;
+                }
+            }
             if !show_hidden && snapshot.is_hidden(id) {
                 continue;
             }
@@ -206,8 +238,13 @@ fn scan_filtered(
         Scope::Files => push_range(snapshot.folder_count(), snapshot.len()),
         Scope::Folders => push_range(0, snapshot.folder_count()),
         Scope::All => {
-            push_range(snapshot.folder_count(), snapshot.len());
-            push_range(0, snapshot.folder_count());
+            if direct_children {
+                push_range(0, snapshot.folder_count());
+                push_range(snapshot.folder_count(), snapshot.len());
+            } else {
+                push_range(snapshot.folder_count(), snapshot.len());
+                push_range(0, snapshot.folder_count());
+            }
         }
     }
     if cancelled() {

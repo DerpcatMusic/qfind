@@ -10,8 +10,8 @@ use gtk::gio;
 use gtk::glib;
 use gtk::prelude::*;
 use qfind_core::{
-    Catalog, HitRef, PreviewMode, Surface, Tile, Zoom, fold_stems, folder_weights, split_filename,
-    squarify, walk_visible,
+    Catalog, HitRef, PreviewMode, Surface, Weighted, Zoom, fold_stems, folder_weights,
+    split_filename, squarify, walk_visible,
 };
 
 use crate::actions::{preview, selected_row};
@@ -22,7 +22,6 @@ pub struct Host {
     pub root: gtk::Box,
     pub stack: gtk::Stack,
     pub list: gtk::ListView,
-    pub else_list: Option<gtk::ListView>,
     pub grid: gtk::GridView,
     #[allow(dead_code)]
     pub tree: gtk::ListView,
@@ -35,7 +34,7 @@ pub struct Host {
     pub show_weight: Rc<Cell<bool>>,
     pub collapsed: Rc<RefCell<HashSet<String>>>,
     pub tree_src: RefCell<Option<(Catalog, Vec<u32>)>>,
-    pub tiles: Rc<RefCell<Vec<Tile>>>,
+    pub weights: Rc<RefCell<Vec<Weighted>>>,
 }
 
 impl Host {
@@ -55,10 +54,6 @@ impl Host {
         // Visible widgets only. items_changed on the same GObjects is a no-op
         // in GTK4, which is why list Zoom used to look like it did nothing.
         restyle_hits(&self.list, &self.grid, zoom, self.spacing.get());
-        if let Some(else_list) = &self.else_list {
-            restyle_hits(else_list, &self.grid, zoom, self.spacing.get());
-            else_list.queue_resize();
-        }
         self.fit_names();
         self.list.queue_resize();
         self.grid.queue_resize();
@@ -73,9 +68,6 @@ impl Host {
             }
         };
         walk_apply(self.list.upcast_ref(), &fit);
-        if let Some(else_list) = &self.else_list {
-            walk_apply(else_list.upcast_ref(), &fit);
-        }
         walk_apply(self.grid.upcast_ref(), &fit);
         walk_apply(self.tree.upcast_ref(), &fit);
     }
@@ -89,7 +81,7 @@ impl Host {
         if w <= 1 {
             return;
         }
-        let cols = zoom.columns_for(w);
+        let cols = (w / grid_cell_px(zoom)).max(1) as u32;
         if self.grid.min_columns() != cols || self.grid.max_columns() != cols {
             self.grid.set_min_columns(cols);
             self.grid.set_max_columns(cols);
@@ -242,26 +234,28 @@ pub fn rebuild_weight(host: &Host, catalog: &Catalog, ids: &[u32]) {
             })
         })
         .collect();
-    let folders = folder_weights(&items);
-    let tiles = squarify(
-        folders,
-        f64::from(host.weight.width().max(1)),
-        f64::from(host.weight.height().max(1)),
-    );
-    *host.tiles.borrow_mut() = tiles;
+    rebuild_weight_values(host, folder_weights(&items));
+}
+
+pub fn rebuild_weight_values(host: &Host, weights: Vec<Weighted>) {
+    *host.weights.borrow_mut() = weights;
     host.weight.queue_draw();
 }
 
-pub fn make_weight_area(tiles: Rc<RefCell<Vec<Tile>>>) -> gtk::DrawingArea {
+pub fn make_weight_area(weights: Rc<RefCell<Vec<Weighted>>>) -> gtk::DrawingArea {
     let area = gtk::DrawingArea::new();
     area.set_content_height(132);
     area.set_hexpand(true);
-    let tiles_draw = Rc::clone(&tiles);
+    let weights_draw = Rc::clone(&weights);
     area.set_draw_func(move |_, cr, w, h| {
         cr.set_source_rgb(0.08, 0.09, 0.11);
         cr.rectangle(0.0, 0.0, f64::from(w), f64::from(h));
         let _ = cr.fill();
-        let tiles = tiles_draw.borrow();
+        let tiles = squarify(
+            weights_draw.borrow().clone(),
+            f64::from(w.max(1)),
+            f64::from(h.max(1)),
+        );
         for (i, t) in tiles.iter().enumerate() {
             let (r, g, b) = tile_color(i, &t.path);
             cr.set_source_rgb(r, g, b);
@@ -282,7 +276,7 @@ pub fn make_weight_area(tiles: Rc<RefCell<Vec<Tile>>>) -> gtk::DrawingArea {
     area
 }
 
-fn tile_color(i: usize, path: &str) -> (f64, f64, f64) {
+pub(crate) fn tile_color(i: usize, path: &str) -> (f64, f64, f64) {
     let mut h = 216_613_6261u32;
     for b in path.bytes() {
         h ^= u32::from(b);
@@ -650,14 +644,20 @@ pub fn apply_list_metrics(row: &gtk::Widget, zoom: Zoom, spacing: u8) {
 }
 
 fn apply_grid_metrics(tile: &gtk::Widget, zoom: Zoom) {
-    let cell = zoom.cell_px();
+    let cell = grid_cell_px(zoom);
     tile.set_size_request(cell, cell);
-    if let Some(icon) = tile.first_child().and_downcast::<gtk::Image>() {
-        icon.set_pixel_size(zoom.icon_px());
-        if let Some(name) = icon.next_sibling().and_downcast::<gtk::Box>() {
+    if let Some(media) = tile.first_child().and_downcast::<gtk::Stack>()
+        && let Some(icon) = media.child_by_name("icon").and_downcast::<gtk::Image>()
+    {
+        icon.set_pixel_size((cell - 22).max(32));
+        if let Some(name) = media.next_sibling().and_downcast::<gtk::Box>() {
             schedule_fit(&name);
         }
     }
+}
+
+fn grid_cell_px(zoom: Zoom) -> i32 {
+    zoom.cell_px() - 24
 }
 
 pub fn popup_at(popover: &gtk::PopoverMenu, widget: &impl IsA<gtk::Widget>, x: f64, y: f64) {
@@ -677,6 +677,7 @@ pub fn popup_at(popover: &gtk::PopoverMenu, widget: &impl IsA<gtk::Widget>, x: f
 pub fn make_grid_factory(
     selection: gtk::SingleSelection,
     popover: gtk::PopoverMenu,
+    zebra: Rc<Cell<bool>>,
     zoom: Rc<Cell<Zoom>>,
     icons: Rc<RefCell<std::collections::HashMap<String, gio::Icon>>>,
     hovered: Rc<RefCell<Option<String>>>,
@@ -697,14 +698,21 @@ pub fn make_grid_factory(
             col.set_valign(gtk::Align::Fill);
             let icon = gtk::Image::from_icon_name("folder");
             icon.set_pixel_size(48);
-            icon.set_vexpand(true);
             icon.set_halign(gtk::Align::Center);
             icon.set_valign(gtk::Align::Center);
+            let picture = gtk::Picture::new();
+            picture.set_content_fit(gtk::ContentFit::Contain);
+            picture.set_hexpand(true);
+            picture.set_vexpand(true);
+            let media = gtk::Stack::new();
+            media.set_vexpand(true);
+            media.add_named(&icon, Some("icon"));
+            media.add_named(&picture, Some("picture"));
             let name = make_name_line(false);
             name.set_margin_start(4);
             name.set_margin_end(4);
             name.set_margin_bottom(2);
-            col.append(&icon);
+            col.append(&media);
             col.append(&name);
             attach_marquee(&col, &name);
             attach_hover(&col, item.clone(), Rc::clone(&hovered));
@@ -743,15 +751,36 @@ pub fn make_grid_factory(
         let Some(col) = item.child().and_downcast::<gtk::Box>() else {
             return;
         };
-        let Some(icon) = col.first_child().and_downcast::<gtk::Image>() else {
+        let Some(media) = col.first_child().and_downcast::<gtk::Stack>() else {
             return;
         };
-        let Some(name) = icon.next_sibling().and_downcast::<gtk::Box>() else {
+        let Some(icon) = media.child_by_name("icon").and_downcast::<gtk::Image>() else {
+            return;
+        };
+        let Some(picture) = media
+            .child_by_name("picture")
+            .and_downcast::<gtk::Picture>()
+        else {
+            return;
+        };
+        let Some(name) = media.next_sibling().and_downcast::<gtk::Box>() else {
             return;
         };
         apply_grid_metrics(col.upcast_ref(), zoom.get());
         paint_icon(&icon, &data, &icons);
+        crate::actions::load_thumbnail(
+            &media,
+            &picture,
+            std::path::Path::new(&data.path()),
+            grid_cell_px(zoom.get()) as u32,
+            grid_cell_px(zoom.get()) as u32,
+        );
         fill_name_line(&name, &data.name(), data.is_dir());
+        if zebra.get() && item.position() % 2 == 1 {
+            col.add_css_class("qfind-odd");
+        } else {
+            col.remove_css_class("qfind-odd");
+        }
     });
     factory
 }

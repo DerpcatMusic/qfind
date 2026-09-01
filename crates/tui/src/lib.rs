@@ -12,8 +12,9 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use qfind_core::{
-    Catalog, Config, DateAge, FileClass, Hit, HitRef, MatchMode, OpenHow, OpenMode, Scope,
-    SearchOpts, Sort, Surface, Weighted, Zoom, default_snapshot_path, folder_weights, squarify,
+    Catalog, CatalogFolder, Config, DateAge, FileClass, Hit, HitRef, ManagerSession, MatchMode,
+    OpenHow, OpenMode, Scope, SearchOpts, Sort, Surface, Weighted, Zoom, default_snapshot_path,
+    folder_weights, squarify,
 };
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect, Size};
 use ratatui::style::{Modifier, Style};
@@ -194,8 +195,9 @@ struct App {
     scroll_bar: Rect,
     dragging_bar: bool,
     overlays: overlay::Stack,
-    browser_root: Option<PathBuf>,
+    manager: ManagerSession,
     browser_dir: Option<PathBuf>,
+    search_folder: Option<CatalogFolder>,
     browser_folders: Vec<Row>,
     browser_items: Vec<Row>,
     browser_pane: BrowserPane,
@@ -303,8 +305,9 @@ impl App {
             scroll_bar: Rect::default(),
             dragging_bar: false,
             overlays: overlay::Stack::default(),
-            browser_root: None,
+            manager: ManagerSession::default(),
             browser_dir: None,
+            search_folder: None,
             browser_folders: Vec::new(),
             browser_items: Vec::new(),
             browser_pane: BrowserPane::Items,
@@ -443,6 +446,11 @@ impl App {
         if !path.is_dir() {
             return;
         }
+        self.manager.navigate(path.clone());
+        self.show_browser(path);
+    }
+
+    fn show_browser(&mut self, path: PathBuf) {
         let items = read_directory(&path, self.show_hidden);
         let mut folders = vec![Row {
             name: ".  current".into(),
@@ -461,8 +469,8 @@ impl App {
             });
         }
         folders.extend(items.iter().filter(|row| row.is_dir).cloned());
-        self.browser_root = Some(path.clone());
         self.browser_dir = Some(path);
+        self.search_folder = None;
         self.browser_folders = folders;
         self.browser_items = items;
         self.browser_pane = BrowserPane::Items;
@@ -476,6 +484,28 @@ impl App {
         self.focus = Focus::Results;
     }
 
+    fn browse_back(&mut self) {
+        while let Some(path) = self.manager.back() {
+            if !path.is_dir() {
+                continue;
+            }
+            self.show_browser(path.clone());
+            self.status = format!("back  {}", path.display());
+            return;
+        }
+    }
+
+    fn browse_forward(&mut self) {
+        while let Some(path) = self.manager.forward() {
+            if !path.is_dir() {
+                continue;
+            }
+            self.show_browser(path.clone());
+            self.status = format!("forward  {}", path.display());
+            return;
+        }
+    }
+
     fn preview_folder(&mut self) {
         let Some(path) = self
             .browser_folders
@@ -485,6 +515,7 @@ impl App {
             return;
         };
         self.browser_dir = Some(path.clone());
+        self.search_folder = None;
         self.browser_items = read_directory(&path, self.show_hidden);
         self.item_selected = 0;
         self.item_scroll = 0;
@@ -570,8 +601,12 @@ impl App {
     }
 
     fn kick_search(&mut self) {
-        self.query_session
-            .submit(self.query.clone(), self.opts(), self.show_hidden);
+        self.query_session.submit(
+            self.query.clone(),
+            self.opts(),
+            self.show_hidden,
+            self.search_folder.clone(),
+        );
         self.searching = true;
         self.status = "searching…".into();
     }
@@ -581,17 +616,25 @@ impl App {
             query::Event::Hits(generation, Ok(rows))
                 if self.query_session.is_current(generation) =>
             {
+                let selected_path = self.rows.get(self.selected).map(|row| row.path.clone());
                 self.searching = false;
-                self.selected = 0;
                 self.scroll = 0;
                 self.hover = None;
                 self.status = format!(
-                    "{} hits  ·  {} folders · {} files",
+                    "{} hits{}  ·  {} folders · {} files",
                     rows.len(),
+                    self.search_folder
+                        .as_ref()
+                        .map(|folder| format!(" in {}", folder.path().display()))
+                        .unwrap_or_default(),
                     self.catalog.folder_count(),
                     self.catalog.file_count()
                 );
                 self.rows = rows;
+                self.selected = selected_path
+                    .and_then(|path| self.rows.iter().position(|row| row.path == path))
+                    .unwrap_or(0);
+                self.ensure_visible();
             }
             query::Event::Hits(generation, Err(err))
                 if self.query_session.is_current(generation) =>
@@ -646,7 +689,12 @@ impl App {
         let catalog = result.and_then(publish_catalog);
         match catalog {
             Ok(catalog) => {
+                let search_path = self
+                    .search_folder
+                    .as_ref()
+                    .map(|folder| folder.path().to_path_buf());
                 self.catalog = catalog.clone();
+                self.search_folder = search_path.and_then(|path| catalog.folder(path));
                 self.query_session = query::Session::new(
                     catalog,
                     self.events.clone(),
@@ -659,8 +707,29 @@ impl App {
         }
     }
 
+    fn search_current_folder(&mut self) {
+        let Some(folder) = self.current_browser_folder() else {
+            self.focus = Focus::Search;
+            self.status = "current folder is not indexed".into();
+            return;
+        };
+        let path = folder.path().to_path_buf();
+        self.search_folder = Some(folder);
+        self.surface = Surface::Auto;
+        self.focus = Focus::Search;
+        self.status = format!("searching in  {}", path.display());
+        self.mark_dirty();
+    }
+
+    fn current_browser_folder(&self) -> Option<CatalogFolder> {
+        self.browser_dir
+            .as_deref()
+            .or_else(|| self.manager.directory())
+            .and_then(|path| self.catalog.folder(path))
+    }
+
     fn reload_browser(&mut self) {
-        let Some(root) = self.browser_root.clone() else {
+        let Some(root) = self.manager.directory().map(Path::to_path_buf) else {
             return;
         };
         let dir = self.browser_dir.clone();
@@ -1398,6 +1467,56 @@ fn overlay_key(app: &mut App, key: KeyEvent) -> bool {
     {
         return true;
     }
+    if matches!(app.overlays.top(), Some(overlay::Layer::Location { .. })) {
+        match key.code {
+            KeyCode::Esc => {
+                app.overlays.pop();
+            }
+            KeyCode::Enter => {
+                let input = match app.overlays.pop() {
+                    Some(overlay::Layer::Location { input }) => input,
+                    _ => return false,
+                };
+                let entered = PathBuf::from(input);
+                let path = if entered.is_absolute() {
+                    entered
+                } else {
+                    app.manager
+                        .directory()
+                        .map(Path::to_path_buf)
+                        .or_else(|| std::env::current_dir().ok())
+                        .unwrap_or_else(|| PathBuf::from("."))
+                        .join(entered)
+                };
+                if path.is_dir() {
+                    app.browse(path);
+                } else {
+                    app.status = "location is not a directory".into();
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(overlay::Layer::Location { input }) = app.overlays.top_mut() {
+                    input.pop();
+                }
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(overlay::Layer::Location { input }) = app.overlays.top_mut() {
+                    input.clear();
+                }
+            }
+            KeyCode::Char(c)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                if let Some(overlay::Layer::Location { input }) = app.overlays.top_mut() {
+                    input.push(c);
+                }
+            }
+            _ => {}
+        }
+        return false;
+    }
     match key.code {
         KeyCode::Esc | KeyCode::F(1)
             if matches!(app.overlays.top(), Some(overlay::Layer::Help)) =>
@@ -1715,6 +1834,14 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     }
     if app.surface == Surface::Tree {
         match key.code {
+            KeyCode::Left if key.modifiers.contains(KeyModifiers::ALT) => {
+                app.browse_back();
+                return false;
+            }
+            KeyCode::Right if key.modifiers.contains(KeyModifiers::ALT) => {
+                app.browse_forward();
+                return false;
+            }
             KeyCode::Char(' ') if app.focus == Focus::Results => {
                 app.preview_selected();
                 return false;
@@ -1805,8 +1932,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             }
             KeyCode::Backspace if app.query.is_empty() => {
                 if let Some(parent) = app
-                    .browser_root
-                    .as_deref()
+                    .manager
+                    .directory()
                     .and_then(Path::parent)
                     .map(Path::to_path_buf)
                 {
@@ -1815,6 +1942,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
                 return false;
             }
             KeyCode::Backspace => {
+                if app.search_folder.is_none() {
+                    app.search_folder = app.current_browser_folder();
+                }
                 app.surface = Surface::Auto;
                 app.focus = Focus::Search;
                 app.query.pop();
@@ -1822,6 +1952,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
                 return false;
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if app.search_folder.is_none() {
+                    app.search_folder = app.current_browser_folder();
+                }
                 app.surface = Surface::Auto;
                 app.focus = Focus::Search;
                 app.query.push(c);
@@ -1847,6 +1980,17 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         }
         KeyCode::F(6) => adjust_setting(app, 4, 1, false),
         KeyCode::F(8) => app.overlays.toggle_settings(),
+        KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            let location = app
+                .manager
+                .directory()
+                .map(Path::to_path_buf)
+                .or_else(|| selected_folder(app))
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_else(|| PathBuf::from("."));
+            app.overlays
+                .open_location(location.to_string_lossy().into_owned());
+        }
         KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.cycle_open();
         }
@@ -1864,13 +2008,15 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.copy_selected();
         }
-        KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.scope = if app.scope == Scope::Folders {
-                Scope::All
+        KeyCode::Char('f' | 'F') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                app.search_folder = None;
+                app.focus = Focus::Search;
+                app.status = "searching everywhere".into();
+                app.mark_dirty();
             } else {
-                Scope::Folders
-            };
-            app.mark_dirty();
+                app.search_current_folder();
+            }
         }
         KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.sort = next_sort(app.sort);
@@ -2366,10 +2512,17 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &mut App) {
         hits.push(Some(ChipHit::Surface));
     }
     if area.width >= 90 {
-        let scope = if app.scope == Scope::Folders {
-            "folders"
+        let scope = if let Some(folder) = &app.search_folder {
+            folder
+                .path()
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| format!("in {name}"))
+                .unwrap_or_else(|| "in folder".into())
+        } else if app.scope == Scope::Folders {
+            "folders".into()
         } else {
-            "all"
+            "all".into()
         };
         chips.push(Chip::new(scope, th.accent, th.surface));
         hits.push(Some(ChipHit::Scope));
@@ -2416,7 +2569,10 @@ fn draw_prompt(frame: &mut Frame, area: Rect, app: &App) {
     let prompt = format!(" {}  ", icon_prompt());
     let query = if app.query.is_empty() {
         Span::styled(
-            "Search files, folders, or extensions",
+            app.search_folder
+                .as_ref()
+                .map(|folder| format!("Search in {}", folder.path().display()))
+                .unwrap_or_else(|| "Search files, folders, or extensions".into()),
             Style::new().fg(th.dim).bg(bg),
         )
     } else {
@@ -2635,10 +2791,7 @@ fn draw_grid_placeholder(
 fn draw_tree(frame: &mut Frame, area: Rect, app: &mut App) {
     let th = app.theme;
     frame.render_widget(Block::default().style(Style::new().bg(th.bg)), area);
-    let root = app
-        .browser_root
-        .as_deref()
-        .unwrap_or_else(|| Path::new("/"));
+    let root = app.manager.directory().unwrap_or_else(|| Path::new("/"));
     let folder_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)

@@ -16,6 +16,9 @@ pub const SETTINGS_ITEMS: usize = 10;
 #[derive(Clone, Debug)]
 pub enum Layer {
     Help,
+    Location {
+        input: String,
+    },
     Settings {
         selected: usize,
     },
@@ -75,6 +78,10 @@ impl Stack {
         }
     }
 
+    pub fn open_location(&mut self, input: String) {
+        self.layers.push(Layer::Location { input });
+    }
+
     pub fn toggle_settings(&mut self) {
         if matches!(self.top(), Some(Layer::Settings { .. })) {
             self.pop();
@@ -99,6 +106,7 @@ pub fn draw(frame: &mut Frame, stack: &Stack, th: Theme, area: Rect, settings: &
     for layer in &stack.layers {
         match layer {
             Layer::Help => draw_help(frame, area, th),
+            Layer::Location { input } => draw_location(frame, area, th, input),
             Layer::Settings { selected } => draw_settings(frame, area, th, *selected, settings),
             Layer::Theme { selected, .. } => draw_theme(frame, area, th, *selected),
             Layer::Menu { col, row, pick, .. } => draw_menu(frame, area, th, *col, *row, *pick),
@@ -119,6 +127,15 @@ pub fn click_top(stack: &mut Stack, x: u16, y: u16, area: Rect) -> Click {
             } else {
                 stack.pop();
                 Click::Closed
+            }
+        }
+        Some(Layer::Location { .. }) => {
+            let r = location_rect(area);
+            if close_hit(r, x, y) || !r.contains(ratatui::layout::Position::new(x, y)) {
+                stack.pop();
+                Click::Closed
+            } else {
+                Click::Ignore
             }
         }
         Some(Layer::Settings { .. }) => {
@@ -172,9 +189,17 @@ pub enum Click {
 
 fn help_rect(area: Rect) -> Rect {
     let w = 58.min(area.width.saturating_sub(2)).max(2);
-    let h = 15.min(area.height.saturating_sub(2)).max(2);
+    let h = 18.min(area.height.saturating_sub(2)).max(2);
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
+    Rect::new(x, y, w, h)
+}
+
+fn location_rect(area: Rect) -> Rect {
+    let w = 82.min(area.width.saturating_sub(2)).max(2);
+    let h = 3.min(area.height.saturating_sub(2)).max(2);
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + 2.min(area.height.saturating_sub(h));
     Rect::new(x, y, w, h)
 }
 
@@ -274,11 +299,13 @@ fn draw_help(frame: &mut Frame, area: Rect, th: Theme) {
         ("Tab", "switch Search / Results focus"),
         ("Enter", "open or enter folder"),
         ("F4", "dual-pane browser"),
+        ("Ctrl+L", "open location"),
         ("F6", "map: size, file count, off"),
         ("F8", "appearance & behavior"),
         ("+ / −", "grid density"),
         ("↑↓", "navigate"),
         ("←→", "grid or browser pane"),
+        ("Alt+←→", "browser back / forward"),
         ("Mouse drag", "drop a result into another app"),
         ("Ctrl+O", "show in files"),
         ("Ctrl+Y", "copy path"),
@@ -303,6 +330,35 @@ fn draw_help(frame: &mut Frame, area: Rect, th: Theme) {
             ),
         popup,
     );
+}
+
+fn draw_location(frame: &mut Frame, area: Rect, th: Theme, input: &str) {
+    let popup = location_rect(area);
+    clear_popup(frame, popup, th);
+    let width = popup.width.saturating_sub(4) as usize;
+    let skip = input.chars().count().saturating_sub(width);
+    let visible = input.chars().skip(skip).collect::<String>();
+    frame.render_widget(
+        Paragraph::new(visible.clone())
+            .style(Style::new().fg(th.text).bg(th.surface))
+            .block(
+                window("Location", th)
+                    .title_top(
+                        Line::from(Span::styled("[×]", Style::new().fg(th.dim))).right_aligned(),
+                    )
+                    .title_bottom(Line::from(
+                        [shortcut("Ctrl+U", "clear", th), shortcut("Enter", "go", th)].concat(),
+                    )),
+            ),
+        popup,
+    );
+    frame.set_cursor_position(ratatui::layout::Position::new(
+        popup
+            .x
+            .saturating_add(1)
+            .saturating_add(visible.chars().count() as u16),
+        popup.y.saturating_add(1),
+    ));
 }
 
 fn draw_theme(frame: &mut Frame, area: Rect, th: Theme, selected: usize) {

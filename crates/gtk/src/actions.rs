@@ -5,8 +5,16 @@
 //! (`org.gnome.NautilusPreviewer2.ShowFile`, then `sushi`), then a small
 //! built-in window.
 
-use std::path::Path;
-use std::process::Command;
+use std::collections::HashMap;
+use std::future::Future;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::task::{Context, Poll, Waker};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use gtk::gdk;
 use gtk::gio;
@@ -16,6 +24,90 @@ use gtk::prelude::*;
 use qfind_core::{Config, OpenHow};
 
 use crate::row::RowData;
+
+type ThumbnailResult = Result<PathBuf, String>;
+type SharedThumbnail = Arc<Mutex<ThumbnailState>>;
+
+#[derive(Default)]
+struct ThumbnailState {
+    result: Option<ThumbnailResult>,
+    wakers: Vec<Waker>,
+}
+
+struct ThumbnailWait(SharedThumbnail);
+
+impl Future for ThumbnailWait {
+    type Output = ThumbnailResult;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(result) = state.result.clone() {
+            Poll::Ready(result)
+        } else {
+            if !state.wakers.iter().any(|waker| waker.will_wake(cx.waker())) {
+                state.wakers.push(cx.waker().clone());
+            }
+            Poll::Pending
+        }
+    }
+}
+
+struct ThumbnailJob {
+    path: PathBuf,
+    output: PathBuf,
+    width: u32,
+    height: u32,
+    result: SharedThumbnail,
+}
+
+fn thumbnail_jobs() -> &'static Mutex<HashMap<PathBuf, SharedThumbnail>> {
+    static JOBS: OnceLock<Mutex<HashMap<PathBuf, SharedThumbnail>>> = OnceLock::new();
+    JOBS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn thumbnail_sender() -> &'static mpsc::Sender<ThumbnailJob> {
+    static SENDER: OnceLock<mpsc::Sender<ThumbnailJob>> = OnceLock::new();
+    SENDER.get_or_init(|| {
+        let (sender, receiver) = mpsc::channel::<ThumbnailJob>();
+        let receiver = Arc::new(Mutex::new(receiver));
+        let workers = thread::available_parallelism()
+            .map_or(2, usize::from)
+            .div_ceil(2)
+            .clamp(2, 8);
+        for _ in 0..workers {
+            let receiver = Arc::clone(&receiver);
+            thread::spawn(move || {
+                loop {
+                    let job = receiver
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .recv();
+                    let Ok(job) = job else { return };
+                    let rendered = render_thumbnail(&job.path, job.width, job.height, &job.output);
+                    let wakers = {
+                        let mut state = job
+                            .result
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        state.result = Some(rendered);
+                        std::mem::take(&mut state.wakers)
+                    };
+                    for waker in wakers {
+                        waker.wake();
+                    }
+                    thumbnail_jobs()
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .remove(&job.output);
+                }
+            });
+        }
+        sender
+    })
+}
 
 pub(crate) fn content_for_path(path: &str) -> Option<gdk::ContentProvider> {
     let file = gio::File::for_path(path);
@@ -183,17 +275,7 @@ fn builtin_preview(parent: &gtk::Window, path: &str) -> gtk::Window {
         .default_height(560)
         .build();
 
-    let p = Path::new(path);
-    let (ctype, _) = gio::content_type_guess(Some(p), None::<&[u8]>);
-    let child: gtk::Widget = if ctype.starts_with("image/") {
-        let pic = gtk::Picture::for_filename(p);
-        pic.set_content_fit(gtk::ContentFit::Contain);
-        pic.upcast()
-    } else if is_textish(&ctype, p) {
-        text_preview(p).upcast()
-    } else {
-        fallback_preview(p, &ctype).upcast()
-    };
+    let child = preview_widget(Path::new(path));
     win.set_child(Some(&child));
 
     let esc = gtk::EventControllerKey::new();
@@ -209,6 +291,254 @@ fn builtin_preview(parent: &gtk::Window, path: &str) -> gtk::Window {
     win.add_controller(esc);
     win.present();
     win
+}
+
+pub(crate) fn preview_widget(p: &Path) -> gtk::Widget {
+    if p.is_dir() {
+        return fallback_preview(p, "inode/directory").upcast();
+    }
+    let (ctype, _) = gio::content_type_guess(Some(p), None::<&[u8]>);
+    if can_thumbnail(p) {
+        thumbnail_preview(p).upcast()
+    } else if is_textish(&ctype, p) {
+        text_preview(p).upcast()
+    } else {
+        fallback_preview(p, &ctype).upcast()
+    }
+}
+
+pub(crate) fn load_thumbnail(
+    stack: &gtk::Stack,
+    picture: &gtk::Picture,
+    path: &Path,
+    width: u32,
+    height: u32,
+) {
+    let token = format!("{}#{width}x{height}", path.display());
+    stack.set_widget_name(&token);
+    stack.set_visible_child_name("icon");
+    if !can_thumbnail(path) {
+        return;
+    }
+    let Ok(output) = thumbnail_output(path, width, height) else {
+        return;
+    };
+    if output.is_file() {
+        picture.set_filename(Some(output));
+        stack.set_visible_child_name("picture");
+        return;
+    }
+    let (result, start) = {
+        let mut jobs = thumbnail_jobs()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(result) = jobs.get(&output) {
+            (Arc::clone(result), false)
+        } else {
+            let result = Arc::new(Mutex::new(ThumbnailState::default()));
+            jobs.insert(output.clone(), Arc::clone(&result));
+            (result, true)
+        }
+    };
+    if start {
+        let job = ThumbnailJob {
+            path: path.to_path_buf(),
+            output: output.clone(),
+            width,
+            height,
+            result: Arc::clone(&result),
+        };
+        if thumbnail_sender().send(job).is_err() {
+            thumbnail_jobs()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&output);
+            return;
+        }
+    }
+    let stack = stack.clone();
+    let picture = picture.clone();
+    glib::MainContext::default().spawn_local(async move {
+        if let Ok(rendered) = ThumbnailWait(result).await {
+            if stack.widget_name() == token {
+                picture.set_filename(Some(rendered));
+                stack.set_visible_child_name("picture");
+            }
+        }
+    });
+}
+
+fn thumbnail_preview(path: &Path) -> gtk::Stack {
+    let stack = gtk::Stack::new();
+    let fallback = fallback_preview(path, "application/octet-stream");
+    let picture = gtk::Picture::new();
+    picture.set_content_fit(gtk::ContentFit::Contain);
+    picture.set_hexpand(true);
+    picture.set_vexpand(true);
+    stack.add_named(&fallback, Some("icon"));
+    stack.add_named(&picture, Some("picture"));
+    load_thumbnail(&stack, &picture, path, 1000, 800);
+    stack
+}
+
+fn extension(path: &Path) -> String {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+}
+
+fn is_raster_image(path: &Path) -> bool {
+    matches!(
+        extension(path).as_str(),
+        "bmp" | "gif" | "ico" | "jpeg" | "jpg" | "png" | "tif" | "tiff" | "webp"
+    )
+}
+
+fn can_thumbnail(path: &Path) -> bool {
+    is_raster_image(path)
+        || matches!(
+            extension(path).as_str(),
+            "svg"
+                | "svgz"
+                | "pdf"
+                | "ps"
+                | "eps"
+                | "djvu"
+                | "xps"
+                | "mp3"
+                | "flac"
+                | "wav"
+                | "ogg"
+                | "m4a"
+                | "aac"
+                | "aiff"
+                | "opus"
+                | "wma"
+                | "mp4"
+                | "mkv"
+                | "webm"
+                | "mov"
+                | "avi"
+                | "m4v"
+                | "doc"
+                | "docx"
+                | "odt"
+                | "ods"
+                | "odp"
+                | "ppt"
+                | "pptx"
+                | "xls"
+                | "xlsx"
+        )
+}
+
+fn thumbnail_output(path: &Path, width: u32, height: u32) -> ThumbnailResult {
+    let meta = std::fs::metadata(path).map_err(|error| error.to_string())?;
+    let mut hash = DefaultHasher::new();
+    path.hash(&mut hash);
+    meta.len().hash(&mut hash);
+    meta.modified().ok().hash(&mut hash);
+    width.hash(&mut hash);
+    height.hash(&mut hash);
+    let cache = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+        .unwrap_or_else(std::env::temp_dir)
+        .join("qfind/thumbnails");
+    std::fs::create_dir_all(&cache).map_err(|error| error.to_string())?;
+    Ok(cache.join(format!("{:016x}.png", hash.finish())))
+}
+
+fn render_thumbnail(path: &Path, width: u32, height: u32, output: &Path) -> ThumbnailResult {
+    let ext = extension(path);
+    if is_raster_image(path) {
+        image::ImageReader::open(path)
+            .map_err(|error| error.to_string())?
+            .with_guessed_format()
+            .map_err(|error| error.to_string())?
+            .decode()
+            .map_err(|error| error.to_string())?
+            .thumbnail(width.max(1), height.max(1))
+            .save(output)
+            .map_err(|error| error.to_string())?;
+        return Ok(output.to_path_buf());
+    }
+    let size = width.max(height).min(1600).to_string();
+    let mut command = if matches!(ext.as_str(), "svg" | "svgz") {
+        let mut command = Command::new("rsvg-convert");
+        command
+            .args(["--format", "png", "--keep-aspect-ratio", "--width"])
+            .arg(width.to_string())
+            .arg("--height")
+            .arg(height.to_string())
+            .arg("--output")
+            .arg(output)
+            .arg(path);
+        command
+    } else if matches!(ext.as_str(), "pdf" | "ps" | "eps" | "djvu" | "xps") {
+        let mut command = Command::new("evince-thumbnailer");
+        command.arg("-s").arg(&size).arg(path).arg(output);
+        command
+    } else if matches!(
+        ext.as_str(),
+        "mp3" | "flac" | "wav" | "ogg" | "m4a" | "aac" | "aiff" | "opus" | "wma"
+    ) {
+        let mut command = Command::new("ffmpeg");
+        command
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+            .arg(path)
+            .args([
+                "-filter_complex",
+                &format!(
+                    "aformat=channel_layouts=mono,showwavespic=s={width}x{height}:colors=#8aa4ff"
+                ),
+                "-frames:v",
+                "1",
+            ])
+            .arg(output);
+        command
+    } else if matches!(ext.as_str(), "mp4" | "mkv" | "webm" | "mov" | "avi" | "m4v") {
+        let mut command = Command::new("ffmpegthumbnailer");
+        command
+            .args(["-i"])
+            .arg(path)
+            .args(["-o"])
+            .arg(output)
+            .args(["-s", &size, "-c", "png", "-t", "10%"]);
+        command
+    } else {
+        let mut command = Command::new("gsf-office-thumbnailer");
+        command
+            .arg("-i")
+            .arg(path)
+            .arg("-o")
+            .arg(output)
+            .arg("-s")
+            .arg(&size);
+        command
+    };
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = command.spawn().map_err(|error| error.to_string())?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() && output.is_file() => {
+                return Ok(output.to_path_buf());
+            }
+            Ok(Some(status)) => return Err(format!("thumbnailer exited with {status}")),
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("thumbnail timed out".into());
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
 }
 
 fn is_textish(ctype: &str, path: &Path) -> bool {

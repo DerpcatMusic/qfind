@@ -10,4 +10,8 @@ description = "Qfind GTK application"
 [dependencies]
 anyhow.workspace = true
 gtk.workspace = true
+image.workspace = true
 qfind-core.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

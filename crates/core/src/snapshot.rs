@@ -180,6 +180,29 @@ impl Snapshot {
         path
     }
 
+    pub(crate) fn folder_id(&self, path: &Path) -> Option<u32> {
+        (0..self.folder_count).find(|&id| self.path(id) == path)
+    }
+
+    pub(crate) fn is_descendant_of(&self, id: u32, folder: u32) -> bool {
+        let mut current = id;
+        let mut guard = 0u32;
+        while let Some(entry) = self.entry(current) {
+            if entry.parent == folder {
+                return true;
+            }
+            if entry.parent == Entry::ROOT_PARENT || entry.parent == current {
+                return false;
+            }
+            current = entry.parent;
+            guard = guard.saturating_add(1);
+            if guard > 512 {
+                return false;
+            }
+        }
+        false
+    }
+
     pub(crate) fn is_hidden(&self, id: u32) -> bool {
         self.hidden
             .get_or_init(|| {

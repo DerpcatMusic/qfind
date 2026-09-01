@@ -1799,7 +1799,9 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "gtk4",
+ "image",
  "qfind-core",
+ "tempfile",
 ]
 
 [[package]]

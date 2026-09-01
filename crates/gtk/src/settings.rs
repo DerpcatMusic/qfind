@@ -1,20 +1,18 @@
-//! Settings window: Exclude/include, spacing, PreviewMode, reset.
+//! Settings window: Catalog, PreviewMode, and opening behavior.
 
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 
 use gtk::prelude::*;
-use qfind_core::{Config, MatchMode, OpenMode, PreviewMode, Zoom};
+use qfind_core::{Config, MatchMode, OpenMode, PreviewMode};
 
 pub struct Live {
-    pub zoom: Rc<Cell<Zoom>>,
-    pub spacing: Rc<Cell<u8>>,
     pub preview: Rc<Cell<PreviewMode>>,
     pub zebra: Rc<Cell<bool>>,
     pub weight: Rc<Cell<bool>>,
     pub match_mode: Rc<Cell<MatchMode>>,
-    pub on_rebuild: Box<dyn Fn()>,
+    pub on_save: Box<dyn Fn(bool)>,
 }
 
 pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
@@ -26,6 +24,22 @@ pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
         .default_height(560)
         .modal(true)
         .build();
+    let header = gtk::HeaderBar::new();
+    header.set_show_title_buttons(true);
+    win.set_titlebar(Some(&header));
+
+    let keys = gtk::EventControllerKey::new();
+    {
+        let win = win.clone();
+        keys.connect_key_pressed(move |_, key, _, _| {
+            if key == gtk::gdk::Key::Escape {
+                win.close();
+                return gtk::glib::Propagation::Stop;
+            }
+            gtk::glib::Propagation::Proceed
+        });
+    }
+    win.add_controller(keys);
 
     let exclude = list_editor(
         "Exclude (names or globs, extra junk skipped on Rebuild)",
@@ -38,16 +52,6 @@ pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
             .map(|p| p.display().to_string())
             .collect::<Vec<_>>(),
     );
-
-    let spacing = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 24.0, 1.0);
-    spacing.set_value(f64::from(cfg.spacing));
-    spacing.set_draw_value(true);
-    spacing.set_hexpand(true);
-    let compact = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 100.0, 1.0);
-    compact.set_value(f64::from(cfg.zoom));
-    compact.set_draw_value(true);
-    compact.set_hexpand(true);
-    compact.set_tooltip_text(Some("Default Zoom (Ctrl+scroll still works in the list)"));
 
     let preview_drop =
         gtk::DropDown::from_strings(&["Hovered Hit (Space)", "Selected Hit (Space)"]);
@@ -92,10 +96,6 @@ pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
     vbox.set_margin_bottom(12);
     vbox.append(&exclude.root);
     vbox.append(&include.root);
-    vbox.append(&label("Compactness / default Zoom"));
-    vbox.append(&compact);
-    vbox.append(&label("Extra spacing (px)"));
-    vbox.append(&spacing);
     vbox.append(&label("Space preview"));
     vbox.append(&preview_drop);
     vbox.append(&label("Query matching"));
@@ -109,6 +109,7 @@ pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
     buttons.set_halign(gtk::Align::End);
     let reset = gtk::Button::with_label("Reset to default");
     let save = gtk::Button::with_label("Save");
+    save.set_widget_name("qfind-settings-save");
     save.add_css_class("suggested-action");
     buttons.append(&reset);
     buttons.append(&save);
@@ -126,8 +127,6 @@ pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
         let live = Rc::clone(&live);
         let exclude = exclude.clone();
         let include = include.clone();
-        let spacing = spacing.clone();
-        let compact = compact.clone();
         let preview_drop = preview_drop.clone();
         let match_drop = match_drop.clone();
         let open_drop = open_drop.clone();
@@ -135,6 +134,8 @@ pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
         let win = win.clone();
         save.connect_clicked(move |_| {
             let mut cfg = Config::load();
+            let old_exclude = cfg.exclude.clone();
+            let old_include = cfg.include.clone();
             cfg.exclude = exclude.items();
             cfg.include = include
                 .items()
@@ -142,8 +143,6 @@ pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
                 .map(PathBuf::from)
                 .filter(|p| !p.as_os_str().is_empty())
                 .collect();
-            cfg.spacing = spacing.value() as u8;
-            cfg.zoom = compact.value() as u8;
             cfg.preview = if preview_drop.selected() == 1 {
                 PreviewMode::Selected
             } else {
@@ -163,19 +162,15 @@ pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
             };
             cfg.editor = editor_entry.text().to_string();
             let _ = cfg.save();
-            live.zoom.set(Zoom::new(cfg.zoom));
-            live.spacing.set(cfg.spacing);
             live.preview.set(cfg.preview);
             live.match_mode.set(cfg.match_mode);
-            (live.on_rebuild)();
+            (live.on_save)(catalog_settings_changed(&old_exclude, &old_include, &cfg));
             win.close();
         });
     }
     {
         let exclude = exclude.clone();
         let include = include.clone();
-        let spacing = spacing.clone();
-        let compact = compact.clone();
         let preview_drop = preview_drop.clone();
         let match_drop = match_drop.clone();
         let open_drop = open_drop.clone();
@@ -184,8 +179,6 @@ pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
             let cfg = Config::default();
             exclude.set_items(&cfg.exclude);
             include.set_items(&[]);
-            spacing.set_value(0.0);
-            compact.set_value(f64::from(cfg.zoom));
             preview_drop.set_selected(0);
             match_drop.set_selected(0);
             open_drop.set_selected(0);
@@ -194,6 +187,14 @@ pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
     }
 
     win.present();
+}
+
+fn catalog_settings_changed(
+    old_exclude: &[String],
+    old_include: &[PathBuf],
+    next: &Config,
+) -> bool {
+    old_exclude != next.exclude || old_include != next.include
 }
 
 fn label(text: &str) -> gtk::Label {
@@ -282,4 +283,29 @@ fn entry_row(text: &str) -> gtk::Box {
     row.append(&entry);
     row.append(&rm);
     row
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn appearance_changes_do_not_rebuild_the_catalog() {
+        let before = Config::default();
+        let mut appearance = before.clone();
+        appearance.zoom = appearance.zoom.saturating_add(1);
+        appearance.spacing = 7;
+        assert!(!catalog_settings_changed(
+            &before.exclude,
+            &before.include,
+            &appearance
+        ));
+
+        appearance.exclude.push("target".into());
+        assert!(catalog_settings_changed(
+            &before.exclude,
+            &before.include,
+            &appearance
+        ));
+    }
 }

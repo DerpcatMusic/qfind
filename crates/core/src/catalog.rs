@@ -55,6 +55,14 @@ pub struct Catalog {
     snapshot: Arc<Snapshot>,
 }
 
+/// A Folder resolved against one immutable Catalog snapshot.
+#[derive(Clone)]
+pub struct CatalogFolder {
+    catalog: Catalog,
+    id: u32,
+    path: PathBuf,
+}
+
 impl Catalog {
     /// Open an existing snapshot.
     ///
@@ -118,6 +126,18 @@ impl Catalog {
         self.snapshot.file_count()
     }
 
+    /// Resolve a Folder once, then reuse it for instant folder-scoped Queries.
+    #[must_use]
+    pub fn folder(&self, path: impl AsRef<Path>) -> Option<CatalogFolder> {
+        let path = path.as_ref();
+        let id = self.snapshot.folder_id(path)?;
+        Some(CatalogFolder {
+            catalog: self.clone(),
+            id,
+            path: path.to_path_buf(),
+        })
+    }
+
     /// Filter the Catalog with a Query string (highlight on, no limit).
     ///
     /// # Errors
@@ -155,7 +175,8 @@ impl Catalog {
         opts: crate::SearchOpts,
         cancelled: impl Fn() -> bool + Sync,
     ) -> Result<Hits<'_>> {
-        let ranked = search::search_with_cancel(&self.snapshot, query, opts, true, &cancelled)?;
+        let ranked =
+            search::search_with_cancel(&self.snapshot, query, opts, true, None, false, &cancelled)?;
         Ok(Hits {
             catalog: self,
             ids: ranked.ids,
@@ -174,8 +195,15 @@ impl Catalog {
         show_hidden: bool,
         cancelled: impl Fn() -> bool + Sync,
     ) -> Result<Hits<'_>> {
-        let ranked =
-            search::search_with_cancel(&self.snapshot, query, opts, show_hidden, &cancelled)?;
+        let ranked = search::search_with_cancel(
+            &self.snapshot,
+            query,
+            opts,
+            show_hidden,
+            None,
+            false,
+            &cancelled,
+        )?;
         Ok(Hits {
             catalog: self,
             ids: ranked.ids,
@@ -198,6 +226,69 @@ impl Catalog {
     /// Touch the packed letter-mask so the first Query does not pay for it.
     pub fn warm(&self) {
         let _ = self.snapshot.letter_mask();
+    }
+}
+
+impl CatalogFolder {
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Search descendants of this Folder.
+    ///
+    /// # Errors
+    /// Returns [`Error::Query`] for a malformed glob.
+    pub fn search_with(&self, query: &str, opts: crate::SearchOpts) -> Result<Hits<'_>> {
+        self.search_with_hidden_cancel(query, opts, true, || false)
+    }
+
+    /// Search descendants while allowing a caller to hide dotfiles and cancel stale work.
+    ///
+    /// # Errors
+    /// Returns [`Error::Cancelled`](crate::Error::Cancelled) when `cancelled` becomes true.
+    pub fn search_with_hidden_cancel(
+        &self,
+        query: &str,
+        opts: crate::SearchOpts,
+        show_hidden: bool,
+        cancelled: impl Fn() -> bool + Sync,
+    ) -> Result<Hits<'_>> {
+        let ranked = search::search_with_cancel(
+            &self.catalog.snapshot,
+            query,
+            opts,
+            show_hidden,
+            Some(self.id),
+            false,
+            &cancelled,
+        )?;
+        Ok(Hits {
+            catalog: &self.catalog,
+            ids: ranked.ids,
+            indices: ranked.indices,
+        })
+    }
+
+    /// Search only this Folder's immediate children.
+    ///
+    /// # Errors
+    /// Returns [`Error::Query`] for a malformed glob.
+    pub fn search_children_with(&self, query: &str, opts: crate::SearchOpts) -> Result<Hits<'_>> {
+        let ranked = search::search_with_cancel(
+            &self.catalog.snapshot,
+            query,
+            opts,
+            true,
+            Some(self.id),
+            true,
+            &|| false,
+        )?;
+        Ok(Hits {
+            catalog: &self.catalog,
+            ids: ranked.ids,
+            indices: ranked.indices,
+        })
     }
 }
 
@@ -309,5 +400,44 @@ impl Hit<'_> {
     #[must_use]
     pub fn indices(&self) -> &[u32] {
         &self.indices
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn classic_folder_search_returns_files_and_folders_but_not_grandchildren() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir_all(root.join("folder/nested")).unwrap();
+        fs::write(root.join("file.txt"), b"file").unwrap();
+        fs::write(root.join("folder/nested.txt"), b"nested").unwrap();
+
+        let mut builder = Builder::new();
+        builder.add_dir(&root, &root, 0, 0);
+        builder.add_dir(&root.join("folder"), &root, 0, 0);
+        builder.add_dir(&root.join("folder/nested"), &root, 0, 0);
+        builder.add_file(&root.join("file.txt"), &root, 4, 0);
+        builder.add_file(&root.join("folder/nested.txt"), &root, 6, 0);
+        let snapshot = temp.path().join("catalog");
+        builder.write(&snapshot).unwrap();
+
+        let catalog = Catalog::open(snapshot).unwrap();
+        let folder = catalog.folder(&root).unwrap();
+        let hits = folder
+            .search_children_with("", crate::SearchOpts::default())
+            .unwrap();
+        let names: Vec<_> = hits.iter().map(|hit| hit.name().to_string()).collect();
+
+        assert!(names.contains(&"folder".to_string()));
+        assert!(names.contains(&"file.txt".to_string()));
+        assert!(!names.contains(&"nested".to_string()));
+        assert!(!names.contains(&"nested.txt".to_string()));
     }
 }

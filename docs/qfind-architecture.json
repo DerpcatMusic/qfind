@@ -1,0 +1,253 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Qfind architecture and next deep seams",
+    "output": "qfind-architecture.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/DerpcatMusic/qfind",
+      "revision": "fc7baaee86f78088b81e73f57a4382b2643613fe"
+    },
+    "viewBox": [1320, 720],
+    "views": [
+      {
+        "id": "find-path",
+        "label": "Find and browse",
+        "focus": ["mounts", "catalog", "query", "manager", "gtk", "tui"],
+        "note": "One immutable Catalog serves instant Query and directory browsing in both frontends."
+      },
+      {
+        "id": "visual-path",
+        "label": "Preview and Chart",
+        "focus": ["manager", "gtk", "chart", "preview"],
+        "note": "Selection and current_directory should drive both visual consumers through one session state."
+      },
+      {
+        "id": "extension-path",
+        "label": "Desktop integration",
+        "focus": ["config", "manager", "integrations"],
+        "note": "Keep compatibility data-driven and outside the GUI process."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "mounts",
+      "type": "external",
+      "label": "Filesystem Mounts",
+      "sublabel": "local + network filesystems",
+      "pos": [30, 300],
+      "size": [150, 70],
+      "sources": [{ "path": "crates/core/src/mounts.rs" }]
+    },
+    {
+      "id": "catalog",
+      "type": "database",
+      "label": "Catalog Snapshot",
+      "sublabel": "paths + metadata + masks",
+      "tag": "mmap + atomic replace",
+      "pos": [235, 300],
+      "size": [170, 70],
+      "sources": [
+        { "path": "crates/core/src/catalog.rs" },
+        { "path": "crates/core/src/snapshot.rs" },
+        { "path": "crates/core/src/walk.rs" }
+      ]
+    },
+    {
+      "id": "query",
+      "type": "backend",
+      "label": "Query Engine",
+      "sublabel": "matching + scope + sort",
+      "pos": [465, 300],
+      "size": [155, 70],
+      "sources": [
+        { "path": "crates/core/src/query.rs" },
+        { "path": "crates/core/src/search.rs" }
+      ]
+    },
+    {
+      "id": "manager",
+      "type": "backend",
+      "label": "Manager Session",
+      "sublabel": "navigation + selection",
+      "tag": "deepen this seam",
+      "pos": [680, 300],
+      "size": [180, 76],
+      "sources": [{ "path": "crates/gtk/src/main.rs" }]
+    },
+    {
+      "id": "gtk",
+      "type": "frontend",
+      "label": "GTK Manager",
+      "sublabel": "Places + files + controls",
+      "pos": [930, 165],
+      "size": [170, 72],
+      "sources": [
+        { "path": "crates/gtk/src/main.rs" },
+        { "path": "crates/gtk/src/surface.rs" }
+      ]
+    },
+    {
+      "id": "tui",
+      "type": "frontend",
+      "label": "Ratatui Manager",
+      "sublabel": "search + browser + preview",
+      "pos": [930, 435],
+      "size": [170, 72],
+      "sources": [{ "path": "crates/tui/src/lib.rs" }]
+    },
+    {
+      "id": "chart",
+      "type": "frontend",
+      "label": "Chart",
+      "sublabel": "Directory / Global",
+      "pos": [1150, 165],
+      "size": [150, 72]
+    },
+    {
+      "id": "preview",
+      "type": "backend",
+      "label": "Preview Workers",
+      "sublabel": "text + visual media",
+      "tag": "async + cached",
+      "pos": [1150, 435],
+      "size": [150, 72],
+      "sources": [{ "path": "crates/gtk/src/actions.rs" }]
+    },
+    {
+      "id": "config",
+      "type": "database",
+      "label": "Config",
+      "sublabel": "Catalog + view rules",
+      "pos": [465, 85],
+      "size": [155, 66],
+      "sources": [{ "path": "crates/core/src/config.rs" }]
+    },
+    {
+      "id": "integrations",
+      "type": "external",
+      "label": "Desktop Integrations",
+      "sublabel": "DND + Places + actions",
+      "pos": [680, 555],
+      "size": [180, 70],
+      "sources": [
+        { "path": "crates/gtk/src/actions.rs" },
+        { "path": "packaging/nautilus/qfind.py" }
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Shared Rust core",
+      "wraps": ["catalog", "query", "config"]
+    }
+  ],
+  "connections": [
+    {
+      "id": "scan-mounts",
+      "from": "mounts",
+      "to": "catalog",
+      "label": "parallel Rebuild",
+      "labelDy": -29,
+      "variant": "emphasis"
+    },
+    {
+      "id": "catalog-query",
+      "from": "catalog",
+      "to": "query",
+      "label": "immutable Hits",
+      "labelDy": 59
+    },
+    {
+      "id": "query-session",
+      "from": "query",
+      "to": "manager",
+      "label": "latest Query only",
+      "labelDy": -29,
+      "variant": "emphasis"
+    },
+    {
+      "id": "session-gtk",
+      "from": "manager",
+      "to": "gtk",
+      "label": "directory + selection",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "session-tui",
+      "from": "manager",
+      "to": "tui",
+      "label": "directory + selection",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "gtk-chart",
+      "from": "gtk",
+      "to": "chart",
+      "label": "shared current_directory",
+      "labelDy": 60
+    },
+    {
+      "id": "gtk-preview",
+      "from": "gtk",
+      "to": "preview",
+      "label": "selected path",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "config-catalog",
+      "from": "config",
+      "to": "catalog",
+      "label": "Mounts + Excludes",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "config-session",
+      "from": "config",
+      "to": "manager",
+      "label": "view state",
+      "fromSide": "right",
+      "toSide": "top"
+    },
+    {
+      "id": "session-integrations",
+      "from": "manager",
+      "to": "integrations",
+      "label": "URI list + argv",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 24,
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Deepen Manager Session",
+      "items": [
+        "Move navigation, selection, Classic/Qfind and Chart scope out of GTK callbacks into shared state transitions"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Keep the fast path boring",
+      "items": [
+        "Keep atomic Catalog replacement, latest-Query sequencing, and bounded event-driven Preview workers"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Extensibility without plugin debt",
+      "items": [
+        "Render data or scripts through GMenu and import desktop formats without loading foreign GUI code"
+      ]
+    }
+  ]
+}

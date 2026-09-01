@@ -1,9 +1,8 @@
-"""Nautilus 4: Ctrl+F opens Qfind, directory-first.
+"""Nautilus 4: Ctrl+F opens Qfind scoped to the current directory.
 
 Nautilus 43+ has no search-provider hook (Tracker/LocalSearch is compiled in).
 We capture Ctrl+F on each Files window (GTK4 ShortcutController, capture phase)
-and launch qfind-gtk --here <current folder>. Qfind splits Hits: this folder
-on top, everywhere else below.
+and launch qfind-gtk --here <current folder>.
 
 Install: ~/.local/share/nautilus-python/extensions/qfind.py
 Reload: nautilus -q

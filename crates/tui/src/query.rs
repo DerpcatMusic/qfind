@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crossbeam_channel::{Receiver, Sender, TrySendError};
-use qfind_core::{Catalog, Error, IgnoreMatcher, SearchOpts};
+use qfind_core::{Catalog, CatalogFolder, Error, IgnoreMatcher, SearchOpts};
 use rayon::prelude::*;
 
 use super::{Row, WorkEvent, reactor};
@@ -17,6 +17,7 @@ struct Request {
     query: String,
     opts: SearchOpts,
     show_hidden: bool,
+    folder: Option<CatalogFolder>,
 }
 
 pub(crate) struct Session {
@@ -53,12 +54,21 @@ impl Session {
                 };
                 let mut rows = loop {
                     request.opts.limit = search_limit;
-                    let hits = match catalog.search_with_hidden_cancel(
-                        &request.query,
-                        request.opts,
-                        request.show_hidden,
-                        stale,
-                    ) {
+                    let result = match request.folder.as_ref() {
+                        Some(folder) => folder.search_with_hidden_cancel(
+                            &request.query,
+                            request.opts,
+                            request.show_hidden,
+                            stale,
+                        ),
+                        None => catalog.search_with_hidden_cancel(
+                            &request.query,
+                            request.opts,
+                            request.show_hidden,
+                            stale,
+                        ),
+                    };
+                    let hits = match result {
                         Ok(hits) => hits,
                         Err(Error::Cancelled) => continue 'requests,
                         Err(error) => {
@@ -110,13 +120,20 @@ impl Session {
         }
     }
 
-    pub(crate) fn submit(&self, query: String, opts: SearchOpts, show_hidden: bool) -> u64 {
+    pub(crate) fn submit(
+        &self,
+        query: String,
+        opts: SearchOpts,
+        show_hidden: bool,
+        folder: Option<CatalogFolder>,
+    ) -> u64 {
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
         let mut request = Request {
             generation,
             query,
             opts,
             show_hidden,
+            folder,
         };
         loop {
             match self.requests.try_send(request) {

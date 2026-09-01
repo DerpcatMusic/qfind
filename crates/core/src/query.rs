@@ -19,6 +19,13 @@ pub enum FileClass {
     Archive,
 }
 
+impl FileClass {
+    #[must_use]
+    pub fn matches(self, name: &str, is_dir: bool) -> bool {
+        class_matches(self, name, is_dir)
+    }
+}
+
 /// How to order Hits after a Query.
 ///
 /// Date and size use live `stat` of the matched Hits (names-first Catalogs

@@ -17,6 +17,7 @@ mod imp {
     pub struct HitModel {
         pub catalog: RefCell<Option<Catalog>>,
         pub ids: RefCell<Vec<u32>>,
+        pub live: RefCell<Option<Vec<RowData>>>,
         /// Keep RowData GObjects across scroll. Zed: don't rebuild visible items every frame.
         pub rows: RefCell<HashMap<u32, RowData>>,
     }
@@ -36,10 +37,16 @@ mod imp {
         }
 
         fn n_items(&self) -> u32 {
-            self.ids.borrow().len() as u32
+            self.live
+                .borrow()
+                .as_ref()
+                .map_or_else(|| self.ids.borrow().len(), Vec::len) as u32
         }
 
         fn item(&self, position: u32) -> Option<glib::Object> {
+            if let Some(rows) = self.live.borrow().as_ref() {
+                return rows.get(position as usize).cloned().map(|row| row.upcast());
+            }
             let ids = self.ids.borrow();
             let id = *ids.get(position as usize)?;
             drop(ids);
@@ -75,7 +82,7 @@ impl HitModel {
     }
 
     pub fn set_ids(&self, ids: Vec<u32>) {
-        let old = self.imp().ids.borrow().len() as u32;
+        let old = self.n_items();
         let new = ids.len() as u32;
         {
             let keep: HashSet<u32> = ids.iter().copied().collect();
@@ -85,8 +92,41 @@ impl HitModel {
                 cache.clear();
             }
         }
+        self.imp().live.replace(None);
         self.imp().ids.replace(ids);
         self.items_changed(0, old, new);
+    }
+
+    pub fn set_rows(&self, rows: Vec<RowData>) {
+        let old = self.n_items();
+        let new = rows.len() as u32;
+        self.imp().ids.borrow_mut().clear();
+        self.imp().rows.borrow_mut().clear();
+        self.imp().live.replace(Some(rows));
+        self.items_changed(0, old, new);
+    }
+
+    pub fn id(&self, position: u32) -> Option<u32> {
+        self.imp().ids.borrow().get(position as usize).copied()
+    }
+
+    pub fn position(&self, id: u32) -> Option<u32> {
+        self.imp()
+            .ids
+            .borrow()
+            .iter()
+            .position(|candidate| *candidate == id)
+            .and_then(|position| u32::try_from(position).ok())
+    }
+
+    pub fn position_path(&self, path: &str) -> Option<u32> {
+        self.imp()
+            .live
+            .borrow()
+            .as_ref()?
+            .iter()
+            .position(|row| row.path() == path)
+            .and_then(|position| u32::try_from(position).ok())
     }
 }
 

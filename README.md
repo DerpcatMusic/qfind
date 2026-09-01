@@ -162,6 +162,9 @@ An empty Query in the TUI lists the Catalog. Fuzzy matching is the default; use 
 | `Ctrl+scroll`, `+`, `-` | change list or grid density |
 | `Ctrl+O` | show the Hit in Files |
 | `Ctrl+Y` | copy the path |
+| `Ctrl+F` / `Ctrl+Shift+F` | search the browsed folder / search everywhere |
+| `Alt+Left` / `Alt+Right` | browser Back / Forward |
+| `Ctrl+L` | enter an absolute or relative directory path |
 | right-click | Open, Preview, copy, and file-manager actions |
 | mouse drag | hand a Hit to another desktop app in Kitty 0.47+ |
 
@@ -187,7 +190,9 @@ Helpers are optional and discovered on `PATH`; `Space` falls back to Quick Look 
 
 ## Folder browser and WeightMap
 
-Press `F4` to open the browser. Use `Tab`, `Left`, or `Right` to switch panes, `Enter` to descend, and `Backspace` to move to the parent folder. Entering a folder updates the WeightMap to that folder.
+Press `F4` to open the browser. Use `Tab`, `Left`, or `Right` to switch panes, `Enter` to descend, `Backspace` to move to the parent folder, and `Alt+Left` / `Alt+Right` for history. `Ctrl+L` opens a direct location entry. Entering a folder updates the WeightMap to that folder.
+
+Typing from Browse or pressing `Ctrl+F` starts an instant recursive Query scoped to the displayed folder. `Ctrl+Shift+F` widens the Query back to the whole Catalog.
 
 The WeightMap follows the current Query or browsed folder. Size mode uses file bytes; File Types mode counts files by extension. Click a folder tile to browse it or an extension tile to search it.
 
@@ -227,7 +232,11 @@ Auto opening sends text files to the configured editor and folders or media to t
 
 ### GTK
 
-Run `qfind-gtk` for the desktop frontend. Typing updates Hits immediately; Enter or double-click opens one, and rows can be dragged into other Wayland or X11 applications. The context menu provides Open, Open With, Preview, Show in Files, and Copy Path.
+Run `qfind-gtk` for the desktop frontend. **Classic** shows only the current folder's immediate files and folders; **Qfind** switches to recursive indexed results below that location. The window includes Places and pinned folders on the left, resizable results in the middle, and a right pane that switches between file Preview and an interactive Chart. Chart can follow the current directory or show every indexed local Mount (including NTFS/fuseblk); drilling in either the file surface or Chart keeps the other synchronized. Use the header star to pin or unpin the current folder.
+
+The connected navigation shell keeps Places and the header on one brighter theme surface while files stay on the quieter content surface. The header separates folder navigation, Classic/Qfind scope, location, Search, result filters, View settings, Preview, and app Settings. The funnel holds matching, sort, folders-first grouping, and FileClass filters; the three-dot View menu holds List/Grid, Zoom, spacing, zebra rows, Tree, WeightMap, Preview, hidden files, and ignore rules. `F3` closes or restores the preview pane, `Ctrl+L` selects the location, `Ctrl+F` searches below it, `Ctrl+Shift+F` searches everywhere, `Alt+Left` / `Alt+Right` move through session history, and `Alt+Up` opens the parent. Typing updates Hits immediately, and rows can be dragged into other Wayland or X11 applications.
+
+Places are read directly from Qfind pins, GTK/Nautilus bookmarks, and Dolphin's `user-places.xbel`. The context menu provides the built-in file actions and discovers nested executable actions from `$XDG_DATA_HOME/qfind/actions` plus existing Nautilus Scripts from `$XDG_DATA_HOME/nautilus/scripts`; subdirectories become submenus and commands receive the selected path as both an argument and `QFIND_SELECTED_PATHS`.
 
 Space previews the hovered or selected Hit through GNOME Sushi when available, with a built-in window as fallback. Ctrl+scroll moves between compact lists, roomier rows, and a visual grid. The GTK settings include Excludes, Mounts, default Zoom, spacing, and reset. The virtual ListView/GridView does not `stat` during bind, keeps its scrollbars visible, and uses GSK composition.
 

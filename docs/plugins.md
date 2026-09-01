@@ -18,7 +18,7 @@ That builds `qfind` into `~/.local/bin` (and `qfind-gtk` if gtk4 is available) *
 
 **What you get**
 
-- **Ctrl+F** in a folder opens Qfind for that directory (split: this folder on top, elsewhere below).
+- **Ctrl+F** in a folder opens an instant recursive Qfind search scoped to that directory.
 - Right-click a folder or the background → **Search with Qfind**.
 
 Nautilus 43+ has no public hook to replace the in-window search box (Tracker/LocalSearch is compiled in). Ctrl+F is captured on the Files window and handed to `qfind-gtk --here`.

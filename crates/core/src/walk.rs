@@ -1,6 +1,7 @@
-//! POSIX enumerator: parallel `getdents64` via rustix, no per-file `stat`.
+//! POSIX enumerator: parallel `getdents64` via rustix.
 //!
-//! Directory type comes from `d_type`. Size/mtime stay 0 (Everything-style names-first).
+//! Directory type comes from `d_type`; files are statted once so WeightMap and Storage
+//! can report real sizes from the persistent Catalog instead of rescanning later.
 //! io_uring getdents is not in mainline kernels; this is the fast path that actually exists.
 
 #[cfg(unix)]
@@ -33,6 +34,7 @@ struct Job {
 struct Found {
     path: PathBuf,
     is_dir: bool,
+    size: u64,
 }
 
 #[cfg(unix)]
@@ -43,18 +45,23 @@ const OPEN_FLAGS: OFlags = OFlags::RDONLY
 
 /// Parallel getdents walk. NTFS MFT is a second adapter later; no trait until then.
 pub(crate) fn collect(root: &Path, excludes: &Excludes, builder: &mut Builder) -> Result<()> {
-    #[cfg(unix)]
-    let found = walk_getdents(root, excludes);
-    #[cfg(not(unix))]
-    let found = walk_read_dir(root, excludes);
+    let found = scan(root, excludes);
     for item in found {
         if item.is_dir {
             builder.add_dir(&item.path, root, 0, 0);
         } else {
-            builder.add_file(&item.path, root, 0, 0);
+            builder.add_file(&item.path, root, item.size, 0);
         }
     }
     Ok(())
+}
+
+fn scan(root: &Path, excludes: &Excludes) -> Vec<Found> {
+    #[cfg(unix)]
+    let found = walk_getdents(root, excludes);
+    #[cfg(not(unix))]
+    let found = walk_read_dir(root, excludes);
+    found
 }
 
 #[cfg(unix)]
@@ -137,10 +144,10 @@ fn read_dir(
         if excludes.skip(&child) {
             continue;
         }
-        let is_dir = match entry.file_type() {
-            FileType::Directory => true,
-            FileType::Unknown => is_dir_unknown(&job.fd, name),
-            _ => false,
+        let (is_dir, size) = match entry.file_type() {
+            FileType::Directory => (true, 0),
+            FileType::Unknown => stat_info(&job.fd, name),
+            _ => (false, file_size(&job.fd, name)),
         };
         if is_dir {
             if let Ok(fd) = openat(&job.fd, name, OPEN_FLAGS, Mode::empty()) {
@@ -154,18 +161,27 @@ fn read_dir(
         local.push(Found {
             path: child,
             is_dir,
+            size,
         });
     }
     inflight.fetch_sub(1, Ordering::SeqCst);
 }
 
 #[cfg(unix)]
-fn is_dir_unknown(dir_fd: impl AsFd, name: &OsStr) -> bool {
+fn stat_info(dir_fd: impl AsFd, name: &OsStr) -> (bool, u64) {
     use rustix::fs::{AtFlags, statat};
     match statat(dir_fd, name, AtFlags::SYMLINK_NOFOLLOW) {
-        Ok(st) => FileType::from_raw_mode(st.st_mode) == FileType::Directory,
-        Err(_) => false,
+        Ok(st) => (
+            FileType::from_raw_mode(st.st_mode) == FileType::Directory,
+            u64::try_from(st.st_size).unwrap_or(0),
+        ),
+        Err(_) => (false, 0),
     }
+}
+
+#[cfg(unix)]
+fn file_size(dir_fd: impl AsFd, name: &OsStr) -> u64 {
+    stat_info(dir_fd, name).1
 }
 
 #[cfg(not(unix))]
@@ -205,7 +221,9 @@ fn walk_read_dir(root: &Path, excludes: &Excludes) -> Vec<Found> {
                                 if excludes.skip(&child) {
                                     continue;
                                 }
-                                let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
+                                let metadata = entry.metadata().ok();
+                                let is_dir = metadata.as_ref().is_some_and(|kind| kind.is_dir());
+                                let size = metadata.as_ref().map_or(0, std::fs::Metadata::len);
                                 if is_dir {
                                     inflight.fetch_add(1, Ordering::SeqCst);
                                     let _ = tx.send(child.clone());
@@ -213,6 +231,7 @@ fn walk_read_dir(root: &Path, excludes: &Excludes) -> Vec<Found> {
                                 local.push(Found {
                                     path: child,
                                     is_dir,
+                                    size,
                                 });
                             }
                             inflight.fetch_sub(1, Ordering::SeqCst);
