@@ -118,5 +118,5 @@ xcrun stapler staple "$pkg"
 xcrun stapler validate "$pkg"
 pkgutil --check-signature "$pkg"
 spctl --assess --type install --verbose=4 "$pkg"
-shasum -a 256 "$pkg" > "$pkg.sha256"
+(cd "$dist" && shasum -a 256 "$(basename "$pkg")" > "$(basename "$pkg").sha256")
 echo "$pkg"
