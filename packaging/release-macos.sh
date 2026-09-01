@@ -27,31 +27,25 @@ cleanup() {
 trap cleanup EXIT
 
 cd "$root"
-mkdir -p "$dist" "$work/universal" "$work/app/Qfind.app/Contents/MacOS" \
+mkdir -p "$dist" "$work/app/Qfind.app/Contents/MacOS" \
   "$work/app/Qfind.app/Contents/Frameworks"
 rustup target add x86_64-apple-darwin aarch64-apple-darwin
 for target in x86_64-apple-darwin aarch64-apple-darwin; do
-  cargo build --release --target "$target" -p qfind -p qfind-tui -p qfind-native
+  cargo build --release --target "$target" -p qfind-native
 done
 
-for binary in qfind qfind-tui; do
-  lipo -create \
-    "target/x86_64-apple-darwin/release/$binary" \
-    "target/aarch64-apple-darwin/release/$binary" \
-    -output "$work/universal/$binary"
-done
 lipo -create \
   target/x86_64-apple-darwin/release/libqfind_native.dylib \
   target/aarch64-apple-darwin/release/libqfind_native.dylib \
-  -output "$work/universal/libqfind_native.dylib"
-install_name_tool -id '@rpath/libqfind_native.dylib' "$work/universal/libqfind_native.dylib"
+  -output "$work/libqfind_native.dylib"
+install_name_tool -id '@rpath/libqfind_native.dylib' "$work/libqfind_native.dylib"
 
 mkdir -p target/release
-install -m755 "$work/universal/libqfind_native.dylib" target/release/libqfind_native.dylib
+install -m755 "$work/libqfind_native.dylib" target/release/libqfind_native.dylib
 swift build -c release --package-path apps/macos --arch x86_64 --arch arm64
 swift_bin="$(swift build -c release --package-path apps/macos --arch x86_64 --arch arm64 --show-bin-path)"
 install -m755 "$swift_bin/Qfind" "$work/app/Qfind.app/Contents/MacOS/Qfind"
-install -m755 "$work/universal/libqfind_native.dylib" \
+install -m755 "$work/libqfind_native.dylib" \
   "$work/app/Qfind.app/Contents/Frameworks/libqfind_native.dylib"
 install -m644 apps/macos/Info.plist "$work/app/Qfind.app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" \
@@ -61,8 +55,7 @@ install -m644 apps/macos/Info.plist "$work/app/Qfind.app/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $version" \
     "$work/app/Qfind.app/Contents/Info.plist"
 
-for binary in "$work/universal/qfind" "$work/universal/qfind-tui" \
-  "$work/app/Qfind.app/Contents/MacOS/Qfind" \
+for binary in "$work/app/Qfind.app/Contents/MacOS/Qfind" \
   "$work/app/Qfind.app/Contents/Frameworks/libqfind_native.dylib"; do
   lipo "$binary" -verify_arch x86_64 arm64
 done
@@ -98,15 +91,10 @@ sign() {
 sign "$work/app/Qfind.app/Contents/Frameworks/libqfind_native.dylib"
 sign "$work/app/Qfind.app/Contents/MacOS/Qfind"
 sign "$work/app/Qfind.app"
-sign "$work/universal/qfind"
-sign "$work/universal/qfind-tui"
 codesign --verify --deep --strict --verbose=2 "$work/app/Qfind.app"
 
-mkdir -p "$work/pkgroot/Applications" "$work/pkgroot/usr/local/bin"
+mkdir -p "$work/pkgroot/Applications"
 ditto "$work/app/Qfind.app" "$work/pkgroot/Applications/Qfind.app"
-install -m755 "$work/universal/qfind" "$work/pkgroot/usr/local/bin/qfind"
-cp "$work/pkgroot/usr/local/bin/qfind" "$work/pkgroot/usr/local/bin/qfind-cli"
-install -m755 "$work/universal/qfind-tui" "$work/pkgroot/usr/local/bin/qfind-tui"
 
 pkg="$dist/qfind-$version-macos-universal.pkg"
 pkgbuild --root "$work/pkgroot" --identifier music.derpcat.qfind.pkg \

@@ -15,11 +15,7 @@ $Stage = "$Root\target\dist\$Name"
 
 Remove-Item $Stage -Recurse -Force -ErrorAction SilentlyContinue
 New-Item $Stage -ItemType Directory -Force | Out-Null
-cargo build --release --manifest-path "$Root\Cargo.toml" -p qfind -p qfind-tui
-Copy-Item "$Root\target\release\qfind.exe" "$Stage\qfind.exe"
-Copy-Item "$Root\target\release\qfind.exe" "$Stage\qfind-cli.exe"
-Copy-Item "$Root\target\release\qfind-tui.exe" "$Stage\qfind-tui.exe"
-dotnet publish "$Root\apps\windows\Qfind.Windows.csproj" -c Release -r $Rid -p:Platform=$Platform -o "$Stage\Qfind"
+dotnet publish "$Root\apps\windows\Qfind.Windows.csproj" -c Release -r $Rid -p:Platform=$Platform -o $Stage
 Copy-Item "$Root\LICENSE" "$Stage\LICENSE"
 $Archive = "$Root\target\dist\$Name.zip"
 Remove-Item $Archive -Force -ErrorAction SilentlyContinue

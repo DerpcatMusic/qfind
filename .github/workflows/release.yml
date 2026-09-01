@@ -36,7 +36,7 @@ jobs:
         run: ./packaging/release-macos.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: qfind-macos-universal-notarized
+          name: qfind-macos-universal-gui-notarized
           path: |
             target/dist/qfind-*-macos-universal.pkg
             target/dist/qfind-*-macos-universal.pkg.sha256
@@ -50,7 +50,7 @@ jobs:
         run: .\packaging\release-windows.ps1
       - uses: actions/upload-artifact@v4
         with:
-          name: qfind-windows
+          name: qfind-windows-winui
           path: target/dist/*.zip
 
   publish:
