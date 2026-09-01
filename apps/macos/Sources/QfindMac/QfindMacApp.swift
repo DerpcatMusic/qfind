@@ -53,8 +53,9 @@ private final class Browser: ObservableObject {
     private let manager: OpaquePointer
 
     init?() {
-        directory = FileManager.default.homeDirectoryForCurrentUser.path
-        guard let handle = directory.withCString({ qfind_manager_open($0) }) else { return nil }
+        let initialDirectory = FileManager.default.homeDirectoryForCurrentUser.path
+        directory = initialDirectory
+        guard let handle = initialDirectory.withCString({ qfind_manager_open($0) }) else { return nil }
         manager = handle
         refresh()
     }
