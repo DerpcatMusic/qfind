@@ -32,6 +32,9 @@ pub struct Pane {
     catalog_generation: Rc<Cell<u64>>,
     manager: Rc<RefCell<ManagerSession>>,
     navigate: Rc<RefCell<Box<dyn Fn(PathBuf)>>>,
+    select: Rc<RefCell<Box<dyn Fn(&StorageEntry) -> bool>>>,
+    context: Rc<RefCell<Box<dyn Fn(&StorageEntry)>>>,
+    context_menu: Rc<RefCell<Option<gtk::PopoverMenu>>>,
 }
 
 impl Pane {
@@ -57,6 +60,11 @@ impl Pane {
         let arcs = Rc::new(RefCell::new(Vec::<Arc>::new()));
         let catalog_generation = Rc::new(Cell::new(0));
         let navigate: Rc<RefCell<Box<dyn Fn(PathBuf)>>> = Rc::new(RefCell::new(Box::new(|_| {})));
+        let select: Rc<RefCell<Box<dyn Fn(&StorageEntry) -> bool>>> =
+            Rc::new(RefCell::new(Box::new(|_| false)));
+        let context: Rc<RefCell<Box<dyn Fn(&StorageEntry)>>> =
+            Rc::new(RefCell::new(Box::new(|_| {})));
+        let context_menu = Rc::new(RefCell::new(None::<gtk::PopoverMenu>));
 
         {
             let map = Rc::clone(&map);
@@ -131,14 +139,20 @@ impl Pane {
                 cr.set_source_rgb(0.98, 0.98, 1.0);
                 for arc in &laid_out {
                     let mid_radius = (arc.inner + arc.outer) / 2.0;
-                    let label = human_bytes(arc.entry.bytes);
-                    let extents = cr.text_extents(&label).ok();
-                    if arc.entry.bytes == 0
-                        || (arc.end - arc.start) * mid_radius
-                            < extents.as_ref().map_or(56.0, |e| e.width() + 12.0)
-                    {
+                    let measure = if arc.entry.bytes > 0 {
+                        human_bytes(arc.entry.bytes)
+                    } else {
+                        format!("{} items", arc.entry.entries)
+                    };
+                    let Some(label) = fitted_label(
+                        cr,
+                        &arc.entry.name,
+                        &measure,
+                        (arc.end - arc.start) * mid_radius,
+                    ) else {
                         continue;
-                    }
+                    };
+                    let extents = cr.text_extents(&label).ok();
                     let angle = (arc.start + arc.end) / 2.0;
                     let x = cx + mid_radius * angle.cos();
                     let y = cy + mid_radius * angle.sin();
@@ -181,11 +195,16 @@ impl Pane {
             let area = area.clone();
             let hovered = Rc::clone(&hovered);
             let arcs = Rc::clone(&arcs);
+            let select = Rc::clone(&select);
             motion.connect_motion(move |_, x, y| {
-                let next =
-                    hit(&arcs.borrow(), area.width(), area.height(), x, y).map(|arc| arc.entry.id);
+                let entry = hit(&arcs.borrow(), area.width(), area.height(), x, y)
+                    .map(|arc| arc.entry.clone());
+                let next = entry.as_ref().map(|entry| entry.id);
                 if next != hovered.get() {
                     hovered.set(next);
+                    if let Some(entry) = entry.as_ref().filter(|entry| entry.id != u32::MAX) {
+                        select.borrow()(entry);
+                    }
                     area.set_cursor_from_name(next.map(|_| "pointer"));
                     area.set_tooltip_text(
                         next.and_then(|id| {
@@ -219,6 +238,7 @@ impl Pane {
         area.add_controller(motion);
 
         let click = gtk::GestureClick::new();
+        click.set_button(gtk::gdk::BUTTON_PRIMARY);
         {
             let area = area.clone();
             let map = Rc::clone(&map);
@@ -266,6 +286,30 @@ impl Pane {
         }
         area.add_controller(click);
 
+        let right = gtk::GestureClick::new();
+        right.set_button(gtk::gdk::BUTTON_SECONDARY);
+        {
+            let area = area.clone();
+            let arcs = Rc::clone(&arcs);
+            let select = Rc::clone(&select);
+            let context = Rc::clone(&context);
+            let context_menu = Rc::clone(&context_menu);
+            right.connect_pressed(move |_, _, x, y| {
+                let Some(entry) = hit(&arcs.borrow(), area.width(), area.height(), x, y)
+                    .map(|arc| arc.entry.clone())
+                    .filter(|entry| entry.id != u32::MAX)
+                else {
+                    return;
+                };
+                select.borrow()(&entry);
+                context.borrow()(&entry);
+                if let Some(menu) = context_menu.borrow().as_ref() {
+                    crate::surface::popup_at(menu, &area, x, y);
+                }
+            });
+        }
+        area.add_controller(right);
+
         let directory_btn = gtk::ToggleButton::with_label("Directory");
         directory_btn.set_active(true);
         let global_btn = gtk::ToggleButton::with_label("Global");
@@ -292,6 +336,9 @@ impl Pane {
             catalog_generation,
             manager,
             navigate,
+            select,
+            context,
+            context_menu,
         };
         {
             let pane = pane.clone();
@@ -337,6 +384,17 @@ impl Pane {
 
     pub fn set_navigate(&self, navigate: impl Fn(PathBuf) + 'static) {
         *self.navigate.borrow_mut() = Box::new(navigate);
+    }
+
+    pub fn bind_results(
+        &self,
+        menu: gtk::PopoverMenu,
+        select: impl Fn(&StorageEntry) -> bool + 'static,
+        context: impl Fn(&StorageEntry) + 'static,
+    ) {
+        *self.context_menu.borrow_mut() = Some(menu);
+        *self.select.borrow_mut() = Box::new(select);
+        *self.context.borrow_mut() = Box::new(context);
     }
 
     pub fn set_directory(&self, path: &Path) {
@@ -560,4 +618,29 @@ fn human_bytes(bytes: u64) -> String {
     } else {
         format!("{value:.1} {}", UNITS[unit])
     }
+}
+
+fn fitted_label(
+    cr: &gtk::cairo::Context,
+    name: &str,
+    measure: &str,
+    available: f64,
+) -> Option<String> {
+    let fits = |text: &str| {
+        cr.text_extents(text)
+            .is_ok_and(|extents| extents.width() + 12.0 <= available)
+    };
+    let full = format!("{name} · {measure}");
+    if fits(&full) {
+        return Some(full);
+    }
+    let mut name: Vec<char> = name.chars().collect();
+    while !name.is_empty() {
+        name.pop();
+        let label = format!("{}… · {measure}", name.iter().collect::<String>());
+        if fits(&label) {
+            return Some(label);
+        }
+    }
+    fits(measure).then(|| measure.to_owned())
 }

@@ -3,37 +3,59 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  unix:
-    strategy:
-      matrix:
-        runner: [ubuntu-24.04, macos-15, macos-15-intel]
-    runs-on: ${{ matrix.runner }}
+  linux:
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
-      - run: ./packaging/release-tui.sh "${GITHUB_REF_NAME#v}"
+      - run: ./packaging/release-tui.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: qfind-${{ matrix.runner }}
+          name: qfind-linux
           path: target/dist/*.tar.gz
+
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build universal app, sign, notarize, and package
+        env:
+          APPLE_APPLICATION_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_APPLICATION_CERTIFICATE_P12_BASE64 }}
+          APPLE_INSTALLER_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_INSTALLER_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_DEVELOPER_ID_APPLICATION: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}
+          APPLE_DEVELOPER_ID_INSTALLER: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: ./packaging/release-macos.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qfind-macos-universal-notarized
+          path: |
+            target/dist/qfind-*-macos-universal.pkg
+            target/dist/qfind-*-macos-universal.pkg.sha256
+            target/dist/qfind-*-macos-notary.json
 
   windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
       - shell: pwsh
-        run: .\packaging\release-windows.ps1 ($env:GITHUB_REF_NAME.TrimStart('v'))
+        run: .\packaging\release-windows.ps1
       - uses: actions/upload-artifact@v4
         with:
           name: qfind-windows
           path: target/dist/*.zip
 
   publish:
-    needs: [unix, windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, macos, windows]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v5

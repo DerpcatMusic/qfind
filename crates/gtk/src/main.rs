@@ -26,7 +26,7 @@ mod storage;
 mod surface;
 use actions::{
     content_for_path, copy_name, copy_path, copy_uri, open, open_folder, open_with, preview,
-    preview_widget, reveal, selected_row,
+    preview_widget, reveal, selected_row, trash,
 };
 use model::HitModel;
 use row::RowData;
@@ -323,6 +323,11 @@ fn build_ui(app: &gtk::Application) {
          .qfind-tile { margin: 1px; }
          .qfind-shell { background-color: @headerbar_bg_color; color: @headerbar_fg_color; }
          .qfind-shell entry, .qfind-shell searchentry { background-color: @view_bg_color; color: @view_fg_color; }
+         .qfind-chrome, scrolledwindow.qfind-chrome > viewport, scrolledwindow.qfind-chrome > viewport > box {
+             background: @sidebar_bg_color;
+             color: @sidebar_fg_color;
+         }
+         .qfind-chrome entry, .qfind-chrome searchentry { background: @view_bg_color; color: @view_fg_color; }
          .qfind-place-active { background-color: alpha(@theme_selected_bg_color, 0.32); }
          .qfind-content { background-color: @view_bg_color; color: @view_fg_color; }",
     );
@@ -336,6 +341,7 @@ fn build_ui(app: &gtk::Application) {
 
     let header = gtk::HeaderBar::new();
     header.add_css_class("qfind-shell");
+    header.add_css_class("qfind-chrome");
     let back_btn = gtk::Button::from_icon_name("go-previous-symbolic");
     back_btn.set_tooltip_text(Some("Back (Alt+Left)"));
     back_btn.set_sensitive(false);
@@ -588,6 +594,7 @@ fn build_ui(app: &gtk::Application) {
 
     let (menu, external_actions) = hit_menu();
     let popover = gtk::PopoverMenu::from_model(Some(&menu));
+    let context_target: Rc<RefCell<Option<RowData>>> = Rc::new(RefCell::new(None));
     popover.set_has_arrow(false);
     popover.set_halign(gtk::Align::Start);
     let navigate: Navigator = Rc::new(RefCell::new(Box::new(|_| {})));
@@ -750,9 +757,9 @@ fn build_ui(app: &gtk::Application) {
     let results = gtk::Box::new(gtk::Orientation::Vertical, 0);
     results.add_css_class("qfind-content");
     results.append(&stack);
-    results.append(&weight);
 
     let places = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    places.add_css_class("qfind-chrome");
     places.set_margin_top(8);
     places.set_margin_bottom(8);
     places.set_margin_start(6);
@@ -768,6 +775,7 @@ fn build_ui(app: &gtk::Application) {
         .hscrollbar_policy(gtk::PolicyType::Never)
         .build();
     places_scroll.add_css_class("qfind-shell");
+    places_scroll.add_css_class("qfind-chrome");
     places_scroll.add_css_class("sidebar");
 
     let preview_title = gtk::ToggleButton::with_label("Preview");
@@ -791,6 +799,41 @@ fn build_ui(app: &gtk::Application) {
     preview_page.append(&preview_path);
     preview_page.append(&preview_content);
     let storage = storage::Pane::new(Rc::clone(&manager));
+    storage.root.append(&weight);
+    {
+        let model = model.clone();
+        let selection = selection.clone();
+        let list = list.clone();
+        let grid = grid.clone();
+        let stack = stack.clone();
+        let context_target = Rc::clone(&context_target);
+        storage.bind_results(
+            popover.clone(),
+            move |entry| {
+                let path = entry.path.to_string_lossy();
+                let Some(position) = model
+                    .position(entry.id)
+                    .or_else(|| model.position_path(&path))
+                else {
+                    return false;
+                };
+                selection.set_selected(position);
+                match stack.visible_child_name().as_deref() {
+                    Some("grid") => grid.scroll_to(position, gtk::ListScrollFlags::NONE, None),
+                    Some("list") => list.scroll_to(position, gtk::ListScrollFlags::NONE, None),
+                    _ => {}
+                }
+                true
+            },
+            move |entry| {
+                context_target.replace(Some(RowData::new(
+                    &entry.name,
+                    entry.path.to_string_lossy(),
+                    entry.is_dir,
+                )));
+            },
+        );
+    }
     if let Some(path) = initial_folder.as_deref() {
         storage.set_directory(path);
     }
@@ -943,6 +986,8 @@ fn build_ui(app: &gtk::Application) {
     install_actions(
         &window,
         &selection,
+        &popover,
+        context_target,
         Rc::clone(&preview_slot),
         external_actions,
     );
@@ -1348,6 +1393,9 @@ fn hit_menu() -> (gio::Menu, Vec<PathBuf>) {
     clip.append(Some("Copy Name"), Some("win.copy-name"));
     clip.append(Some("Copy URI"), Some("win.copy-uri"));
     menu.append_section(None, &clip);
+    let remove = gio::Menu::new();
+    remove.append(Some("Move to Trash"), Some("win.trash"));
+    menu.append_section(None, &remove);
     let mut actions = Vec::new();
     let data_home = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
@@ -1366,14 +1414,18 @@ fn hit_menu() -> (gio::Menu, Vec<PathBuf>) {
 fn install_actions(
     window: &gtk::ApplicationWindow,
     selection: &gtk::SingleSelection,
+    popover: &gtk::PopoverMenu,
+    context_target: Rc<RefCell<Option<RowData>>>,
     preview_slot: Rc<RefCell<Option<gtk::Window>>>,
     external_actions: Vec<PathBuf>,
 ) {
     let add = |name: &str, f: Box<dyn Fn(RowData) + 'static>| {
         let act = gio::SimpleAction::new(name, None);
         let sel = selection.clone();
+        let popover = popover.clone();
+        let context_target = Rc::clone(&context_target);
         act.connect_activate(move |_, _| {
-            if let Some(row) = selected_row(&sel) {
+            if let Some(row) = action_row(&sel, &popover, &context_target) {
                 f(row);
             }
         });
@@ -1397,12 +1449,15 @@ fn install_actions(
     add("copy-path", Box::new(|row| copy_path(&row.path())));
     add("copy-name", Box::new(|row| copy_name(&row.name())));
     add("copy-uri", Box::new(|row| copy_uri(&row.path())));
+    add("trash", Box::new(|row| trash(&row.path())));
 
     let act = gio::SimpleAction::new("preview", None);
     let sel = selection.clone();
     let win = window.clone();
+    let preview_popover = popover.clone();
+    let preview_target = Rc::clone(&context_target);
     act.connect_activate(move |_, _| {
-        if let Some(row) = selected_row(&sel) {
+        if let Some(row) = action_row(&sel, &preview_popover, &preview_target) {
             preview(win.upcast_ref(), &row.path(), &preview_slot);
         }
     });
@@ -1411,8 +1466,10 @@ fn install_actions(
     for (id, command) in external_actions.into_iter().enumerate() {
         let act = gio::SimpleAction::new(&format!("external-{id}"), None);
         let sel = selection.clone();
+        let popover = popover.clone();
+        let context_target = Rc::clone(&context_target);
         act.connect_activate(move |_, _| {
-            let Some(row) = selected_row(&sel) else {
+            let Some(row) = action_row(&sel, &popover, &context_target) else {
                 return;
             };
             let path = row.path();
@@ -1435,6 +1492,22 @@ fn install_actions(
                 .spawn();
         });
         window.add_action(&act);
+    }
+}
+
+fn action_row(
+    selection: &gtk::SingleSelection,
+    popover: &gtk::PopoverMenu,
+    context_target: &RefCell<Option<RowData>>,
+) -> Option<RowData> {
+    let target = context_target.borrow_mut().take();
+    if popover
+        .parent()
+        .is_some_and(|parent| parent.widget_name() == "qfind-storage-map")
+    {
+        target
+    } else {
+        selected_row(selection)
     }
 }
 

@@ -312,17 +312,18 @@ pub fn make_name_line(heading: bool) -> gtk::Box {
     line.add_css_class("qfind-name");
     line.set_hexpand(true);
     line.set_halign(gtk::Align::Fill);
-    let clip = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    let clip = gtk::ScrolledWindow::new();
     clip.add_css_class("qfind-clip");
+    clip.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Never);
+    clip.set_propagate_natural_width(false);
     clip.set_hexpand(false);
     clip.set_halign(gtk::Align::Start);
-    clip.set_overflow(gtk::Overflow::Hidden);
     clip.set_width_request(0);
     let stem = gtk::Label::new(None);
     stem.set_widget_name("stem");
     stem.set_xalign(0.0);
     stem.set_halign(gtk::Align::Start);
-    stem.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    stem.set_ellipsize(gtk::pango::EllipsizeMode::None);
     stem.set_single_line_mode(true);
     stem.set_hexpand(false);
     if heading {
@@ -330,7 +331,7 @@ pub fn make_name_line(heading: bool) -> gtk::Box {
     } else {
         stem.add_css_class("caption");
     }
-    clip.append(&stem);
+    clip.set_child(Some(&stem));
     let ext = gtk::Label::new(None);
     ext.set_widget_name("ext");
     ext.add_css_class("qfind-ext");
@@ -353,10 +354,10 @@ pub fn make_name_line(heading: bool) -> gtk::Box {
 }
 
 pub fn fill_name_line(line: &gtk::Box, name: &str, is_dir: bool) {
-    let Some(clip) = line.first_child() else {
+    let Some(clip) = line.first_child().and_downcast::<gtk::ScrolledWindow>() else {
         return;
     };
-    let Some(stem) = clip.first_child().and_downcast::<gtk::Label>() else {
+    let Some(stem) = clip.child().and_downcast::<gtk::Label>() else {
         return;
     };
     let Some(ext) = clip.next_sibling().and_downcast::<gtk::Label>() else {
@@ -364,8 +365,7 @@ pub fn fill_name_line(line: &gtk::Box, name: &str, is_dir: bool) {
     };
     let (stem_s, ext_s) = split_filename(name, is_dir);
     stem.set_text(stem_s);
-    stem.set_margin_start(0);
-    stem.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    clip.hadjustment().set_value(0.0);
     if ext_s.is_empty() {
         ext.set_text("");
         ext.set_visible(false);
@@ -377,10 +377,10 @@ pub fn fill_name_line(line: &gtk::Box, name: &str, is_dir: bool) {
 }
 
 fn fit_name_line(line: &gtk::Box) {
-    let Some(clip) = line.first_child() else {
+    let Some(clip) = line.first_child().and_downcast::<gtk::ScrolledWindow>() else {
         return;
     };
-    let Some(stem) = clip.first_child().and_downcast::<gtk::Label>() else {
+    let Some(stem) = clip.child().and_downcast::<gtk::Label>() else {
         return;
     };
     let Some(ext) = clip.next_sibling().and_downcast::<gtk::Label>() else {
@@ -417,10 +417,10 @@ fn schedule_fit(line: &gtk::Box) {
 }
 
 pub fn attach_marquee(row: &impl IsA<gtk::Widget>, line: &gtk::Box) {
-    let Some(clip) = line.first_child() else {
+    let Some(clip) = line.first_child().and_downcast::<gtk::ScrolledWindow>() else {
         return;
     };
-    let Some(stem) = clip.first_child().and_downcast::<gtk::Label>() else {
+    let Some(stem) = clip.child().and_downcast::<gtk::Label>() else {
         return;
     };
     let slot: Rc<RefCell<Option<gtk::TickCallbackId>>> = Rc::new(RefCell::new(None));
@@ -436,18 +436,18 @@ pub fn attach_marquee(row: &impl IsA<gtk::Widget>, line: &gtk::Box) {
         });
     }
     {
-        let stem = stem.clone();
+        let clip = clip.clone();
         let slot = Rc::clone(&slot);
         motion.connect_leave(move |_| {
-            stop_marquee(&stem, &slot);
+            stop_marquee(&clip, &slot);
         });
     }
     row.add_controller(motion);
     {
-        let stem = stem.clone();
+        let clip = clip.clone();
         let slot = Rc::clone(&slot);
         row_w.connect_unmap(move |_| {
-            stop_marquee(&stem, &slot);
+            stop_marquee(&clip, &slot);
         });
     }
 }
@@ -455,11 +455,10 @@ pub fn attach_marquee(row: &impl IsA<gtk::Widget>, line: &gtk::Box) {
 fn start_marquee(
     row: &gtk::Widget,
     stem: &gtk::Label,
-    clip: &gtk::Widget,
+    clip: &gtk::ScrolledWindow,
     slot: &Rc<RefCell<Option<gtk::TickCallbackId>>>,
 ) {
-    stop_marquee(stem, slot);
-    stem.set_ellipsize(gtk::pango::EllipsizeMode::None);
+    stop_marquee(clip, slot);
     let stem = stem.clone();
     let clip = clip.clone();
     let last = Cell::new(0i64);
@@ -478,29 +477,27 @@ fn start_marquee(
         let have = clip.width();
         if need <= have {
             offset.set(0.0);
-            stem.set_margin_start(0);
             return glib::ControlFlow::Continue;
         }
         let dt = (now - prev) as f64 / 1_000_000.0;
-        let mut x = offset.get() - 36.0 * dt;
-        let min_x = f64::from(have - need - 12);
-        if x < min_x {
+        let mut x = offset.get() + 36.0 * dt;
+        let max_x = f64::from(need - have + 12);
+        if x > max_x {
             x = 0.0;
             pause_until.set(now + 700_000);
         }
         offset.set(x);
-        stem.set_margin_start(x.round() as i32);
+        clip.hadjustment().set_value(x);
         glib::ControlFlow::Continue
     });
     *slot.borrow_mut() = Some(id);
 }
 
-fn stop_marquee(stem: &gtk::Label, slot: &Rc<RefCell<Option<gtk::TickCallbackId>>>) {
+fn stop_marquee(clip: &gtk::ScrolledWindow, slot: &Rc<RefCell<Option<gtk::TickCallbackId>>>) {
     if let Some(id) = slot.borrow_mut().take() {
         id.remove();
     }
-    stem.set_margin_start(0);
-    stem.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    clip.hadjustment().set_value(0.0);
 }
 
 fn restyle_hits(list: &gtk::ListView, grid: &gtk::GridView, zoom: Zoom, spacing: u8) {

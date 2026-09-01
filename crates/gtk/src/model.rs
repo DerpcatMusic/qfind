@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use gio::subclass::prelude::ListModelImpl;
 use gtk::gio;
@@ -120,12 +121,23 @@ impl HitModel {
     }
 
     pub fn position_path(&self, path: &str) -> Option<u32> {
+        if let Some(rows) = self.imp().live.borrow().as_ref() {
+            return rows
+                .iter()
+                .position(|row| row.path() == path)
+                .and_then(|position| u32::try_from(position).ok());
+        }
+        let catalog = self.imp().catalog.borrow();
+        let catalog = catalog.as_ref()?;
         self.imp()
-            .live
+            .ids
             .borrow()
-            .as_ref()?
             .iter()
-            .position(|row| row.path() == path)
+            .position(|id| {
+                catalog
+                    .hit(*id)
+                    .is_some_and(|hit| hit.path() == Path::new(path))
+            })
             .and_then(|position| u32::try_from(position).ok())
     }
 }

@@ -197,6 +197,18 @@ pub fn copy_uri(path: &str) {
     copy_text(&uri);
 }
 
+pub fn trash(path: &str) {
+    gio::File::for_path(path).trash_async(
+        glib::Priority::DEFAULT,
+        None::<&gio::Cancellable>,
+        |result| {
+            if let Err(error) = result {
+                eprintln!("qfind: could not move item to trash: {error}");
+            }
+        },
+    );
+}
+
 /// Spacebar Quick Look. Sushi first; built-in window if it is missing.
 pub fn preview(parent: &gtk::Window, path: &str, slot: &std::cell::RefCell<Option<gtk::Window>>) {
     if let Some(existing) = slot.borrow_mut().take() {
