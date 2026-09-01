@@ -1,0 +1,5 @@
+module CQfind [system] {
+    header "../../../../crates/native/include/qfind_native.h"
+    link "qfind_native"
+    export *
+}

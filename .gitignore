@@ -7,6 +7,8 @@
 .qfind-catalog
 node_modules/
 dist/
+**/bin/
+**/obj/
 packaging/vicinae/search.js
 packaging/kde/build/
 __pycache__/

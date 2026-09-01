@@ -18,6 +18,8 @@ pub enum Error {
     Query(String),
     #[error("query cancelled")]
     Cancelled,
+    #[error("directory is not indexed: {0}")]
+    DirectoryNotIndexed(PathBuf),
     #[error("exclude pattern {pattern}: {source}")]
     Exclude {
         pattern: String,

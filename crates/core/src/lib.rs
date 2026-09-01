@@ -19,7 +19,9 @@ mod walk;
 pub use catalog::{Catalog, CatalogFolder, Hit, Hits, Rebuild, default_snapshot_path};
 pub use config::{Config, IgnoreMatcher, OpenHow, OpenMode, PreviewMode, is_text_path};
 pub use error::{Error, Result};
-pub use manager::{BrowseMode, ChartScope, LocationScope, ManagerSession};
+pub use manager::{
+    BrowseMode, ChartScope, LocationScope, Manager, ManagerRow, ManagerSession, ManagerView,
+};
 pub use query::{DateAge, FileClass, MatchMode, Scope, SearchOpts, Sort};
 pub use storage::{StorageEntry, StorageMap};
 pub use view::{

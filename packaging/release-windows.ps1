@@ -8,6 +8,8 @@ $Arch = switch ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToS
     "Arm64" { "arm64" }
     default { throw "Unsupported architecture: $([Runtime.InteropServices.RuntimeInformation]::OSArchitecture)" }
 }
+$Platform = if ($Arch -eq "arm64") { "ARM64" } else { "x64" }
+$Rid = if ($Arch -eq "arm64") { "win-arm64" } else { "win-x64" }
 $Name = "qfind-$Version-windows-$Arch"
 $Stage = "$Root\target\dist\$Name"
 
@@ -17,6 +19,7 @@ cargo build --release --manifest-path "$Root\Cargo.toml" -p qfind -p qfind-tui
 Copy-Item "$Root\target\release\qfind.exe" "$Stage\qfind.exe"
 Copy-Item "$Root\target\release\qfind.exe" "$Stage\qfind-cli.exe"
 Copy-Item "$Root\target\release\qfind-tui.exe" "$Stage\qfind-tui.exe"
+dotnet publish "$Root\apps\windows\Qfind.Windows.csproj" -c Release -r $Rid -p:Platform=$Platform -o "$Stage\Qfind"
 Copy-Item "$Root\LICENSE" "$Stage\LICENSE"
 $Archive = "$Root\target\dist\$Name.zip"
 Remove-Item $Archive -Force -ErrorAction SilentlyContinue

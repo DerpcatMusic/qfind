@@ -23,6 +23,10 @@ cargo build --release --manifest-path "$root/Cargo.toml" -p qfind -p qfind-tui
 install -m755 "$root/target/release/qfind" "$stage/qfind"
 cp "$stage/qfind" "$stage/qfind-cli"
 install -m755 "$root/target/release/qfind-tui" "$stage/qfind-tui"
+if [[ "$platform" == macos ]]; then
+  "$root/packaging/build-macos-app.sh"
+  cp -R "$root/target/release/Qfind.app" "$stage/Qfind.app"
+fi
 install -m644 "$root/LICENSE" "$stage/LICENSE"
 tar -C "$root/target/dist" -czf "$root/target/dist/$name.tar.gz" "$name"
 shasum -a 256 "$root/target/dist/$name.tar.gz" 2>/dev/null \

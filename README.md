@@ -28,6 +28,7 @@ Qfind builds one memory-mapped Catalog from your local disks. Queries search fil
 - Configurable themes, zebra rows, Preview width, WeightMap visibility, editor, and open behavior
 - Mouse selection, scrolling, resizable panes, context menus, and native file Drag in Kitty 0.47+
 - GTK, Nautilus, Vicinae, and optional Qt/Breeze frontends
+- Native SwiftUI/AppKit frontend on macOS and WinUI 3 frontend on Windows
 
 Qfind has no startup splash. Config changes made in the TUI are saved and applied immediately.
 
@@ -252,11 +253,33 @@ Nautilus adds **Ctrl+F** search for the current folder and **Search with Qfind**
 
 See [docs/plugins.md](docs/plugins.md) for manual installation and the script-only Vicinae fallback.
 
+### Native macOS and Windows apps
+
+Both native apps use the same memory-mapped Rust manager as the CLI and TUI. They provide platform Places, Classic/Qfind folder scope, list and grid views, native thumbnails, a resizable Preview, and an interactive directory/global Chart with sizes inside useful segments.
+
+On macOS 13 or newer, build the SwiftUI/AppKit app with Xcode command-line tools installed:
+
+```bash
+./packaging/build-macos-app.sh
+open target/release/Qfind.app
+```
+
+On Windows 10 1809 or newer, build the unpackaged WinUI 3 app with the .NET 8 SDK and MSVC Rust toolchain:
+
+```powershell
+dotnet build .\apps\windows\Qfind.Windows.csproj -c Release -p:Platform=x64
+.\apps\windows\bin\x64\Release\net8.0-windows10.0.19041.0\Qfind.Windows.exe
+```
+
+Run `qfind index` once before opening either app. Native shells call `qfind-native` in-process; GTK is not required on macOS or Windows.
+
 ## Packages
 
 - `qfind`: portable CLI and TUI for Linux, macOS, and Windows
 - `qfind-gtk` / `qfind-gtk-bin`: GTK frontend and desktop integration
 - `qfind-qt`: optional Qt6/Breeze frontend built by the installer and release script
+- `Qfind.app`: native macOS SwiftUI/AppKit manager
+- `Qfind.Windows`: native Windows WinUI 3 manager
 
 ## License
 

@@ -1805,6 +1805,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "qfind-native"
+version = "0.3.0"
+dependencies = [
+ "qfind-core",
+]
+
+[[package]]
 name = "qfind-tui"
 version = "0.3.0"
 dependencies = [
