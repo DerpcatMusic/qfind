@@ -65,10 +65,9 @@ $VsWhere = if ($null -ne $VsWhereCommand) { $VsWhereCommand.Source } else { Join
 if (-not (Test-Path $VsWhere)) {
     throw "Visual Studio vswhere.exe was not found; install the VC toolchain so the MSVC runtime can be bundled app-locally."
 }
-$VsComponent = if ($Arch -eq "arm64") { "Microsoft.VisualStudio.Component.VC.Tools.ARM64" } else { "Microsoft.VisualStudio.Component.VC.Tools.x86.x64" }
-$VsInstallPath = & $VsWhere -latest -products * -requires $VsComponent -property installationPath | Select-Object -First 1
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($VsInstallPath)) {
-    throw "vswhere could not find a Visual Studio installation with $VsComponent."
+$VsInstallPath = & $VsWhere -latest -products * -prerelease -property installationPath | Select-Object -First 1
+if ([string]::IsNullOrWhiteSpace($VsInstallPath)) {
+    throw "vswhere could not find a Visual Studio installation."
 }
 $VsInstallPath = $VsInstallPath.Trim()
 $VsRedistRoot = Join-Path $VsInstallPath "VC\Redist\MSVC"
