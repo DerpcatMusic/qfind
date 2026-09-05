@@ -25,7 +25,7 @@ executable="$app/Contents/MacOS/Qfind"
 if command -v xcrun >/dev/null 2>&1; then
     swift_stdlib_tool=$(xcrun --find swift-stdlib-tool 2>/dev/null || true)
     if [ -n "$swift_stdlib_tool" ]; then
-        "$swift_stdlib_tool" --copy --scan-executable "$executable" --destination "$frameworks"
+        "$swift_stdlib_tool" --copy --platform macosx --scan-executable "$executable" --destination "$frameworks"
     fi
 fi
 work="${TMPDIR:-/tmp}/megaman-macos-dylibs.$$"
