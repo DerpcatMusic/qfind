@@ -257,7 +257,7 @@ See [docs/plugins.md](docs/plugins.md) for manual installation and the script-on
 
 Both native apps use the same memory-mapped Rust manager as the CLI and TUI. They provide platform Places, Classic/Qfind folder scope, list and grid views, native thumbnails, a resizable Preview, and an interactive directory/global Chart with sizes inside useful segments.
 
-On macOS 13 or newer, build the SwiftUI/AppKit app with Xcode command-line tools installed:
+On macOS 14 or newer, build the SwiftUI/AppKit app with Xcode command-line tools installed:
 
 ```bash
 ./packaging/build-macos-app.sh
@@ -271,7 +271,13 @@ dotnet build .\apps\windows\Qfind.Windows.csproj -c Release -p:Platform=x64
 .\apps\windows\bin\x64\Release\net8.0-windows10.0.19041.0\Qfind.Windows.exe
 ```
 
-Run `qfind index` once before opening either app. Native shells call `qfind-native` in-process; GTK is not required on macOS or Windows.
+Live folder browsing works before indexing. Run `qfind index` to enable indexed global search and storage analysis. Native shells call `qfind-native` in-process; GTK is not required on macOS or Windows.
+
+The shared Rust core owns folder queries, filtering, sorting, navigation, and indexed search. GTK calls it directly; SwiftUI/AppKit, WinUI, and Qt adapters use the C ABI in `crates/native/include/qfind_native.h`. Platform controls, file dialogs, clipboard, drag/drop, and native file operations belong to each adapter. Feature parity across frontends must be verified separately.
+
+The shared shell registry lives in `crates/core/src/components.json`. Native component hosts discover its labels and commands through `qfind_manager_component`; GTK uses the same core services and registry titles. Projects, Git, build/package commands, storage, batch operations, and archives have shared behavior with native toolkit views. Add behavior in the core once, then implement any new view type in the native adapters. Existing view types pick up registry command and label changes when the shared library is rebuilt.
+
+Project discovery caches GitHub-account-scoped workspaces for ten minutes, invalidates when the file index changes, and rescans on Refresh. Native archive support enables the core `archives` feature and requires libarchive; Unix uses its writer binding, Windows uses `tar.exe` for writing. CLI/TUI-only builds do not enable archive dependencies. Folder measurements also share a bounded background worker and persistent cache, including generated directories excluded from filename search; native views poll the cache revision without rescanning on hover.
 
 ## Packages
 

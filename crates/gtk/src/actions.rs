@@ -110,16 +110,38 @@ fn thumbnail_sender() -> &'static mpsc::Sender<ThumbnailJob> {
 }
 
 pub(crate) fn content_for_path(path: &str) -> Option<gdk::ContentProvider> {
-    let file = gio::File::for_path(path);
-    let uri = format!("{}\r\n", file.uri());
-    let bytes = glib::Bytes::from(uri.as_bytes());
-    let uris = gdk::ContentProvider::for_bytes("text/uri-list", &bytes);
-    let typed = gdk::ContentProvider::for_value(&file.to_value());
-    Some(gdk::ContentProvider::new_union(&[typed, uris]))
+    content_for_paths(&[path.to_owned()])
 }
 
-pub fn selected_row(selection: &gtk::SingleSelection) -> Option<RowData> {
-    selection.selected_item().and_downcast::<RowData>()
+pub(crate) fn content_for_paths(paths: &[String]) -> Option<gdk::ContentProvider> {
+    if paths.is_empty() { return None; }
+    let files: Vec<_> = paths.iter().map(gio::File::for_path).collect();
+    let uris = files.iter().map(|file| format!("{}\r\n", file.uri())).collect::<String>();
+    let typed = gdk::ContentProvider::for_value(&gdk::FileList::from_array(&files).to_value());
+    let uris = gdk::ContentProvider::for_bytes("text/uri-list", &glib::Bytes::from(uris.as_bytes()));
+    if files.len() == 1 {
+        let single = gdk::ContentProvider::for_value(&files[0].to_value());
+        Some(gdk::ContentProvider::new_union(&[typed, single, uris]))
+    } else {
+        Some(gdk::ContentProvider::new_union(&[typed, uris]))
+    }
+}
+
+pub fn selected_rows(selection: &impl IsA<gtk::SelectionModel>) -> Vec<RowData> {
+    let selected = selection.as_ref().selection();
+    let model = selection.as_ref().upcast_ref::<gio::ListModel>();
+    (0..selected.size())
+        .filter_map(|index| {
+            model
+                .item(selected.nth(index as u32))?
+                .downcast::<RowData>()
+                .ok()
+        })
+        .collect()
+}
+
+pub fn selected_row(selection: &impl IsA<gtk::SelectionModel>) -> Option<RowData> {
+    selected_rows(selection).into_iter().next()
 }
 
 pub fn open(window: &impl IsA<gtk::Window>, path: &str) {
@@ -184,29 +206,22 @@ pub fn copy_text(text: &str) {
     }
 }
 
-pub fn copy_path(path: &str) {
-    copy_text(path);
-}
-
 pub fn copy_name(name: &str) {
     copy_text(name);
 }
 
-pub fn copy_uri(path: &str) {
-    let uri = gio::File::for_path(path).uri();
-    copy_text(&uri);
-}
-
-pub fn trash(path: &str) {
-    gio::File::for_path(path).trash_async(
-        glib::Priority::DEFAULT,
-        None::<&gio::Cancellable>,
-        |result| {
-            if let Err(error) = result {
-                eprintln!("qfind: could not move item to trash: {error}");
-            }
-        },
-    );
+pub fn copy_paths(paths: &[String]) {
+    let Some(display) = gdk::Display::default() else {
+        return;
+    };
+    let provider = if paths.len() == 1 {
+        content_for_path(&paths[0])
+    } else {
+        content_for_paths(paths)
+    };
+    if let Some(provider) = provider {
+        let _ = display.clipboard().set_content(Some(&provider));
+    }
 }
 
 /// Spacebar Quick Look. Sushi first; built-in window if it is missing.
@@ -347,6 +362,11 @@ pub(crate) fn load_thumbnail(
         if let Some(result) = jobs.get(&output) {
             (Arc::clone(result), false)
         } else {
+            // Shed load during fast scrolls: decoding catches up when the
+            // view settles instead of saturating workers with stale rows.
+            if jobs.len() > 64 {
+                return;
+            }
             let result = Arc::new(Mutex::new(ThumbnailState::default()));
             jobs.insert(output.clone(), Arc::clone(&result));
             (result, true)

@@ -1,0 +1,63 @@
+/* Native theme colors keep the workspace legible in light and dark appearances. */
+@define-color qfind_accent #72aff0;
+@define-color qfind_line alpha(@theme_fg_color, 0.10);
+.qfind-shell { background: shade(@theme_bg_color, 0.84); color: @theme_fg_color; }
+headerbar.qfind-shell { min-height: 54px; padding: 0 14px; border-bottom: 1px solid @qfind_line; box-shadow: none; }
+.qfind-brand { font-size: 22px; font-weight: 800; letter-spacing: -1px; padding-left: 8px; }
+.qfind-search { min-height: 30px; border-radius: 9px; background: alpha(@theme_fg_color, 0.045); border: 1px solid @qfind_line; box-shadow: none; }
+.qfind-search:focus-within { border-color: @qfind_accent; }
+.qfind-content { background: shade(@theme_base_color, 0.97); color: @theme_fg_color; }
+.qfind-chrome, scrolledwindow.qfind-chrome > viewport, scrolledwindow.qfind-chrome > viewport > box { background: shade(@theme_bg_color, 0.84); color: @theme_fg_color; }
+.qfind-chrome entry, .qfind-chrome searchentry { background: shade(@theme_base_color, 0.97); color: @theme_fg_color; }
+.qfind-sidebar { padding: 10px 8px 0; background: shade(@theme_bg_color, 0.84); }
+.qfind-sidebar button { min-height: 28px; border-radius: 7px; padding: 3px 10px; }
+.qfind-sidebar button label { font-weight: 500; }
+.qfind-sidebar separator { margin: 10px 8px 4px; background: @qfind_line; }
+.qfind-sidebar .heading { font-size: 11px; font-weight: 600; opacity: 0.55; padding-top: 8px; }
+.qfind-section-label { font-size: 10px; font-weight: 700; letter-spacing: 1.3px; opacity: 0.55; margin: 10px 16px 8px; }
+.qfind-sidebar button:checked, .qfind-place-active { background: alpha(@qfind_accent, 0.16); }
+.qfind-address { min-height: 48px; padding: 4px 12px; border-bottom: 1px solid @qfind_line; }
+.qfind-address button { min-width: 22px; min-height: 26px; padding: 3px; border: none; box-shadow: none; background: transparent; border-radius: 6px; }
+.qfind-address button:hover { background: alpha(@theme_fg_color, 0.07); }
+.qfind-location { padding: 0 10px; }
+.qfind-location button { font-weight: 600; padding: 3px 5px; }
+.qfind-toolbar { padding: 7px 14px; border-bottom: 1px solid @qfind_line; }
+.qfind-toolbar button { min-height: 26px; padding: 2px 8px; border: none; box-shadow: none; background: transparent; border-radius: 6px; font-size: 12px; }
+.qfind-toolbar button:hover { background: alpha(@theme_fg_color, 0.06); }
+.qfind-toolbar button:checked { background: alpha(@qfind_accent, 0.18); color: @theme_fg_color; }
+.qfind-toolbar separator { margin: 5px; background: @qfind_line; }
+columnview header button { background: shade(@theme_base_color, 0.97); border: none; border-bottom: 1px solid @qfind_line; border-radius: 0; box-shadow: none; padding: 8px 10px; font-size: 11px; font-weight: 600; color: alpha(@theme_fg_color, 0.55); }
+columnview row { border-radius: 0; }
+columnview row:hover { background: alpha(@theme_fg_color, 0.035); }
+columnview row:selected, gridview child:selected { background: alpha(@qfind_accent, 0.20); color: @theme_fg_color; }
+.qfind-odd { background: alpha(@theme_fg_color, 0.022); }
+.qfind-odd:selected { background: alpha(@qfind_accent, 0.20); }
+.qfind-tile { margin: 3px; padding: 3px; border-radius: 10px; }
+.qfind-tile:hover { background: alpha(@theme_fg_color, 0.035); }
+.qfind-tile .qfind-name { font-size: 13px; font-weight: 500; }
+.qfind-chart-hover { background: alpha(@qfind_accent, 0.15); box-shadow: inset 0 0 0 2px @qfind_accent; border-radius: 5px; }
+.qfind-inspector { border-left: 1px solid @qfind_line; }
+.qfind-inspector-tabs { padding: 0 10px 8px; border-bottom: 1px solid @qfind_line; }
+.qfind-inspector-tabs button { min-height: 30px; padding: 2px 10px; border-radius: 6px; font-size: 12px; }
+.qfind-inspector-tabs button:checked { background: alpha(@qfind_accent, 0.12); }
+.qfind-project { padding: 12px 8px; border-radius: 8px; background: shade(@theme_base_color, 0.97); border: 1px solid @qfind_line; }
+.qfind-project button { font-weight: 600; }
+.qfind-project checkbutton { font-size: 12px; margin: 4px 8px; }
+.qfind-footer { min-height: 32px; padding: 0 12px; background: shade(@theme_bg_color, 0.84); border-top: 1px solid @qfind_line; font-size: 11px; }
+.qfind-footer button { font-size: 11px; min-height: 24px; padding: 0 8px; }
+button:focus-visible { outline: 2px solid @qfind_accent; outline-offset: -2px; }
+
+.qfind-item image { color: @qfind_accent; }
+
+.qfind-sidebar .user-home-symbolic, .qfind-sidebar .user-desktop-symbolic { color: #75b5f4; }
+.qfind-sidebar .folder-documents-symbolic { color: #b39be9; }
+.qfind-sidebar .folder-download-symbolic { color: #70c9a2; }
+.qfind-sidebar .folder-music-symbolic { color: #ef96af; }
+.qfind-sidebar .folder-pictures-symbolic { color: #e9bc72; }
+.qfind-sidebar .folder-videos-symbolic { color: #b39be9; }
+.qfind-sidebar button { border-radius: 9px; }
+.qfind-dialog { background: shade(@theme_bg_color, 0.9); }
+.qfind-dialog entry, .qfind-dialog textview text { background: @theme_base_color; }
+.qfind-dialog entry, .qfind-dialog button { border-radius: 7px; }
+.qfind-footer scale { padding: 0 8px; }
+.qfind-footer scale highlight { background: @qfind_accent; }

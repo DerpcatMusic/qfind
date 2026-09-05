@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use crate::nav::Location;
+use crate::plugin::PluginHost;
 use crate::{Catalog, Error, Result, SearchOpts, StorageMap};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -138,6 +140,91 @@ impl ManagerSession {
     pub fn can_forward(&self) -> bool {
         !self.forward.is_empty()
     }
+
+    /// Current position as a shared [`Location`] value for breadcrumbs.
+    #[must_use]
+    pub fn location(&self) -> Location {
+        match &self.directory {
+            None => Location::Global,
+            Some(path) => Location::Directory(path.clone()),
+        }
+    }
+
+    /// Jump to a [`Location`]. Directory jumps push history like
+    /// [`navigate`](Self::navigate); going Global keeps history so Back can
+    /// return to the last directory.
+    pub fn set_location(&mut self, location: Location) {
+        match location {
+            Location::Global => {
+                self.directory = None;
+                self.search_scope = LocationScope::Global;
+                self.selected = None;
+            }
+            Location::Directory(path) => {
+                self.navigate(path);
+            }
+        }
+    }
+
+    /// Pure state transition behind [`Manager::dispatch`]. Unvalidated:
+    /// `Manager::dispatch` rejects unknown directories first.
+    pub fn dispatch(&mut self, action: Action) -> Outcome {
+        match action {
+            Action::Navigate(path) => Outcome::Navigated(self.navigate(path)),
+            Action::Back => Outcome::Moved(self.back()),
+            Action::Forward => Outcome::Moved(self.forward()),
+            Action::Select(path) => {
+                self.select(path);
+                Outcome::Selected
+            }
+            Action::Locate(location) => {
+                self.set_location(location);
+                Outcome::Located
+            }
+            Action::SearchScope(scope) => {
+                self.set_search_scope(scope);
+                Outcome::ScopeChanged
+            }
+            Action::ChartScope(scope) => {
+                self.set_chart_scope(scope);
+                Outcome::ScopeChanged
+            }
+            Action::BrowseMode(mode) => {
+                self.set_mode(mode);
+                Outcome::ScopeChanged
+            }
+            // Plugin actions never reach session state; `Manager::dispatch`
+            // routes them to `PluginHost` before delegating here.
+            Action::Plugin { .. } => Outcome::PluginHandled(false),
+        }
+    }
+}
+
+/// Every state change a frontend can request. GTK, TUI, CLI, the native FFI,
+/// and plugins all funnel through [`Manager::dispatch`] — the single dispatch
+/// point. Reads (`view`, `chart`) stay plain methods; they change no state.
+#[derive(Clone, Debug)]
+pub enum Action {
+    Navigate(PathBuf),
+    Back,
+    Forward,
+    Select(Option<PathBuf>),
+    Locate(Location),
+    SearchScope(LocationScope),
+    ChartScope(ChartScope),
+    BrowseMode(BrowseMode),
+    Plugin { name: String, arg: String },
+}
+
+/// What [`Manager::dispatch`] did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    Navigated(bool),
+    Moved(Option<PathBuf>),
+    Selected,
+    Located,
+    ScopeChanged,
+    PluginHandled(bool),
 }
 
 #[derive(Clone, Debug)]
@@ -159,21 +246,34 @@ pub struct ManagerView {
 }
 
 /// Shared file-manager behavior. Platform adapters render its owned snapshots.
+#[derive(Clone)]
 pub struct Manager {
-    catalog: Catalog,
-    storage: StorageMap,
+    catalog: Option<Catalog>,
+    storage: Option<std::sync::Arc<StorageMap>>,
     session: ManagerSession,
 }
 
 impl Manager {
+    pub(crate) fn catalog(&self) -> Option<&Catalog> { self.catalog.as_ref() }
+    pub(crate) fn storage(&self) -> Option<&StorageMap> { self.storage.as_deref() }
+
     #[must_use]
     pub fn new(catalog: Catalog, directory: Option<PathBuf>) -> Self {
         let storage = catalog.storage_map();
         Self {
-            catalog,
-            storage,
+            catalog: Some(catalog),
+            storage: Some(std::sync::Arc::new(storage)),
             session: ManagerSession::new(directory),
         }
+    }
+
+    /// Browse existing folders before an index has been built.
+    pub fn live(directory: Option<PathBuf>) -> Self {
+        Self { catalog: None, storage: None, session: ManagerSession::new(directory) }
+    }
+
+    pub fn set_search_scope(&mut self, scope: LocationScope) {
+        self.session.set_search_scope(scope);
     }
 
     #[must_use]
@@ -181,8 +281,46 @@ impl Manager {
         self.session.directory()
     }
 
+    #[must_use]
+    pub fn session(&self) -> &ManagerSession {
+        &self.session
+    }
+
+    #[must_use]
+    pub fn location(&self) -> Location {
+        self.session.location()
+    }
+
+    pub fn select(&mut self, path: Option<PathBuf>) {
+        self.session.select(path);
+    }
+
+    /// The single dispatch point: every navigation, selection, and scope
+    /// change plus every plugin action. `Navigate` accepts live or indexed
+    /// directories; plugin actions go to `PluginHost`; everything else falls
+    /// through to [`ManagerSession::dispatch`]. Successful moves notify
+    /// plugins so Places/recent-locations stay in sync without polling.
+    pub fn dispatch(&mut self, plugins: &mut PluginHost, action: Action) -> Result<Outcome> {
+        if let Action::Navigate(path) = &action
+            && !path.is_dir() && self.catalog.as_ref().and_then(|catalog| catalog.folder(path)).is_none()
+        {
+            return Err(Error::DirectoryNotIndexed(path.clone()));
+        }
+        if let Action::Plugin { name, arg } = &action {
+            return Ok(Outcome::PluginHandled(plugins.dispatch_action(name, arg)));
+        }
+        let outcome = self.session.dispatch(action);
+        if matches!(
+            outcome,
+            Outcome::Navigated(_) | Outcome::Moved(_) | Outcome::Located
+        ) {
+            plugins.notify_navigate(self.directory());
+        }
+        Ok(outcome)
+    }
+
     pub fn navigate(&mut self, path: PathBuf) -> Result<bool> {
-        if self.catalog.folder(&path).is_none() {
+        if !path.is_dir() && self.catalog.as_ref().and_then(|catalog| catalog.folder(&path)).is_none() {
             return Err(Error::DirectoryNotIndexed(path));
         }
         Ok(self.session.navigate(path))
@@ -199,21 +337,32 @@ impl Manager {
     /// Query globally, recursively below the current directory, or only its children.
     pub fn view(&self, query: &str, recursive: bool, mut opts: SearchOpts) -> Result<ManagerView> {
         opts.highlight = false;
-        let rows = if let Some(directory) = self.directory() {
-            let folder = self
-                .catalog
-                .folder(directory)
-                .ok_or_else(|| Error::DirectoryNotIndexed(directory.to_path_buf()))?;
-            let hits = if recursive {
-                folder.search_with(query, opts)?
-            } else {
-                folder.search_children_with(query, opts)?
-            };
-            manager_rows(&hits)
+        let scoped_directory = (self.session.search_scope() == LocationScope::Directory)
+            .then(|| self.directory()).flatten();
+        let mut rows: Vec<ManagerRow> = if !recursive && scoped_directory.is_some() {
+            crate::live_children(scoped_directory.unwrap(), query, opts, true, true)
+                ?.into_iter().map(|row| ManagerRow {
+                    id: None, name: row.name, is_dir: row.is_dir,
+                    bytes: if row.is_dir {
+                        { let sizes=crate::FolderSizes::global(); sizes.request(&row.path); sizes.get(&row.path).or_else(|| self.storage.as_ref().and_then(|map| map.find_indexed(&row.path)).map(|entry| entry.bytes)).unwrap_or(0) }
+                    } else { row.size }, path: row.path, entries: 1,
+                }).collect()
         } else {
-            let hits = self.catalog.search_with(query, opts)?;
-            manager_rows(&hits)
+            let catalog = self.catalog.as_ref().ok_or_else(|| Error::Query("Global search needs an index. Build the index first.".into()))?;
+            if let Some(directory) = scoped_directory {
+                let folder = catalog.folder(directory)
+                    .ok_or_else(|| Error::DirectoryNotIndexed(directory.to_path_buf()))?;
+                manager_rows(&folder.search_with(query, opts)?)
+            } else {
+                manager_rows(&catalog.search_with(query, opts)?)
+            }
         };
+        // ponytail: cached folder weights reorder loaded rows; apply weights before limiting for whole-directory ranking.
+        if !recursive && scoped_directory.is_some() && matches!(opts.sort, crate::Sort::Largest | crate::Sort::Smallest) {
+            rows.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| {
+                if opts.sort == crate::Sort::Largest { b.bytes.cmp(&a.bytes) } else { a.bytes.cmp(&b.bytes) }
+            }));
+        }
         let folders = rows.iter().filter(|row| row.is_dir).count();
         let files = rows.len() - folders;
         Ok(ManagerView {
@@ -226,6 +375,7 @@ impl Manager {
 
     /// Immediate Chart segments for the current directory, or indexed roots globally.
     pub fn chart(&self, global: bool, limit: usize) -> Result<Vec<ManagerRow>> {
+        let storage = self.storage.as_ref().ok_or_else(|| Error::Query("Storage analysis needs an index.".into()))?;
         let current = if global {
             None
         } else {
@@ -233,14 +383,13 @@ impl Manager {
                 .directory()
                 .ok_or_else(|| Error::DirectoryNotIndexed(PathBuf::new()))?;
             Some(
-                self.storage
+                storage
                     .find(directory)
                     .ok_or_else(|| Error::DirectoryNotIndexed(directory.to_path_buf()))?
                     .id,
             )
         };
-        Ok(self
-            .storage
+        Ok(storage
             .children_limited(current, limit)
             .into_iter()
             .map(|entry| ManagerRow {

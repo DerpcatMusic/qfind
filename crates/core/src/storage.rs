@@ -149,6 +149,12 @@ impl StorageMap {
         })
     }
 
+    /// Resolve an indexed path without filesystem access.
+    #[must_use]
+    pub fn find_indexed(&self, path: &Path) -> Option<StorageEntry> {
+        self.catalog.snapshot().folder_id(path).and_then(|id| self.node(id))
+    }
+
     #[must_use]
     pub fn find(&self, path: &Path) -> Option<StorageEntry> {
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());

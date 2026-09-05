@@ -19,7 +19,7 @@ pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
     let cfg = Config::load();
     let win = gtk::Window::builder()
         .transient_for(parent)
-        .title("Qfind Settings")
+        .title("Megaman Settings")
         .default_width(520)
         .default_height(560)
         .modal(true)

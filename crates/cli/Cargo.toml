@@ -11,4 +11,3 @@ description = "Qfind command-line search"
 anyhow.workspace = true
 clap.workspace = true
 qfind-core.workspace = true
-qfind-tui = { path = "../tui" }

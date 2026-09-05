@@ -7,7 +7,12 @@ rust-version.workspace = true
 publish.workspace = true
 description = "Qfind Catalog: rebuild and search filenames"
 
+[features]
+archives = ["dep:anyhow", "dep:compress-tools", "dep:simple-archive"]
+
 [dependencies]
+anyhow = { workspace = true, optional = true }
+compress-tools = { workspace = true, optional = true }
 crossbeam-channel.workspace = true
 dirs.workspace = true
 globset.workspace = true
@@ -17,6 +22,15 @@ nucleo-matcher.workspace = true
 rayon.workspace = true
 rustix.workspace = true
 thiserror.workspace = true
+tempfile.workspace = true
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+
+[target.'cfg(unix)'.dependencies]
+simple-archive = { workspace = true, optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 tempfile.workspace = true

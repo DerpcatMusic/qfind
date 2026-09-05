@@ -9,9 +9,11 @@ description = "Qfind GTK application"
 
 [dependencies]
 anyhow.workspace = true
+dirs.workspace = true
+glow = "0.16"
 gtk.workspace = true
+libloading = "0.8"
 image.workspace = true
-qfind-core.workspace = true
+qfind-core = { workspace = true, features = ["archives"] }
 
-[dev-dependencies]
 tempfile.workspace = true

@@ -10,24 +10,27 @@ use gtk::gio;
 use gtk::glib;
 use gtk::prelude::*;
 use qfind_core::{
-    Catalog, HitRef, PreviewMode, Surface, Weighted, Zoom, fold_stems, folder_weights,
-    split_filename, squarify, walk_visible,
+    Catalog, HitRef, PreviewMode, Surface, Tile, Weighted, Zoom, fold_stems, folder_weights,
+    squarify, walk_visible,
 };
 
-use crate::actions::{preview, selected_row};
+use crate::actions::{content_for_path, content_for_paths, preview, selected_row, selected_rows};
 use crate::row::RowData;
 
 pub struct Host {
     #[allow(dead_code)]
     pub root: gtk::Box,
     pub stack: gtk::Stack,
-    pub list: gtk::ListView,
+    pub list: gtk::ColumnView,
     pub grid: gtk::GridView,
     #[allow(dead_code)]
     pub tree: gtk::ListView,
     pub tree_store: gio::ListStore,
     pub weight: gtk::DrawingArea,
+    pub weight_rev: Rc<Cell<u64>>,
     pub zoom_label: gtk::Label,
+    pub zoom_scale: gtk::Scale,
+    pub apply_pending: Cell<bool>,
     pub zoom: Rc<Cell<Zoom>>,
     pub spacing: Rc<Cell<u8>>,
     pub surface: Rc<Cell<Surface>>,
@@ -38,6 +41,16 @@ pub struct Host {
 }
 
 impl Host {
+    pub fn schedule_apply(self: &Rc<Self>) {
+        if self.apply_pending.replace(true) { return; }
+        let host = self.clone();
+        self.stack.add_tick_callback(move |_, _| {
+            host.apply_pending.set(false);
+            host.apply();
+            glib::ControlFlow::Break
+        });
+    }
+
     pub fn apply(&self) {
         let zoom = self.zoom.get();
         let surface = self.surface.get();
@@ -47,29 +60,27 @@ impl Host {
             Surface::Auto => "list",
         };
         self.stack.set_visible_child_name(name);
+        if self.zoom_scale.value() as u8 != zoom.get() {
+            self.zoom_scale.set_value(f64::from(zoom.get()));
+        }
         self.zoom_label.set_text(&format!("{}%", zoom.get()));
-        self.weight.set_visible(self.show_weight.get());
-        self.weight.queue_draw();
+        let show_weight = self.show_weight.get();
+        self.weight.set_visible(show_weight);
+        if show_weight {
+            self.weight.queue_draw();
+        }
         self.fit_grid();
-        // Visible widgets only. items_changed on the same GObjects is a no-op
-        // in GTK4, which is why list Zoom used to look like it did nothing.
-        restyle_hits(&self.list, &self.grid, zoom, self.spacing.get());
-        self.fit_names();
-        self.list.queue_resize();
-        self.grid.queue_resize();
-    }
-
-    pub fn fit_names(&self) {
-        let fit = |w: &gtk::Widget| {
-            if w.has_css_class("qfind-name") {
-                if let Some(line) = w.downcast_ref::<gtk::Box>() {
-                    fit_name_line(line);
-                }
+        match name {
+            "list" => {
+                restyle_list(&self.list, zoom, self.spacing.get());
+                self.list.queue_resize();
             }
-        };
-        walk_apply(self.list.upcast_ref(), &fit);
-        walk_apply(self.grid.upcast_ref(), &fit);
-        walk_apply(self.tree.upcast_ref(), &fit);
+            "grid" => {
+                restyle_grid(&self.grid, zoom);
+                self.grid.queue_resize();
+            }
+            _ => {}
+        }
     }
 
     pub fn fit_grid(&self) {
@@ -81,7 +92,7 @@ impl Host {
         if w <= 1 {
             return;
         }
-        let cols = (w / grid_cell_px(zoom)).max(1) as u32;
+        let cols = (w / (grid_cell_px(zoom) + 12)).max(1) as u32;
         if self.grid.min_columns() != cols || self.grid.max_columns() != cols {
             self.grid.set_min_columns(cols);
             self.grid.set_max_columns(cols);
@@ -91,7 +102,7 @@ impl Host {
 
 pub fn attach_preview_on_hits(
     widget: &impl IsA<gtk::Widget>,
-    selection: gtk::SingleSelection,
+    selection: impl IsA<gtk::SelectionModel> + Clone,
     window: gtk::ApplicationWindow,
     preview_slot: Rc<RefCell<Option<gtk::Window>>>,
     hovered: Rc<RefCell<Option<String>>>,
@@ -114,7 +125,7 @@ pub fn attach_preview_on_hits(
 pub fn preview_path(
     mode: PreviewMode,
     hovered: &RefCell<Option<String>>,
-    selection: &gtk::SingleSelection,
+    selection: &impl IsA<gtk::SelectionModel>,
 ) -> Option<String> {
     match mode {
         PreviewMode::Hovered => hovered
@@ -166,8 +177,11 @@ pub fn attach_zoom_scroll(widget: &impl IsA<gtk::Widget>, host: Rc<Host>) {
         }
         acc.set(0.0);
         let steps = if a < 0.0 { 1 } else { -1 };
-        host.zoom.set(host.zoom.get().bump(steps));
-        host.apply();
+        let next = host.zoom.get().bump(steps);
+        if next != host.zoom.get() {
+            host.zoom.set(next);
+            host.schedule_apply();
+        }
         glib::Propagation::Stop
     });
     widget.add_controller(scroll);
@@ -221,16 +235,38 @@ fn fill_tree(host: &Host) {
     }
 }
 
-pub fn rebuild_weight(host: &Host, catalog: &Catalog, ids: &[u32]) {
+pub fn rebuild_weight(host: &Host, catalog: &Catalog, ids: &[u32], dir: Option<&std::path::Path>) {
     let items: Vec<HitRef> = ids
         .iter()
         .filter_map(|&id| {
             let hit = catalog.hit(id)?;
+            let path = hit.path().to_string_lossy().into_owned();
+            // Names-first hits store size 0: without a live stat every tile
+            // weighs 1 and the chart lies about proportions.
+            let mut size = hit.size();
+            if size == 0 && !hit.is_dir() {
+                size = std::fs::metadata(hit.path())
+                    .map(|meta| meta.len())
+                    .unwrap_or(0);
+            }
+            // Scope the chart to the browsed directory: tiles group by the
+            // top level under it instead of scattering worldwide.
+            let scoped = match dir {
+                Some(root) => std::path::Path::new(&path)
+                    .strip_prefix(root)
+                    .ok()?
+                    .to_string_lossy()
+                    .into_owned(),
+                None => path,
+            };
+            if scoped.is_empty() {
+                return None;
+            }
             Some(HitRef {
                 id: Some(id),
-                path: hit.path().to_string_lossy().into_owned(),
+                path: scoped,
                 is_dir: hit.is_dir(),
-                weight: hit.size().max(1),
+                weight: size.max(1),
             })
         })
         .collect();
@@ -239,23 +275,74 @@ pub fn rebuild_weight(host: &Host, catalog: &Catalog, ids: &[u32]) {
 
 pub fn rebuild_weight_values(host: &Host, weights: Vec<Weighted>) {
     *host.weights.borrow_mut() = weights;
+    host.weight_rev.set(host.weight_rev.get().wrapping_add(1));
     host.weight.queue_draw();
 }
 
-pub fn make_weight_area(weights: Rc<RefCell<Vec<Weighted>>>) -> gtk::DrawingArea {
+/// Tiles below legibility are dropped: they cost layout + text per frame
+/// while resizing and would render sub-pixel anyway.
+const MAX_TILES: usize = 400;
+
+pub fn make_weight_area(
+    weights: Rc<RefCell<Vec<Weighted>>>,
+    revision: Rc<Cell<u64>>,
+) -> gtk::DrawingArea {
     let area = gtk::DrawingArea::new();
     area.set_content_height(132);
     area.set_hexpand(true);
     let weights_draw = Rc::clone(&weights);
+    // Two-level cache: the sorted/truncated items only change when the data
+    // revision does; the tile layout only additionally needs the size.
+    // Resize drags redraw every frame, so neither may re-sort the full set.
+    struct WeightCache {
+        w: i32,
+        h: i32,
+        rev: u64,
+        items: Vec<Weighted>,
+        tiles: Vec<Tile>,
+    }
+    let cache: Rc<RefCell<WeightCache>> = Rc::new(RefCell::new(WeightCache {
+        w: 0,
+        h: 0,
+        rev: u64::MAX,
+        items: Vec::new(),
+        tiles: Vec::new(),
+    }));
+    let tooltip_cache = Rc::clone(&cache);
+    area.set_has_tooltip(true);
+    area.connect_query_tooltip(move |_, x, y, keyboard, tooltip| {
+        if keyboard { return false; }
+        let cache = tooltip_cache.borrow();
+        let Some(tile) = cache.tiles.iter().find(|tile| f64::from(x) >= tile.x && f64::from(x) < tile.x + tile.w
+            && f64::from(y) >= tile.y && f64::from(y) < tile.y + tile.h) else { return false; };
+        tooltip.set_text(Some(&tile.path));
+        true
+    });
     area.set_draw_func(move |_, cr, w, h| {
-        cr.set_source_rgb(0.08, 0.09, 0.11);
-        cr.rectangle(0.0, 0.0, f64::from(w), f64::from(h));
-        let _ = cr.fill();
-        let tiles = squarify(
-            weights_draw.borrow().clone(),
-            f64::from(w.max(1)),
-            f64::from(h.max(1)),
-        );
+        let rev = revision.get();
+        let tiles = {
+            let mut cache = cache.borrow_mut();
+            if cache.rev != rev {
+                let mut items = weights_draw.borrow().clone();
+                items.sort_by(|a, b| b.weight.cmp(&a.weight));
+                items.truncate(MAX_TILES);
+                cache.items = items;
+                cache.rev = rev;
+                cache.w = -1;
+            }
+            if cache.w != w || cache.h != h || cache.tiles.is_empty() {
+                cache.tiles = squarify(
+                    cache.items.clone(),
+                    f64::from(w.max(1)),
+                    f64::from(h.max(1)),
+                );
+                cache.w = w;
+                cache.h = h;
+            }
+            cache.tiles.clone()
+        };
+        // No background fill: the themed sidebar behind the area shows
+        // through, so the chart always matches the panel around it.
         for (i, t) in tiles.iter().enumerate() {
             let (r, g, b) = tile_color(i, &t.path);
             cr.set_source_rgb(r, g, b);
@@ -266,10 +353,16 @@ pub fn make_weight_area(weights: Rc<RefCell<Vec<Weighted>>>) -> gtk::DrawingArea
                 (t.h - 2.0).max(0.0),
             );
             let _ = cr.fill();
-            if t.w > 48.0 && t.h > 16.0 {
-                cr.set_source_rgb(0.95, 0.96, 0.94);
+            // Labels only where they stay legible: cairo's toy text is the
+            // most expensive call per frame during a resize drag.
+            if t.w > 72.0 && t.h > 22.0 {
+                let _ = cr.save();
+                cr.rectangle(t.x + 4.0, t.y + 2.0, (t.w - 8.0).max(0.0), (t.h - 4.0).max(0.0));
+                cr.clip();
+                cr.set_source_rgb(0.98, 0.98, 1.0);
                 cr.move_to(t.x + 6.0, t.y + 14.0);
                 let _ = cr.show_text(&t.name);
+                let _ = cr.restore();
             }
         }
     });
@@ -312,213 +405,51 @@ pub fn make_name_line(heading: bool) -> gtk::Box {
     line.add_css_class("qfind-name");
     line.set_hexpand(true);
     line.set_halign(gtk::Align::Fill);
-    let clip = gtk::ScrolledWindow::new();
-    clip.add_css_class("qfind-clip");
-    clip.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Never);
-    clip.set_propagate_natural_width(false);
-    clip.set_hexpand(false);
-    clip.set_halign(gtk::Align::Start);
-    clip.set_width_request(0);
-    let stem = gtk::Label::new(None);
-    stem.set_widget_name("stem");
-    stem.set_xalign(0.0);
-    stem.set_halign(gtk::Align::Start);
-    stem.set_ellipsize(gtk::pango::EllipsizeMode::None);
-    stem.set_single_line_mode(true);
-    stem.set_hexpand(false);
+    let name = gtk::Label::new(None);
+    name.set_xalign(0.0);
+    name.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    name.set_single_line_mode(true);
+    name.set_hexpand(true);
     if heading {
-        stem.add_css_class("heading");
+        name.add_css_class("heading");
     } else {
-        stem.add_css_class("caption");
+        name.add_css_class("caption");
     }
-    clip.set_child(Some(&stem));
-    let ext = gtk::Label::new(None);
-    ext.set_widget_name("ext");
-    ext.add_css_class("qfind-ext");
-    ext.set_xalign(0.0);
-    ext.set_halign(gtk::Align::Start);
-    ext.set_single_line_mode(true);
-    ext.set_hexpand(false);
-    let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    spacer.set_hexpand(true);
-    line.append(&clip);
-    line.append(&ext);
-    line.append(&spacer);
-    line.connect_realize(|l| {
-        schedule_fit(l);
-    });
-    line.connect_map(|l| {
-        schedule_fit(l);
-    });
+    line.append(&name);
     line
 }
 
-pub fn fill_name_line(line: &gtk::Box, name: &str, is_dir: bool) {
-    let Some(clip) = line.first_child().and_downcast::<gtk::ScrolledWindow>() else {
-        return;
-    };
-    let Some(stem) = clip.child().and_downcast::<gtk::Label>() else {
-        return;
-    };
-    let Some(ext) = clip.next_sibling().and_downcast::<gtk::Label>() else {
-        return;
-    };
-    let (stem_s, ext_s) = split_filename(name, is_dir);
-    stem.set_text(stem_s);
-    clip.hadjustment().set_value(0.0);
-    if ext_s.is_empty() {
-        ext.set_text("");
-        ext.set_visible(false);
-    } else {
-        ext.set_text(&format!(".{ext_s}"));
-        ext.set_visible(true);
-    }
-    schedule_fit(line);
-}
-
-fn fit_name_line(line: &gtk::Box) {
-    let Some(clip) = line.first_child().and_downcast::<gtk::ScrolledWindow>() else {
-        return;
-    };
-    let Some(stem) = clip.child().and_downcast::<gtk::Label>() else {
-        return;
-    };
-    let Some(ext) = clip.next_sibling().and_downcast::<gtk::Label>() else {
-        return;
-    };
-    let avail = line.width();
-    if avail <= 1 {
-        return;
-    }
-    let ext_nat = if ext.is_visible() {
-        ext.measure(gtk::Orientation::Horizontal, -1).1
-    } else {
-        0
-    };
-    let stem_nat = stem.measure(gtk::Orientation::Horizontal, -1).1;
-    let gap = 0;
-    let clip_w = if stem_nat + ext_nat + gap <= avail {
-        stem_nat
-    } else {
-        (avail - ext_nat - gap).max(8)
-    };
-    clip.set_hexpand(false);
-    if clip.width_request() != clip_w {
-        clip.set_width_request(clip_w);
+pub fn fill_name_line(line: &gtk::Box, name: &str, _is_dir: bool) {
+    if let Some(label) = line.first_child().and_downcast::<gtk::Label>() {
+        label.set_text(name);
     }
 }
 
-fn schedule_fit(line: &gtk::Box) {
-    fit_name_line(line);
-    let line = line.clone();
-    glib::idle_add_local_once(move || {
-        fit_name_line(&line);
+/// Hover feedback is independent of file selection and preview generation.
+pub fn highlight_path(root: &gtk::Widget, path: Option<&std::path::Path>) {
+    walk_apply(root, &|widget| {
+        if !widget.has_css_class("qfind-item") { return; }
+        let related = widget.tooltip_text().is_some_and(|item| {
+            let item = std::path::Path::new(item.as_str());
+            path.is_some_and(|path| path.starts_with(item) || item.starts_with(path))
+        });
+        if related { widget.add_css_class("qfind-chart-hover"); }
+        else { widget.remove_css_class("qfind-chart-hover"); }
     });
 }
 
-pub fn attach_marquee(row: &impl IsA<gtk::Widget>, line: &gtk::Box) {
-    let Some(clip) = line.first_child().and_downcast::<gtk::ScrolledWindow>() else {
-        return;
-    };
-    let Some(stem) = clip.child().and_downcast::<gtk::Label>() else {
-        return;
-    };
-    let slot: Rc<RefCell<Option<gtk::TickCallbackId>>> = Rc::new(RefCell::new(None));
-    let row_w = row.upcast_ref::<gtk::Widget>().clone();
-    let motion = gtk::EventControllerMotion::new();
-    {
-        let stem = stem.clone();
-        let clip = clip.clone();
-        let row_w = row_w.clone();
-        let slot = Rc::clone(&slot);
-        motion.connect_enter(move |_, _, _| {
-            start_marquee(&row_w, &stem, &clip, &slot);
-        });
-    }
-    {
-        let clip = clip.clone();
-        let slot = Rc::clone(&slot);
-        motion.connect_leave(move |_| {
-            stop_marquee(&clip, &slot);
-        });
-    }
-    row.add_controller(motion);
-    {
-        let clip = clip.clone();
-        let slot = Rc::clone(&slot);
-        row_w.connect_unmap(move |_| {
-            stop_marquee(&clip, &slot);
-        });
-    }
-}
-
-fn start_marquee(
-    row: &gtk::Widget,
-    stem: &gtk::Label,
-    clip: &gtk::ScrolledWindow,
-    slot: &Rc<RefCell<Option<gtk::TickCallbackId>>>,
-) {
-    stop_marquee(clip, slot);
-    let stem = stem.clone();
-    let clip = clip.clone();
-    let last = Cell::new(0i64);
-    let offset = Cell::new(0.0f64);
-    let pause_until = Cell::new(0i64);
-    let id = row.add_tick_callback(move |_, clock| {
-        let now = clock.frame_time();
-        let prev = last.replace(now);
-        if prev == 0 {
-            return glib::ControlFlow::Continue;
-        }
-        if now < pause_until.get() {
-            return glib::ControlFlow::Continue;
-        }
-        let need = stem.measure(gtk::Orientation::Horizontal, -1).1;
-        let have = clip.width();
-        if need <= have {
-            offset.set(0.0);
-            return glib::ControlFlow::Continue;
-        }
-        let dt = (now - prev) as f64 / 1_000_000.0;
-        let mut x = offset.get() + 36.0 * dt;
-        let max_x = f64::from(need - have + 12);
-        if x > max_x {
-            x = 0.0;
-            pause_until.set(now + 700_000);
-        }
-        offset.set(x);
-        clip.hadjustment().set_value(x);
-        glib::ControlFlow::Continue
-    });
-    *slot.borrow_mut() = Some(id);
-}
-
-fn stop_marquee(clip: &gtk::ScrolledWindow, slot: &Rc<RefCell<Option<gtk::TickCallbackId>>>) {
-    if let Some(id) = slot.borrow_mut().take() {
-        id.remove();
-    }
-    clip.hadjustment().set_value(0.0);
-}
-
-fn restyle_hits(list: &gtk::ListView, grid: &gtk::GridView, zoom: Zoom, spacing: u8) {
+fn restyle_list(list: &gtk::ColumnView, zoom: Zoom, spacing: u8) {
     walk_apply(list.upcast_ref(), &|w| {
         if w.has_css_class("qfind-row") {
             apply_list_metrics(w, zoom, spacing);
         }
-        if w.has_css_class("qfind-name") {
-            if let Some(line) = w.downcast_ref::<gtk::Box>() {
-                schedule_fit(line);
-            }
-        }
     });
+}
+
+fn restyle_grid(grid: &gtk::GridView, zoom: Zoom) {
     walk_apply(grid.upcast_ref(), &|w| {
         if w.has_css_class("qfind-tile") {
             apply_grid_metrics(w, zoom);
-        }
-        if w.has_css_class("qfind-name") {
-            if let Some(line) = w.downcast_ref::<gtk::Box>() {
-                schedule_fit(line);
-            }
         }
     });
 }
@@ -532,8 +463,10 @@ fn walk_apply(w: &gtk::Widget, f: &impl Fn(&gtk::Widget)) {
     }
 }
 
-pub fn make_list_factory(
-    selection: gtk::SingleSelection,
+/// Name column of the details view: icon, name, dim path. Owns the row's
+/// drag source, hover tracking, and right-click menu.
+pub fn make_name_factory(
+    selection: gtk::MultiSelection,
     popover: gtk::PopoverMenu,
     hovered: Rc<RefCell<Option<String>>>,
     zebra: Rc<Cell<bool>>,
@@ -554,25 +487,34 @@ pub fn make_list_factory(
             row.set_margin_start(6);
             row.set_margin_end(6);
             row.add_css_class("qfind-row");
+            row.add_css_class("qfind-item");
             let icon = gtk::Image::from_icon_name("folder");
             icon.set_pixel_size(16);
-            let name = make_name_line(true);
-            let path = gtk::Label::new(None);
-            path.set_xalign(0.0);
-            path.add_css_class("dim-label");
-            path.set_ellipsize(gtk::pango::EllipsizeMode::Start);
-            path.set_width_chars(28);
+            let name = make_name_line(false);
+            if let Some(label) = name.first_child() {
+                label.remove_css_class("caption");
+            }
             row.append(&icon);
             row.append(&name);
-            row.append(&path);
-            attach_marquee(&row, &name);
             let drag = gtk::DragSource::new();
             drag.set_actions(gdk::DragAction::COPY);
+            drag.set_propagation_phase(gtk::PropagationPhase::Capture);
             let list_item = item.clone();
-            drag.connect_prepare(move |_, _, _| {
+            let selection_for_drag = selection_for_row.clone();
+            drag.connect_prepare(move |source, _, _| {
+                if let Some(widget) = source.widget() {
+                    source.set_icon(Some(&gtk::WidgetPaintable::new(Some(&widget))), 8, 8);
+                }
+                source.set_state(gtk::EventSequenceState::Claimed);
                 let item = list_item.downcast_ref::<gtk::ListItem>()?;
                 let data = item.item().and_downcast::<RowData>()?;
-                crate::actions::content_for_path(&data.path())
+                let rows = selected_rows(&selection_for_drag);
+                if selection_for_drag.is_selected(item.position()) && rows.len() > 1 {
+                    let paths = rows.into_iter().map(|row| row.path()).collect::<Vec<_>>();
+                    content_for_paths(&paths)
+                } else {
+                    content_for_path(&data.path())
+                }
             });
             row.add_controller(drag);
             attach_hover(&row, item.clone(), Rc::clone(&hovered_setup));
@@ -586,7 +528,9 @@ pub fn make_list_factory(
                 let Some(li) = list_item.downcast_ref::<gtk::ListItem>() else {
                     return;
                 };
-                selection.set_selected(li.position());
+                if !selection.is_selected(li.position()) {
+                    selection.select_item(li.position(), true);
+                }
                 popup_at(&popover, &row_for_pop, x, y);
             });
             row.add_controller(right);
@@ -609,34 +553,159 @@ pub fn make_list_factory(
         let Some(name) = icon.next_sibling().and_downcast::<gtk::Box>() else {
             return;
         };
-        let Some(path) = name.next_sibling().and_downcast::<gtk::Label>() else {
-            return;
-        };
         let z = zoom.get();
         apply_list_metrics(row.upcast_ref(), z, spacing.get());
         row.set_margin_start(6 + (data.depth() as i32) * 14);
+        row.set_tooltip_text(Some(&data.path()));
+        row.remove_css_class("qfind-chart-hover");
+        // Names-first catalog hits carry no size/mtime: stat once, cache on
+        // the row, so Size/Modified fill in instead of showing dashes.
+        ensure_meta(&data);
         paint_icon(&icon, &data, &icons);
         fill_name_line(&name, &data.name(), data.is_dir());
-        path.set_text(&data.path());
-        if zebra.get() && item.position() % 2 == 1 {
-            row.add_css_class("qfind-odd");
+        paint_zebra(row.upcast_ref(), zebra.get(), item.position());
+    });
+    factory
+}
+
+/// Catalog hits carry no size/mtime: stat once per row and cache it, so
+/// every column bind (name/size/modified, whichever runs first) sees real
+/// values. Dirs keep size 0 but still learn their mtime.
+fn ensure_meta(data: &RowData) {
+    if data.modified() > 0 {
+        return;
+    }
+    let Ok(meta) = std::fs::metadata(data.path()) else {
+        return;
+    };
+    let size = if data.is_dir() {
+        data.size()
+    } else {
+        meta.len()
+    };
+    let modified = meta
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |elapsed| elapsed.as_secs() as i64);
+    data.fill_metadata(size, modified);
+}
+
+fn detail_cell(text: &str) -> gtk::Label {
+    let label = gtk::Label::new(Some(text));
+    label.set_hexpand(true);
+    label.set_xalign(0.0);
+    label.set_single_line_mode(true);
+    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    label.add_css_class("dim-label");
+    label.set_margin_end(6);
+    label
+}
+
+fn paint_zebra(cell: &gtk::Widget, zebra: bool, position: u32) {
+    if zebra && position % 2 == 1 {
+        cell.add_css_class("qfind-odd");
+    } else {
+        cell.remove_css_class("qfind-odd");
+    }
+}
+
+fn watch_size(item: &gtk::ListItem, label: &gtk::Label, storage: crate::storage::Pane) {
+    label.set_tooltip_text(Some("Indexed or saved size; missing sizes update in the background."));
+    let item = item.downgrade();
+    let label = label.downgrade();
+    gtk::glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
+        let (Some(item), Some(label)) = (item.upgrade(), label.upgrade()) else { return gtk::glib::ControlFlow::Break; };
+        if !label.is_mapped() { return gtk::glib::ControlFlow::Continue; }
+        if let Some(data) = item.item().and_downcast::<RowData>() {
+            let text = if data.is_dir() { storage.indexed_size_text(std::path::Path::new(&data.path())) }
+                else { crate::actions::human_size(data.size()) };
+            if label.text() != text { label.set_text(&text); }
+
+        }
+        gtk::glib::ControlFlow::Continue
+    });
+}
+
+/// Size column of the details view.
+pub fn make_size_factory(zebra: Rc<Cell<bool>>, storage: crate::storage::Pane) -> gtk::SignalListItemFactory {
+    let factory = gtk::SignalListItemFactory::new();
+    let bind_storage = storage.clone();
+    factory.connect_setup(move |_, item| {
+        let Some(item) = item.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        let label = detail_cell("");
+        label.set_xalign(1.0);
+        watch_size(item, &label, storage.clone());
+        item.set_child(Some(&label));
+    });
+    factory.connect_bind(move |_, item| {
+        let Some(item) = item.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        let Some(data) = item.item().and_downcast::<RowData>() else {
+            return;
+        };
+        let Some(label) = item.child().and_downcast::<gtk::Label>() else {
+            return;
+        };
+        ensure_meta(&data);
+        let text = if data.is_dir() {
+            bind_storage.indexed_size_text(std::path::Path::new(&data.path()))
         } else {
-            row.remove_css_class("qfind-odd");
+            crate::actions::human_size(data.size())
+        };
+        label.set_text(&text);
+        paint_zebra(label.upcast_ref(), zebra.get(), item.position());
+    });
+    factory
+}
+
+/// Modified column of the details view (relative age, em dash when unknown).
+pub fn make_modified_factory(zebra: Rc<Cell<bool>>) -> gtk::SignalListItemFactory {
+    let factory = gtk::SignalListItemFactory::new();
+    factory.connect_setup(move |_, item| {
+        let Some(item) = item.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        item.set_child(Some(&detail_cell("")));
+    });
+    factory.connect_bind(move |_, item| {
+        let Some(item) = item.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        let Some(data) = item.item().and_downcast::<RowData>() else {
+            return;
+        };
+        ensure_meta(&data);
+        label_set_age(item, &data);
+        if let Some(label) = item.child().and_downcast::<gtk::Label>() {
+            paint_zebra(label.upcast_ref(), zebra.get(), item.position());
         }
     });
     factory
 }
 
+fn label_set_age(item: &gtk::ListItem, data: &RowData) {
+    let Some(label) = item.child().and_downcast::<gtk::Label>() else {
+        return;
+    };
+    let text = if data.modified() <= 0 {
+        "—".to_owned()
+    } else {
+        crate::actions::human_mtime(data.modified())
+    };
+    label.set_text(&text);
+}
+
 pub fn apply_list_metrics(row: &gtk::Widget, zoom: Zoom, spacing: u8) {
-    row.set_size_request(-1, zoom.row_px());
-    let pad = zoom.pad_px_with(spacing);
+    row.set_size_request(-1, 24 + i32::from(zoom.get().min(39)) / 6);
+    let pad = 1 + i32::from(spacing) / 3;
     row.set_margin_top(pad);
     row.set_margin_bottom(pad);
     if let Some(icon) = row.first_child().and_downcast::<gtk::Image>() {
-        icon.set_pixel_size(zoom.icon_px());
-        if let Some(name) = icon.next_sibling().and_downcast::<gtk::Box>() {
-            schedule_fit(&name);
-        }
+        icon.set_pixel_size(18 + i32::from(zoom.get().min(39)) / 6);
     }
 }
 
@@ -646,15 +715,12 @@ fn apply_grid_metrics(tile: &gtk::Widget, zoom: Zoom) {
     if let Some(media) = tile.first_child().and_downcast::<gtk::Stack>()
         && let Some(icon) = media.child_by_name("icon").and_downcast::<gtk::Image>()
     {
-        icon.set_pixel_size((cell - 22).max(32));
-        if let Some(name) = media.next_sibling().and_downcast::<gtk::Box>() {
-            schedule_fit(&name);
-        }
+        icon.set_pixel_size((cell - 66).clamp(32, 96));
     }
 }
 
 fn grid_cell_px(zoom: Zoom) -> i32 {
-    zoom.cell_px() - 24
+    (zoom.cell_px() - 24).max(96)
 }
 
 pub fn popup_at(popover: &gtk::PopoverMenu, widget: &impl IsA<gtk::Widget>, x: f64, y: f64) {
@@ -672,12 +738,13 @@ pub fn popup_at(popover: &gtk::PopoverMenu, widget: &impl IsA<gtk::Widget>, x: f
 }
 
 pub fn make_grid_factory(
-    selection: gtk::SingleSelection,
+    selection: gtk::MultiSelection,
     popover: gtk::PopoverMenu,
     zebra: Rc<Cell<bool>>,
     zoom: Rc<Cell<Zoom>>,
     icons: Rc<RefCell<std::collections::HashMap<String, gio::Icon>>>,
     hovered: Rc<RefCell<Option<String>>>,
+    storage: crate::storage::Pane,
 ) -> gtk::SignalListItemFactory {
     let factory = gtk::SignalListItemFactory::new();
     {
@@ -706,20 +773,49 @@ pub fn make_grid_factory(
             media.add_named(&icon, Some("icon"));
             media.add_named(&picture, Some("picture"));
             let name = make_name_line(false);
+            if let Some(label) = name.first_child().and_downcast::<gtk::Label>() {
+                label.set_xalign(0.5);
+                label.remove_css_class("caption");
+            }
             name.set_margin_start(4);
             name.set_margin_end(4);
             name.set_margin_bottom(2);
             col.append(&media);
-            col.append(&name);
-            attach_marquee(&col, &name);
+            let captions = gtk::Box::new(gtk::Orientation::Vertical, 2);
+            captions.set_vexpand(false);
+            captions.set_valign(gtk::Align::End);
+            name.set_vexpand(false);
+            name.set_valign(gtk::Align::Center);
+            captions.append(&name);
+            let size = detail_cell("");
+            size.set_xalign(0.5);
+            size.set_vexpand(false);
+            size.set_valign(gtk::Align::Center);
+            size.set_margin_start(4);
+            size.add_css_class("caption");
+            watch_size(item, &size, storage.clone());
+            captions.append(&size);
+            col.append(&captions);
             attach_hover(&col, item.clone(), Rc::clone(&hovered));
             let drag = gtk::DragSource::new();
             drag.set_actions(gdk::DragAction::COPY);
+            drag.set_propagation_phase(gtk::PropagationPhase::Capture);
             let list_item = item.clone();
-            drag.connect_prepare(move |_, _, _| {
+            let selection_for_drag = selection.clone();
+            drag.connect_prepare(move |source, _, _| {
+                if let Some(widget) = source.widget() {
+                    source.set_icon(Some(&gtk::WidgetPaintable::new(Some(&widget))), 8, 8);
+                }
+                source.set_state(gtk::EventSequenceState::Claimed);
                 let item = list_item.downcast_ref::<gtk::ListItem>()?;
                 let data = item.item().and_downcast::<RowData>()?;
-                crate::actions::content_for_path(&data.path())
+                let rows = selected_rows(&selection_for_drag);
+                if selection_for_drag.is_selected(item.position()) && rows.len() > 1 {
+                    let paths = rows.into_iter().map(|row| row.path()).collect::<Vec<_>>();
+                    content_for_paths(&paths)
+                } else {
+                    content_for_path(&data.path())
+                }
             });
             col.add_controller(drag);
             let right = gtk::GestureClick::new();
@@ -730,7 +826,9 @@ pub fn make_grid_factory(
             let col_for_pop = col.clone();
             right.connect_pressed(move |_, _, x, y| {
                 if let Some(li) = list_item.downcast_ref::<gtk::ListItem>() {
-                    selection.set_selected(li.position());
+                    if !selection.is_selected(li.position()) {
+                        selection.select_item(li.position(), true);
+                    }
                 }
                 popup_at(&popover, &col_for_pop, x, y);
             });
@@ -760,9 +858,12 @@ pub fn make_grid_factory(
         else {
             return;
         };
-        let Some(name) = media.next_sibling().and_downcast::<gtk::Box>() else {
+        let Some(name) = media.next_sibling().and_then(|captions| captions.first_child()).and_downcast::<gtk::Box>() else {
             return;
         };
+        col.add_css_class("qfind-item");
+        col.set_tooltip_text(Some(&data.path()));
+        col.remove_css_class("qfind-chart-hover");
         apply_grid_metrics(col.upcast_ref(), zoom.get());
         paint_icon(&icon, &data, &icons);
         crate::actions::load_thumbnail(
@@ -773,11 +874,7 @@ pub fn make_grid_factory(
             grid_cell_px(zoom.get()) as u32,
         );
         fill_name_line(&name, &data.name(), data.is_dir());
-        if zebra.get() && item.position() % 2 == 1 {
-            col.add_css_class("qfind-odd");
-        } else {
-            col.remove_css_class("qfind-odd");
-        }
+        paint_zebra(col.upcast_ref(), zebra.get(), item.position());
     });
     factory
 }
@@ -788,7 +885,11 @@ pub fn paint_icon(
     icons: &Rc<RefCell<std::collections::HashMap<String, gio::Icon>>>,
 ) {
     if data.is_dir() {
-        icon.set_icon_name(Some("folder"));
+        // Keep one raster backing; zoom scales it instead of reloading an SVG per size.
+        thread_local! {
+            static FOLDER: Option<gdk::Texture> = gdk::Texture::from_bytes(&glib::Bytes::from_static(include_bytes!("folder.png"))).ok();
+        }
+        FOLDER.with(|folder| icon.set_paintable(folder.as_ref()));
         return;
     }
     let key = data
@@ -813,9 +914,12 @@ pub fn make_tree_factory(
     collapsed: Rc<RefCell<HashSet<String>>>,
     icons: Rc<RefCell<std::collections::HashMap<String, gio::Icon>>>,
     hovered: Rc<RefCell<Option<String>>>,
+    zebra: Rc<Cell<bool>>,
+    storage: crate::storage::Pane,
 ) -> gtk::SignalListItemFactory {
     let factory = gtk::SignalListItemFactory::new();
     {
+        let storage = storage.clone();
         let toggle = Rc::clone(&toggle);
         let hovered = Rc::clone(&hovered);
         factory.connect_setup(move |_, item| {
@@ -842,10 +946,17 @@ pub fn make_tree_factory(
             let icon = gtk::Image::from_icon_name("folder");
             icon.set_pixel_size(16);
             let name = make_name_line(true);
+            name.set_hexpand(true);
+            let size = detail_cell("");
+            size.set_width_chars(10);
+            watch_size(item, &size, storage.clone());
+            let age = detail_cell("");
+            age.set_width_chars(8);
             row.append(&twist);
             row.append(&icon);
             row.append(&name);
-            attach_marquee(&row, &name);
+            row.append(&size);
+            row.append(&age);
             attach_hover(&row, item.clone(), Rc::clone(&hovered));
             item.set_child(Some(&row));
         });
@@ -869,6 +980,16 @@ pub fn make_tree_factory(
         let Some(name) = icon.next_sibling().and_downcast::<gtk::Box>() else {
             return;
         };
+        let Some(size) = name.next_sibling().and_downcast::<gtk::Label>() else {
+            return;
+        };
+        let Some(age) = size.next_sibling().and_downcast::<gtk::Label>() else {
+            return;
+        };
+        ensure_meta(&data);
+        row.add_css_class("qfind-item");
+        row.set_tooltip_text(Some(&data.path()));
+        row.remove_css_class("qfind-chart-hover");
         row.set_margin_start(6 + data.depth() as i32 * 16);
         if data.has_kids() {
             let open = !collapsed.borrow().contains(&data.path());
@@ -880,6 +1001,19 @@ pub fn make_tree_factory(
         }
         paint_icon(&icon, &data, &icons);
         fill_name_line(&name, &data.name(), data.is_dir());
+        let size_text = if data.is_dir() {
+            storage.indexed_size_text(std::path::Path::new(&data.path()))
+        } else {
+            crate::actions::human_size(data.size())
+        };
+        size.set_text(&size_text);
+        let age_text = if data.modified() <= 0 {
+            "—".to_owned()
+        } else {
+            crate::actions::human_mtime(data.modified())
+        };
+        age.set_text(&age_text);
+        paint_zebra(row.upcast_ref(), zebra.get(), item.position());
     });
     factory
 }

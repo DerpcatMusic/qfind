@@ -1,0 +1,140 @@
+{
+  "version": 1,
+  "components": [
+    {
+      "id": "shell",
+      "title": "Megaman",
+      "icon": "folder",
+      "view": "workspace",
+      "commands": []
+    },
+    {
+      "id": "projects",
+      "title": "Projects",
+      "icon": "repository",
+      "view": "project_table",
+      "commands": [
+        {
+          "id": "list",
+          "title": "Refresh projects",
+          "mutating": false
+        }
+      ]
+    },
+    {
+      "id": "git",
+      "title": "Changes",
+      "icon": "branch",
+      "view": "diff",
+      "commands": [
+        {
+          "id": "status",
+          "title": "Status",
+          "mutating": false
+        },
+        {
+          "id": "diff",
+          "title": "Changes",
+          "mutating": false
+        },
+        {
+          "id": "stage",
+          "title": "Stage file",
+          "mutating": true
+        },
+        {
+          "id": "unstage",
+          "title": "Unstage file",
+          "mutating": true
+        }
+      ]
+    },
+    {
+      "id": "tasks",
+      "title": "Tasks",
+      "icon": "terminal",
+      "view": "task_output",
+      "commands": [
+        {
+          "id": "list",
+          "title": "Available commands",
+          "mutating": false
+        },
+        {
+          "id": "run",
+          "title": "Run command",
+          "mutating": true
+        }
+      ]
+    },
+    {
+      "id": "storage",
+      "title": "Storage",
+      "icon": "disk",
+      "view": "storage_map",
+      "commands": [
+        {
+          "id": "map",
+          "title": "Refresh storage",
+          "mutating": false
+        }
+      ]
+    },
+    {
+      "id": "batch",
+      "title": "Batch actions",
+      "icon": "files",
+      "view": "batch_preview",
+      "commands": [
+        {
+          "id": "rename_preview",
+          "title": "Preview rename",
+          "mutating": false
+        },
+        {
+          "id": "rename",
+          "title": "Rename selected",
+          "mutating": true
+        },
+        {
+          "id": "copy",
+          "title": "Copy selected",
+          "mutating": true
+        },
+        {
+          "id": "move",
+          "title": "Move selected",
+          "mutating": true
+        }
+      ]
+    },
+    {
+      "id": "archives",
+      "title": "Archives",
+      "icon": "archive",
+      "view": "archive",
+      "commands": [
+        {
+          "id": "open",
+          "title": "Open archive",
+          "mutating": false
+        },
+        {
+          "id": "compress",
+          "title": "Compress selection",
+          "mutating": true
+        },
+        {
+          "id": "extract",
+          "title": "Extract archive",
+          "mutating": true
+        },
+        {
+          "id": "save",
+          "title": "Save archive changes",
+          "mutating": true
+        }
+      ]
+    }
+  ]
+}

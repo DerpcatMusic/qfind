@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "QfindMac",
-    platforms: [.macOS(.v13)],
+    platforms: [.macOS(.v14)],
     products: [.executable(name: "Qfind", targets: ["QfindMac"])],
     targets: [
         .systemLibrary(name: "CQfind", path: "Sources/CQfind"),

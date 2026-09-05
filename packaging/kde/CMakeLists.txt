@@ -1,8 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
 project(qfind-qt LANGUAGES CXX)
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_AUTOMOC ON)
-find_package(Qt6 REQUIRED COMPONENTS Widgets)
-add_executable(qfind-qt main.cpp)
-target_link_libraries(qfind-qt PRIVATE Qt6::Widgets)
-install(TARGETS qfind-qt DESTINATION bin)
+
+# Keep the incumbent KDE/Breeze build path while sharing the canonical Qt app.
+add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../../apps/qt" qfind-qt-source)

@@ -20,6 +20,10 @@ pub enum Error {
     Cancelled,
     #[error("directory is not indexed: {0}")]
     DirectoryNotIndexed(PathBuf),
+    #[error("path already exists: {0}")]
+    AlreadyExists(PathBuf),
+    #[error("path not found: {0}")]
+    NotFound(PathBuf),
     #[error("exclude pattern {pattern}: {source}")]
     Exclude {
         pattern: String,

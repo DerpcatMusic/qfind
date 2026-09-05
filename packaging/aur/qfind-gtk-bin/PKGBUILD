@@ -23,6 +23,7 @@ package() {
   install -Dm755 qfind-gtk -t "$pkgdir/usr/bin"
   if [[ -x qfind-qt ]]; then
     install -Dm755 qfind-qt "$pkgdir/usr/bin/qfind-qt"
+    [[ -f libqfind_native.so ]] && install -Dm755 libqfind_native.so "$pkgdir/usr/bin/libqfind_native.so"
   fi
   install -Dm644 qfind.desktop "$pkgdir/usr/share/applications/qfind.desktop"
   install -Dm644 qfind.py "$pkgdir/usr/share/nautilus-python/extensions/qfind.py"

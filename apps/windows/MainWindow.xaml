@@ -1,72 +1,313 @@
 <Window x:Class="Qfind.Windows.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        xmlns:local="using:Qfind.Windows" Title="Qfind">
-  <NavigationView x:Name="Places" PaneDisplayMode="Left" IsBackButtonVisible="Collapsed" IsSettingsVisible="False" SelectionChanged="PlaceChanged">
-    <NavigationView.MenuItems>
-      <NavigationViewItem Content="Home" Icon="Home" Tag="Home"/>
-      <NavigationViewItem Content="Desktop" Icon="AllApps" Tag="Desktop"/>
-      <NavigationViewItem Content="Documents" Icon="Document" Tag="Documents"/>
-      <NavigationViewItem Content="Downloads" Icon="Download" Tag="Downloads"/>
-      <NavigationViewItem Content="Pictures" Icon="Pictures" Tag="Pictures"/>
-      <NavigationViewItem Content="Music" Icon="MusicInfo" Tag="Music"/>
-      <NavigationViewItem Content="Videos" Icon="Video" Tag="Videos"/>
-    </NavigationView.MenuItems>
-    <Grid Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
-      <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-      <CommandBar Grid.Row="0" DefaultLabelPosition="Right">
-        <AppBarButton Icon="Back" Click="BackClicked"/>
-        <AppBarButton Icon="Forward" Click="ForwardClicked"/>
-        <AppBarSeparator/>
-        <AppBarToggleButton x:Name="Recursive" Label="Qfind" Icon="Find" Click="RefreshClicked"/>
-        <AppBarToggleButton x:Name="ListMode" Label="List" Icon="List" Click="ViewClicked"/>
-        <AppBarToggleButton x:Name="ChartButton" Label="Chart" Icon="View" Click="ChartClicked"/>
-        <AppBarToggleButton x:Name="GlobalChart" Label="Global" Icon="World" Click="GlobalChartClicked"/>
-        <CommandBar.Content>
-          <AutoSuggestBox x:Name="Search" Width="420" PlaceholderText="Find in this folder" TextChanged="SearchChanged" QuerySubmitted="SearchSubmitted"/>
-        </CommandBar.Content>
-      </CommandBar>
-      <Grid Grid.Row="1">
-        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="6"/><ColumnDefinition x:Name="RightColumn" Width="380"/></Grid.ColumnDefinitions>
-        <GridView x:Name="Files" IsItemClickEnabled="True" ItemClick="FileClicked" DoubleTapped="FileDoubleTapped" SelectionMode="Single">
-          <GridView.ItemsPanel>
-            <ItemsPanelTemplate><ItemsWrapGrid x:Name="Wrap" Orientation="Horizontal" MaximumRowsOrColumns="0"/></ItemsPanelTemplate>
-          </GridView.ItemsPanel>
-          <GridView.ItemTemplate>
-            <DataTemplate>
-              <Grid Width="148" Height="150" Padding="8">
-                <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                <Image Source="{Binding Thumbnail}" Stretch="Uniform" Margin="4"/>
-                <TextBlock Grid.Row="1" Text="{Binding Name}" TextTrimming="CharacterEllipsis" HorizontalAlignment="Center"/>
-                <TextBlock Grid.Row="2" Text="{Binding Size}" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.65" HorizontalAlignment="Center"/>
-              </Grid>
-            </DataTemplate>
-          </GridView.ItemTemplate>
-        </GridView>
-        <ListView x:Name="FileList" Visibility="Collapsed" IsItemClickEnabled="True" ItemClick="FileClicked" DoubleTapped="FileDoubleTapped" SelectionMode="Single">
-          <ListView.ItemTemplate>
-            <DataTemplate>
-              <Grid Height="44" Padding="8,4" ColumnSpacing="12">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="36"/><ColumnDefinition Width="*"/><ColumnDefinition Width="110"/></Grid.ColumnDefinitions>
-                <Image Source="{Binding Thumbnail}" Stretch="Uniform"/>
-                <TextBlock Grid.Column="1" Text="{Binding Name}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
-                <TextBlock Grid.Column="2" Text="{Binding Size}" Opacity="0.65" VerticalAlignment="Center"/>
-              </Grid>
-            </DataTemplate>
-          </ListView.ItemTemplate>
-        </ListView>
-        <Thumb Grid.Column="1" DragDelta="PreviewDividerDragged" Background="Transparent"/>
-        <Grid Grid.Column="2" Background="{ThemeResource LayerFillColorDefaultBrush}" Padding="16">
-          <Image x:Name="PreviewImage" Stretch="Uniform"/>
-          <ScrollViewer><TextBlock x:Name="PreviewText" TextWrapping="Wrap" IsTextSelectionEnabled="True"/></ScrollViewer>
-          <Canvas x:Name="ChartCanvas" SizeChanged="ChartSizeChanged" Visibility="Collapsed"/>
+        Title="Megaman">
+  <Grid x:Name="Shell" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}" PointerWheelChanged="ShellPointerWheelChanged">
+    <Grid.KeyboardAccelerators>
+      <KeyboardAccelerator Modifiers="Control" Key="G" Invoked="GlobalSearchAccelerator"/>
+    </Grid.KeyboardAccelerators>
+    <Grid.RowDefinitions>
+      <RowDefinition Height="48"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+    </Grid.RowDefinitions>
+
+    <Grid x:Name="AppTitleBar" Grid.Row="0" Padding="14,0" Background="Transparent">
+      <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+      <StackPanel x:Name="TitleBarDragRegion" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+        <FontIcon Glyph="&#xE8B7;" FontSize="16"/>
+        <TextBlock Text="Megaman" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center"/>
+      </StackPanel>
+      <TextBlock Grid.Column="1" Text="Search-first file manager" Opacity="0.62" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+    </Grid>
+
+    <Grid Grid.Row="1" Padding="12,8" ColumnSpacing="6">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/>
+        <ColumnDefinition Width="*"/><ColumnDefinition Width="320"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/>
+      </Grid.ColumnDefinitions>
+      <Button Grid.Column="0" Click="BackClicked" ToolTipService.ToolTip="Back">
+        <SymbolIcon Symbol="Back"/>
+      </Button>
+      <Button Grid.Column="1" Click="ForwardClicked" ToolTipService.ToolTip="Forward">
+        <SymbolIcon Symbol="Forward"/>
+      </Button>
+      <Button Grid.Column="2" Click="UpClicked" ToolTipService.ToolTip="Parent folder">
+        <SymbolIcon Symbol="Up"/>
+      </Button>
+      <TextBox x:Name="AddressBar" Grid.Column="3" PlaceholderText="Path" KeyDown="AddressKeyDown" AutomationProperties.Name="Current folder path"/>
+      <AutoSuggestBox x:Name="Search" Grid.Column="4" PlaceholderText="Find in this folder" TextChanged="SearchChanged" QuerySubmitted="SearchSubmitted" AutomationProperties.Name="Search files"/>
+      <Button Grid.Column="5" Click="OpenExplorerClicked" ToolTipService.ToolTip="Open current folder in File Explorer">
+        <SymbolIcon Symbol="OpenWith"/>
+      </Button>
+      <Button Grid.Column="6" Click="RefreshClicked" ToolTipService.ToolTip="Refresh">
+        <SymbolIcon Symbol="Refresh"/>
+      </Button>
+    </Grid>
+
+    <InfoBar x:Name="StatusBar" Grid.Row="2" Margin="12,0,12,8" IsOpen="False" IsClosable="True" Severity="Error"/>
+
+    <NavigationView x:Name="Places" Grid.Row="3" PaneDisplayMode="Left" IsBackButtonVisible="Collapsed" IsSettingsVisible="False" SelectionChanged="PlaceChanged">
+      <NavigationView.MenuItems>
+        <NavigationViewItem Content="Home" Icon="Home" Tag="Home"/>
+        <NavigationViewItem Content="Desktop" Icon="AllApps" Tag="Desktop"/>
+        <NavigationViewItem Content="Documents" Icon="Document" Tag="Documents"/>
+        <NavigationViewItem Content="Downloads" Icon="Download" Tag="Downloads"/>
+        <NavigationViewItem Content="Pictures" Icon="Pictures" Tag="Pictures"/>
+        <NavigationViewItem Content="Music" Icon="MusicInfo" Tag="Music"/>
+        <NavigationViewItem Content="Videos" Icon="Video" Tag="Videos"/>
+      </NavigationView.MenuItems>
+      <NavigationView.FooterMenuItems>
+        <NavigationViewItem Content="Search everywhere" Icon="Find" Tag="Global"/>
+      </NavigationView.FooterMenuItems>
+
+      <Grid Padding="12,0,12,12" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <Grid Grid.Row="0" Margin="0,0,0,8">
+          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+          <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+            <TextBlock x:Name="ViewHeading" Text="Files" FontSize="20" FontWeight="SemiBold"/>
+            <TextBlock x:Name="ResultsSummary" Opacity="0.62" VerticalAlignment="Center"/>
+          </StackPanel>
+          <AppBarToggleButton x:Name="GlobalSearch" Grid.Column="1" Label="Everywhere" Icon="World" Click="GlobalSearchClicked"/>
+          <AppBarToggleButton x:Name="Recursive" Grid.Column="2" Label="Inside folders" Icon="Find" Click="RefreshClicked"/>
+          <AppBarToggleButton x:Name="ListMode" Grid.Column="3" Label="List" Icon="List" Click="ViewClicked"/>
+          <ComboBox x:Name="SortMenu" Grid.Column="4" Width="140" Header="Sort" SelectionChanged="SortChanged">
+            <ComboBoxItem Content="Relevance" Tag="0"/>
+            <ComboBoxItem Content="Name" Tag="1"/>
+            <ComboBoxItem Content="Name (Z-A)" Tag="2"/>
+            <ComboBoxItem Content="Newest" Tag="3"/>
+            <ComboBoxItem Content="Oldest" Tag="4"/>
+            <ComboBoxItem Content="Largest" Tag="5"/>
+            <ComboBoxItem Content="Smallest" Tag="6"/>
+          </ComboBox>
+          <ItemsControl x:Name="NativeCommands" Grid.Row="1" Grid.ColumnSpan="5" Visibility="Collapsed" Margin="0,8,0,0">
+            <ItemsControl.ItemsPanel>
+              <ItemsPanelTemplate><ItemsStackPanel Orientation="Horizontal"/></ItemsPanelTemplate>
+            </ItemsControl.ItemsPanel>
+            <ItemsControl.ItemTemplate>
+              <DataTemplate>
+                <Button Tag="{Binding}" Click="NativeCommandClicked" Margin="0,0,8,0">
+                  <StackPanel Orientation="Horizontal" Spacing="6">
+                    <FontIcon Glyph="{Binding Glyph}" FontSize="13"/>
+                    <TextBlock Text="{Binding Title}"/>
+                  </StackPanel>
+                </Button>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </Grid>
+
+        <Grid Grid.Row="1">
+          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="6"/><ColumnDefinition x:Name="RightColumn" Width="380"/></Grid.ColumnDefinitions>
+          <Grid Grid.Column="0" AllowDrop="True" DragOver="FileDragOver" Drop="FileDrop">
+            <GridView x:Name="Files" IsItemClickEnabled="True" ItemClick="FileClicked" DoubleTapped="FileDoubleTapped" SelectionMode="Extended" CanDragItems="True" AllowDrop="True" DragItemsStarting="FileDragItemsStarting" DragOver="FileDragOver" Drop="FileDrop">
+              <GridView.ItemsPanel>
+                <ItemsPanelTemplate><ItemsWrapGrid x:Name="Wrap" Orientation="Horizontal" MaximumRowsOrColumns="0"/></ItemsPanelTemplate>
+              </GridView.ItemsPanel>
+              <GridView.ItemTemplate>
+                <DataTemplate>
+                  <Grid Width="148" Height="150" Padding="8" RightTapped="FileRightTapped">
+                    <Grid.ContextFlyout>
+                      <MenuFlyout>
+                        <MenuFlyoutItem Text="Open" Tag="{Binding}" Click="ContextOpenClicked"/>
+                        <MenuFlyoutItem Text="Rename" Tag="{Binding}" Click="RenameClicked"/>
+                        <MenuFlyoutItem Text="Copy path" Tag="{Binding}" Click="CopyPathClicked"/>
+                        <MenuFlyoutSeparator/>
+                        <MenuFlyoutItem Text="Move to Recycle Bin" Tag="{Binding}" Click="DeleteClicked"/>
+                      </MenuFlyout>
+                    </Grid.ContextFlyout>
+                    <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                    <Image Source="{Binding Thumbnail}" Stretch="Uniform" Margin="4"/>
+                    <TextBlock Grid.Row="1" Text="{Binding Name}" TextTrimming="CharacterEllipsis" HorizontalAlignment="Center"/>
+                    <TextBlock Grid.Row="2" Text="{Binding Size}" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.65" HorizontalAlignment="Center"/>
+                  </Grid>
+                </DataTemplate>
+              </GridView.ItemTemplate>
+            </GridView>
+            <ListView x:Name="FileList" Visibility="Collapsed" IsItemClickEnabled="True" ItemClick="FileClicked" DoubleTapped="FileDoubleTapped" SelectionMode="Extended" CanDragItems="True" AllowDrop="True" DragItemsStarting="FileDragItemsStarting" DragOver="FileDragOver" Drop="FileDrop">
+              <ListView.Header>
+                <Border Padding="8,4" Background="{ThemeResource SubtleFillColorSecondaryBrush}">
+                  <ItemsControl x:Name="FileColumnsHeader">
+                    <ItemsControl.ItemsPanel>
+                      <ItemsPanelTemplate><ItemsStackPanel Orientation="Horizontal"/></ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate>
+                        <Grid Width="{Binding Width}" Tag="{Binding}" PointerPressed="ColumnPointerPressed" PointerMoved="ColumnPointerMoved" PointerReleased="ColumnPointerReleased">
+                          <Button Content="{Binding Title}" Tag="{Binding}" Click="FileColumnClicked" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Padding="4,2"/>
+                          <Thumb Tag="{Binding}" HorizontalAlignment="Right" Width="8" DragDelta="ColumnWidthDragged" DragCompleted="ColumnWidthDragCompleted" Background="Transparent"/>
+                        </Grid>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                </Border>
+              </ListView.Header>
+              <ListView.ItemTemplate>
+                <DataTemplate>
+                  <Grid Height="44" Padding="8,4" RightTapped="FileRightTapped">
+                    <Grid.ContextFlyout>
+                      <MenuFlyout>
+                        <MenuFlyoutItem Text="Open" Tag="{Binding}" Click="ContextOpenClicked"/>
+                        <MenuFlyoutItem Text="Rename" Tag="{Binding}" Click="RenameClicked"/>
+                        <MenuFlyoutItem Text="Copy path" Tag="{Binding}" Click="CopyPathClicked"/>
+                        <MenuFlyoutSeparator/>
+                        <MenuFlyoutItem Text="Move to Recycle Bin" Tag="{Binding}" Click="DeleteClicked"/>
+                      </MenuFlyout>
+                    </Grid.ContextFlyout>
+                    <ItemsControl ItemsSource="{Binding Columns}">
+                      <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate><ItemsStackPanel Orientation="Horizontal"/></ItemsPanelTemplate>
+                      </ItemsControl.ItemsPanel>
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                          <TextBlock Text="{Binding Text}" Width="{Binding Column.Width}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" Padding="4,0"/>
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                  </Grid>
+                </DataTemplate>
+              </ListView.ItemTemplate>
+            </ListView>
+          </Grid>
+          <Thumb Grid.Column="1" DragDelta="PreviewDividerDragged" Background="Transparent"/>
+          <Grid Grid.Column="2" Background="{ThemeResource LayerFillColorDefaultBrush}" Padding="16">
+            <StackPanel x:Name="PreviewPanel" Spacing="8">
+              <TextBlock x:Name="PreviewName" FontSize="18" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+              <TextBlock x:Name="PreviewMeta" Opacity="0.62" TextWrapping="Wrap"/>
+              <Image x:Name="PreviewImage" Stretch="Uniform" MaxHeight="240"/>
+              <ScrollViewer MaxHeight="420"><TextBlock x:Name="PreviewText" TextWrapping="Wrap" IsTextSelectionEnabled="True"/></ScrollViewer>
+            </StackPanel>
+            <Canvas x:Name="ChartCanvas" SizeChanged="ChartSizeChanged" Visibility="Collapsed"/>
+            <ScrollViewer x:Name="ComponentHostPanel" Visibility="Collapsed" VerticalScrollBarVisibility="Auto">
+              <StackPanel Spacing="10">
+                <Grid>
+                  <TextBlock x:Name="ComponentTitle" FontSize="18" FontWeight="SemiBold"/>
+                  <Button Content="Close" HorizontalAlignment="Right" Click="CloseComponentClicked"/>
+                </Grid>
+
+                <StackPanel x:Name="ProjectsViewPanel" Visibility="Collapsed" Spacing="8">
+                  <Button Content="Refresh projects" Click="ProjectsRefreshClicked" HorizontalAlignment="Left"/>
+                  <Button Content="Open selected project in new window" Click="OpenProjectWindowClicked" HorizontalAlignment="Left"/>
+                  <ListView x:Name="ProjectsList" IsItemClickEnabled="True" ItemClick="ProjectClicked" DoubleTapped="ProjectDoubleTapped" SelectionMode="Single" MaxHeight="420">
+                    <ListView.ItemTemplate>
+                      <DataTemplate>
+                        <Grid Padding="8,6" RowSpacing="2">
+                          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                          <TextBlock Text="{Binding Path}" TextTrimming="CharacterEllipsis"/>
+                          <TextBlock Grid.Row="1" Text="{Binding Summary}" Opacity="0.7" TextTrimming="CharacterEllipsis"/>
+                          <TextBlock Grid.Row="2" Text="{Binding Metrics}" Opacity="0.62" FontSize="12" TextTrimming="CharacterEllipsis"/>
+                        </Grid>
+                      </DataTemplate>
+                    </ListView.ItemTemplate>
+                  </ListView>
+                </StackPanel>
+
+                <StackPanel x:Name="GitViewPanel" Visibility="Collapsed" Spacing="8">
+                  <StackPanel Orientation="Horizontal" Spacing="6">
+                    <Button Content="Status" Click="GitStatusClicked"/>
+                    <Button Content="Diff" Click="GitDiffClicked"/>
+                    <Button Content="Stage" Click="GitStageClicked"/>
+                    <Button Content="Unstage" Click="GitUnstageClicked"/>
+                    <ComboBox x:Name="GitMode" Width="110" SelectionChanged="GitModeChanged">
+                      <ComboBoxItem Content="Unified" Tag="unified"/>
+                      <ComboBoxItem Content="Split" Tag="split"/>
+                    </ComboBox>
+                  </StackPanel>
+                  <StackPanel Orientation="Horizontal" Spacing="6">
+                    <Button Content="Previous hunk" Click="PreviousHunkClicked"/>
+                    <Button Content="Next hunk" Click="NextHunkClicked"/>
+                    <Button Content="Collapse hunks" Click="CollapseHunksClicked"/>
+                    <Button Content="Expand hunks" Click="ExpandHunksClicked"/>
+                    <ComboBox x:Name="GitHunkMenu" Width="240" PlaceholderText="Jump to hunk" SelectionChanged="GitHunkChanged" DisplayMemberPath="Label"/>
+                  </StackPanel>
+                  <TextBlock x:Name="GitSummary" Opacity="0.7" TextWrapping="Wrap"/>
+                  <ScrollViewer x:Name="GitUnifiedView" MaxHeight="480" HorizontalScrollBarVisibility="Auto">
+                    <ItemsControl x:Name="GitUnifiedLines">
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Grid ColumnSpacing="8" Padding="2,0" Tag="{Binding}" Tapped="DiffLineTapped" ToolTipService.ToolTip="Tap a hunk header to collapse or expand it">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="48"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <TextBlock Text="{Binding UnifiedNumberText}" Opacity="0.55" FontFamily="Consolas"/>
+                            <TextBlock Grid.Column="1" Text="{Binding UnifiedText}" FontFamily="Consolas" TextWrapping="NoWrap"/>
+                          </Grid>
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                  </ScrollViewer>
+                  <Grid x:Name="GitSplitView" Visibility="Collapsed" ColumnSpacing="6" MaxHeight="480">
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                    <ScrollViewer Grid.Column="0" HorizontalScrollBarVisibility="Auto">
+                      <ItemsControl x:Name="GitSplitLeftLines">
+                        <ItemsControl.ItemTemplate>
+                          <DataTemplate>
+                            <Grid ColumnSpacing="6" Padding="2,0" Tag="{Binding}" Tapped="DiffLineTapped" ToolTipService.ToolTip="Tap a hunk header to collapse or expand it"><Grid.ColumnDefinitions><ColumnDefinition Width="40"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions><TextBlock Text="{Binding OldNumberText}" Opacity="0.55" FontFamily="Consolas"/><TextBlock Grid.Column="1" Text="{Binding OldText}" FontFamily="Consolas" TextWrapping="NoWrap"/></Grid>
+                          </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                      </ItemsControl>
+                    </ScrollViewer>
+                    <ScrollViewer Grid.Column="1" HorizontalScrollBarVisibility="Auto">
+                      <ItemsControl x:Name="GitSplitRightLines">
+                        <ItemsControl.ItemTemplate>
+                          <DataTemplate>
+                            <Grid ColumnSpacing="6" Padding="2,0" Tag="{Binding}" Tapped="DiffLineTapped" ToolTipService.ToolTip="Tap a hunk header to collapse or expand it"><Grid.ColumnDefinitions><ColumnDefinition Width="40"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions><TextBlock Text="{Binding NewNumberText}" Opacity="0.55" FontFamily="Consolas"/><TextBlock Grid.Column="1" Text="{Binding NewText}" FontFamily="Consolas" TextWrapping="NoWrap"/></Grid>
+                          </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                      </ItemsControl>
+                    </ScrollViewer>
+                  </Grid>
+                </StackPanel>
+
+                <StackPanel x:Name="TasksViewPanel" Visibility="Collapsed" Spacing="8">
+                  <TextBlock Text="Tasks" FontWeight="SemiBold"/>
+                  <ItemsControl x:Name="TaskCommands">
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate><Button Content="{Binding Title}" Tag="{Binding}" Click="TaskCommandClicked" HorizontalAlignment="Stretch"/></DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                  <TextBox x:Name="TaskOutput" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" FontFamily="Consolas" MaxHeight="280"/>
+                </StackPanel>
+
+                <StackPanel x:Name="StorageViewPanel" Visibility="Collapsed" Spacing="8">
+                  <TextBlock x:Name="StorageSummary" Opacity="0.7" TextWrapping="Wrap"/>
+                  <ListView x:Name="StorageEntries" IsItemClickEnabled="True" ItemClick="StorageEntryClicked" MaxHeight="460">
+                    <ListView.ItemTemplate>
+                      <DataTemplate>
+                        <Grid Padding="8,5" ColumnSpacing="8"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis"/><TextBlock Grid.Column="1" Text="{Binding SizeText}" Opacity="0.65"/></Grid>
+                      </DataTemplate>
+                    </ListView.ItemTemplate>
+                  </ListView>
+                </StackPanel>
+
+                <StackPanel x:Name="ArchiveViewPanel" Visibility="Collapsed" Spacing="8">
+                  <TextBlock x:Name="ArchiveSummary" Opacity="0.7" TextWrapping="Wrap"/>
+                  <TextBox x:Name="ArchiveOutput" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" FontFamily="Consolas" MaxHeight="280"/>
+                  <Button Content="Save archive changes" Click="ArchiveSaveClicked" HorizontalAlignment="Left"/>
+                </StackPanel>
+              </StackPanel>
+            </ScrollViewer>
+          </Grid>
+        </Grid>
+
+        <Grid Grid.Row="2" Padding="0,8,0,0">
+          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="260"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="220"/></Grid.ColumnDefinitions>
+          <StackPanel Orientation="Horizontal" Spacing="8">
+            <Button Content="New folder" Click="NewFolderClicked"/>
+            <Button Content="Paste" Click="PasteClicked"/>
+            <Button Content="Copy path" Click="CopyPathClicked"/>
+            <Button Content="Rename" Click="RenameClicked"/>
+            <Button Content="Selection…" Click="SelectionClicked"/>
+            <Button Content="Columns…" Click="ColumnsClicked"/>
+            <Button Content="Batch rename" Click="BatchRenameClicked"/>
+            <Button Content="Recycle" Click="DeleteClicked"/>
+          </StackPanel>
+          <TextBlock x:Name="GitFooterSummary" Grid.Column="1" Margin="12,0" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="Git branch and changes for the current folder"/>
+          <AppBarToggleButton x:Name="ChartButton" Grid.Column="2" Label="Chart" Icon="View" Click="ChartClicked"/>
+          <Slider x:Name="Density" Grid.Column="3" Minimum="84" Maximum="240" Value="148" Header="Tile size" ValueChanged="DensityChanged"/>
         </Grid>
       </Grid>
-      <Grid Grid.Row="2" Padding="12,6" Background="{ThemeResource LayerFillColorAltBrush}">
-        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="220"/></Grid.ColumnDefinitions>
-        <TextBlock x:Name="Location" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
-        <Slider Grid.Column="1" Minimum="84" Maximum="240" Value="148" Header="Tile size" ValueChanged="DensityChanged"/>
-      </Grid>
-    </Grid>
-  </NavigationView>
+    </NavigationView>
+  </Grid>
 </Window>

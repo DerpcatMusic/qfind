@@ -9,7 +9,15 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 
 use crate::theme::Theme;
 
-pub const MENU_ITEMS: &[&str] = &["open", "preview", "copy path", "show in files"];
+pub const MENU_ITEMS: &[&str] = &[
+    "open",
+    "preview",
+    "copy path",
+    "show in files",
+    "mark / unmark",
+    "rename",
+    "trash",
+];
 pub const SETTINGS_APPEARANCE: usize = 6;
 pub const SETTINGS_ITEMS: usize = 10;
 
@@ -18,6 +26,11 @@ pub enum Layer {
     Help,
     Location {
         input: String,
+    },
+    Prompt {
+        title: String,
+        input: String,
+        kind: PromptKind,
     },
     Settings {
         selected: usize,
@@ -82,6 +95,10 @@ impl Stack {
         self.layers.push(Layer::Location { input });
     }
 
+    pub fn open_prompt(&mut self, title: String, input: String, kind: PromptKind) {
+        self.layers.push(Layer::Prompt { title, input, kind });
+    }
+
     pub fn toggle_settings(&mut self) {
         if matches!(self.top(), Some(Layer::Settings { .. })) {
             self.pop();
@@ -102,11 +119,21 @@ impl Stack {
     }
 }
 
+/// What an input [`Layer::Prompt`] submits.
+#[derive(Clone, Debug)]
+pub enum PromptKind {
+    /// Rename `from` to `<parent>/<input>`.
+    Rename { from: std::path::PathBuf },
+    /// Create `<parent>/<input>` as a directory.
+    Mkdir { parent: std::path::PathBuf },
+}
+
 pub fn draw(frame: &mut Frame, stack: &Stack, th: Theme, area: Rect, settings: &[(&str, &str)]) {
     for layer in &stack.layers {
         match layer {
             Layer::Help => draw_help(frame, area, th),
             Layer::Location { input } => draw_location(frame, area, th, input),
+            Layer::Prompt { title, input, .. } => draw_prompt(frame, area, th, title, input),
             Layer::Settings { selected } => draw_settings(frame, area, th, *selected, settings),
             Layer::Theme { selected, .. } => draw_theme(frame, area, th, *selected),
             Layer::Menu { col, row, pick, .. } => draw_menu(frame, area, th, *col, *row, *pick),
@@ -118,7 +145,7 @@ pub fn draw(frame: &mut Frame, stack: &Stack, th: Theme, area: Rect, settings: &
 pub fn click_top(stack: &mut Stack, x: u16, y: u16, area: Rect) -> Click {
     match stack.top() {
         Some(Layer::Help) => {
-            let r = help_rect(area);
+            let r = help_rect(area, CLICK_HELP_ROWS);
             if close_hit(r, x, y) {
                 stack.pop();
                 Click::Closed
@@ -130,6 +157,15 @@ pub fn click_top(stack: &mut Stack, x: u16, y: u16, area: Rect) -> Click {
             }
         }
         Some(Layer::Location { .. }) => {
+            let r = location_rect(area);
+            if close_hit(r, x, y) || !r.contains(ratatui::layout::Position::new(x, y)) {
+                stack.pop();
+                Click::Closed
+            } else {
+                Click::Ignore
+            }
+        }
+        Some(Layer::Prompt { .. }) => {
             let r = location_rect(area);
             if close_hit(r, x, y) || !r.contains(ratatui::layout::Position::new(x, y)) {
                 stack.pop();
@@ -187,9 +223,14 @@ pub enum Click {
     Menu(usize),
 }
 
-fn help_rect(area: Rect) -> Rect {
+/// Row count used for click hit-testing; kept in sync with `draw_help`.
+const CLICK_HELP_ROWS: usize = 25;
+
+fn help_rect(area: Rect, rows: usize) -> Rect {
     let w = 58.min(area.width.saturating_sub(2)).max(2);
-    let h = 18.min(area.height.saturating_sub(2)).max(2);
+    let h = ((rows + 2) as u16)
+        .min(area.height.saturating_sub(2))
+        .max(2);
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
     Rect::new(x, y, w, h)
@@ -292,12 +333,18 @@ fn clear_popup(frame: &mut Frame, popup: Rect, th: Theme) {
 }
 
 fn draw_help(frame: &mut Frame, area: Rect, th: Theme) {
-    let popup = help_rect(area);
-    clear_popup(frame, popup, th);
     let actions = [
         ("Space", "preview focused item"),
         ("Tab", "switch Search / Results focus"),
         ("Enter", "open or enter folder"),
+        ("Delete", "trash focused / marked (undo: Ctrl+Z)"),
+        ("Insert", "mark / unmark focused row"),
+        ("Ctrl+A", "mark all / clear marks"),
+        ("F2", "rename focused item"),
+        ("F7", "new folder here"),
+        ("Ctrl+Z", "undo last file operation"),
+        ("Ctrl+T / W", "new / close tab"),
+        ("Ctrl+] / [", "next / previous tab"),
         ("F4", "dual-pane browser"),
         ("Ctrl+L", "open location"),
         ("F6", "map: size, file count, off"),
@@ -306,12 +353,15 @@ fn draw_help(frame: &mut Frame, area: Rect, th: Theme) {
         ("↑↓", "navigate"),
         ("←→", "grid or browser pane"),
         ("Alt+←→", "browser back / forward"),
+        ("Alt+Z", "zebra stripes"),
         ("Mouse drag", "drop a result into another app"),
         ("Ctrl+O", "show in files"),
         ("Ctrl+Y", "copy path"),
         ("Ctrl+M", "change match mode"),
         ("right-click", "actions"),
     ];
+    let popup = help_rect(area, actions.len());
+    clear_popup(frame, popup, th);
     let visible = popup.height.saturating_sub(2) as usize;
     let text = actions
         .into_iter()
@@ -348,6 +398,39 @@ fn draw_location(frame: &mut Frame, area: Rect, th: Theme, input: &str) {
                     )
                     .title_bottom(Line::from(
                         [shortcut("Ctrl+U", "clear", th), shortcut("Enter", "go", th)].concat(),
+                    )),
+            ),
+        popup,
+    );
+    frame.set_cursor_position(ratatui::layout::Position::new(
+        popup
+            .x
+            .saturating_add(1)
+            .saturating_add(visible.chars().count() as u16),
+        popup.y.saturating_add(1),
+    ));
+}
+
+fn draw_prompt(frame: &mut Frame, area: Rect, th: Theme, title: &str, input: &str) {
+    let popup = location_rect(area);
+    clear_popup(frame, popup, th);
+    let width = popup.width.saturating_sub(4) as usize;
+    let skip = input.chars().count().saturating_sub(width);
+    let visible = input.chars().skip(skip).collect::<String>();
+    frame.render_widget(
+        Paragraph::new(visible.clone())
+            .style(Style::new().fg(th.text).bg(th.surface))
+            .block(
+                window(title, th)
+                    .title_top(
+                        Line::from(Span::styled("[×]", Style::new().fg(th.dim))).right_aligned(),
+                    )
+                    .title_bottom(Line::from(
+                        [
+                            shortcut("Ctrl+U", "clear", th),
+                            shortcut("Enter", "apply", th),
+                        ]
+                        .concat(),
                     )),
             ),
         popup,

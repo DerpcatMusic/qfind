@@ -41,6 +41,7 @@ pub(crate) struct Snapshot {
     names_off: usize,
     letter_mask: OnceLock<Box<[u64]>>,
     hidden: OnceLock<Box<[bool]>>,
+    folder_paths: OnceLock<std::collections::HashMap<PathBuf, u32>>,
 }
 
 impl Snapshot {
@@ -94,6 +95,7 @@ impl Snapshot {
             names_off,
             letter_mask: OnceLock::new(),
             hidden: OnceLock::new(),
+            folder_paths: OnceLock::new(),
         })
     }
 
@@ -181,7 +183,11 @@ impl Snapshot {
     }
 
     pub(crate) fn folder_id(&self, path: &Path) -> Option<u32> {
-        (0..self.folder_count).find(|&id| self.path(id) == path)
+        self.folder_paths.get_or_init(|| {
+            let mut paths = std::collections::HashMap::new();
+            for id in 0..self.folder_count { paths.entry(self.path(id)).or_insert(id); }
+            paths
+        }).get(path).copied()
     }
 
     pub(crate) fn is_descendant_of(&self, id: u32, folder: u32) -> bool {

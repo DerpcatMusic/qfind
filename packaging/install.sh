@@ -2,7 +2,11 @@
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 prefix="${PREFIX:-$HOME/.local}"
-cargo build --release --manifest-path "$root/Cargo.toml" -p qfind -p qfind-tui
+cargo build --release --manifest-path "$root/Cargo.toml" -p qfind -p qfind-tui -p qfind-native
+native_library="$root/target/release/libqfind_native.so"
+if [ "$(uname -s)" = Darwin ]; then
+  native_library="$root/target/release/libqfind_native.dylib"
+fi
 install -Dm755 "$root/target/release/qfind" "$prefix/bin/qfind"
 install -Dm755 "$root/target/release/qfind" "$prefix/bin/qfind-cli"
 install -Dm755 "$root/target/release/qfind-tui" "$prefix/bin/qfind-tui"
@@ -27,10 +31,13 @@ if command -v npm >/dev/null; then
   )
   echo "installed Vicinae extension: ~/.local/share/vicinae/extensions/qfind"
 fi
-if command -v cmake >/dev/null && pkg-config --exists Qt6Widgets 2>/dev/null; then
-  cmake -S "$root/packaging/kde" -B "$root/target/kde-build" -DCMAKE_BUILD_TYPE=Release
+if command -v cmake >/dev/null \
+  && { pkg-config --exists Qt6Widgets 2>/dev/null || pkg-config --exists Qt5Widgets 2>/dev/null; }; then
+  cmake -S "$root/packaging/kde" -B "$root/target/kde-build" -DCMAKE_BUILD_TYPE=Release \
+    -DQFIND_NATIVE_LIBRARY="$native_library"
   cmake --build "$root/target/kde-build" -j
   install -Dm755 "$root/target/kde-build/qfind-qt" "$prefix/bin/qfind-qt"
+  install -Dm755 "$native_library" "$prefix/bin/$(basename "$native_library")"
   echo "installed $prefix/bin/qfind-qt (Breeze/Qt)"
 fi
 if command -v update-desktop-database >/dev/null; then

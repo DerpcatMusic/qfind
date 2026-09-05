@@ -1,3 +1,16 @@
+#[cfg(target_os = "linux")]
+#[path = "os_linux.rs"]
+mod os;
+#[cfg(target_os = "windows")]
+#[path = "os_windows.rs"]
+mod os;
+#[cfg(target_os = "macos")]
+#[path = "os_macos.rs"]
+mod os;
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+#[path = "os_other.rs"]
+mod os;
+
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -108,6 +121,7 @@ enum Command {
 }
 
 fn main() -> ExitCode {
+    os::init();
     match run() {
         Ok(code) => code,
         Err(err) => {
@@ -155,10 +169,6 @@ fn run() -> Result<ExitCode> {
         }
         None => {
             if cli.query.is_empty() && !cli.json {
-                if io::stdout().is_terminal() {
-                    qfind_tui::run()?;
-                    return Ok(ExitCode::SUCCESS);
-                }
                 let snapshot = default_snapshot_path();
                 let catalog = Catalog::open(&snapshot).with_context(|| {
                     format!("open {} (run `qfind index` first)", snapshot.display())
@@ -169,6 +179,9 @@ fn run() -> Result<ExitCode> {
                     catalog.folder_count(),
                     catalog.file_count()
                 );
+                if io::stdout().is_terminal() {
+                    eprintln!("run `qfind-tui` for the interactive UI");
+                }
                 return Ok(ExitCode::SUCCESS);
             }
             let snapshot = default_snapshot_path();

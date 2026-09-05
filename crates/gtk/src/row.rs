@@ -13,6 +13,9 @@ mod imp {
         pub is_dir: Cell<bool>,
         pub depth: Cell<u32>,
         pub has_kids: Cell<bool>,
+        pub size: Cell<u64>,
+        /// Unix seconds, `0` when unknown.
+        pub modified: Cell<i64>,
     }
 
     #[glib::object_subclass]
@@ -29,8 +32,17 @@ glib::wrapper! {
 }
 
 impl RowData {
-    pub fn new(name: impl Into<String>, path: impl Into<String>, is_dir: bool) -> Self {
-        Self::with_depth(name, path, is_dir, 0)
+    pub fn new(
+        name: impl Into<String>,
+        path: impl Into<String>,
+        is_dir: bool,
+        size: u64,
+        modified: i64,
+    ) -> Self {
+        let obj = Self::with_depth(name, path, is_dir, 0);
+        obj.imp().size.set(size);
+        obj.imp().modified.set(modified);
+        obj
     }
 
     pub fn with_depth(
@@ -45,6 +57,8 @@ impl RowData {
         obj.imp().is_dir.set(is_dir);
         obj.imp().depth.set(depth);
         obj.imp().has_kids.set(false);
+        obj.imp().size.set(0);
+        obj.imp().modified.set(0);
         obj
     }
 
@@ -78,5 +92,19 @@ impl RowData {
 
     pub fn has_kids(&self) -> bool {
         self.imp().has_kids.get()
+    }
+
+    pub fn size(&self) -> u64 {
+        self.imp().size.get()
+    }
+
+    pub fn modified(&self) -> i64 {
+        self.imp().modified.get()
+    }
+
+    /// Cache live filesystem metadata (see the list factory's lazy stat).
+    pub fn fill_metadata(&self, size: u64, modified: i64) {
+        self.imp().size.set(size);
+        self.imp().modified.set(modified);
     }
 }

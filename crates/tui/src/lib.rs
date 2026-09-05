@@ -13,8 +13,8 @@ use crossterm::event::{
 use crossterm::execute;
 use qfind_core::{
     Catalog, CatalogFolder, Config, DateAge, FileClass, Hit, HitRef, ManagerSession, MatchMode,
-    OpenHow, OpenMode, Scope, SearchOpts, Sort, Surface, Weighted, Zoom, default_snapshot_path,
-    folder_weights, squarify,
+    OpenHow, OpenMode, PluginHost, Scope, SearchOpts, Sort, Surface, Weighted, Zoom,
+    default_snapshot_path, folder_weights, squarify,
 };
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect, Size};
 use ratatui::style::{Modifier, Style};
@@ -32,9 +32,16 @@ mod reactor;
 mod splash;
 mod surface;
 mod theme;
+pub mod workspace;
 use theme::{Chip, Theme, compact, fit_chips, icon_for, icon_prompt, toolbar};
+use workspace::{Tab, UndoOp};
 
 const MAX_ROWS: usize = 2_000;
+/// Depth of the Ctrl+Z stack; older entries drop off the front.
+const MAX_UNDO: usize = 32;
+/// Fixed widths of the MODIFIED and SIZE details columns in list rows.
+const AGE_W: usize = 8;
+const SIZE_W: usize = 10;
 
 /// Open the Qfind TUI. Rebuilds the Catalog on first launch if missing.
 pub fn run() -> Result<()> {
@@ -101,6 +108,8 @@ struct Row {
     path: PathBuf,
     is_dir: bool,
     size: u64,
+    /// Unix seconds, `0` when unknown.
+    modified: i64,
     indices: Vec<u32>,
 }
 
@@ -111,8 +120,33 @@ impl Row {
             path: hit.path(),
             is_dir: hit.is_dir(),
             size: hit.size(),
+            modified: hit.mtime(),
             indices: hit.indices().to_vec(),
         }
+    }
+}
+
+/// Short relative age for the MODIFIED column (`0` renders as an em dash).
+fn age_string(mtime: i64) -> String {
+    if mtime <= 0 {
+        return "—".into();
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs() as i64);
+    let delta = now.saturating_sub(mtime);
+    if delta < 60 {
+        "now".into()
+    } else if delta < 3_600 {
+        format!("{}m", delta / 60)
+    } else if delta < 86_400 {
+        format!("{}h", delta / 3_600)
+    } else if delta < 2_592_000 {
+        format!("{}d", delta / 86_400)
+    } else if delta < 31_536_000 {
+        format!("{}mo", delta / 2_592_000)
+    } else {
+        format!("{}y", delta / 31_536_000)
     }
 }
 
@@ -196,6 +230,10 @@ struct App {
     dragging_bar: bool,
     overlays: overlay::Stack,
     manager: ManagerSession,
+    plugins: PluginHost,
+    tabs: Vec<Tab>,
+    tab_idx: usize,
+    undo: Vec<UndoOp>,
     browser_dir: Option<PathBuf>,
     search_folder: Option<CatalogFolder>,
     browser_folders: Vec<Row>,
@@ -306,6 +344,10 @@ impl App {
             dragging_bar: false,
             overlays: overlay::Stack::default(),
             manager: ManagerSession::default(),
+            plugins: PluginHost::new(),
+            tabs: vec![Tab::new("Tab 1")],
+            tab_idx: 0,
+            undo: Vec::new(),
             browser_dir: None,
             search_folder: None,
             browser_folders: Vec::new(),
@@ -447,6 +489,7 @@ impl App {
             return;
         }
         self.manager.navigate(path.clone());
+        self.plugins.notify_navigate(self.manager.directory());
         self.show_browser(path);
     }
 
@@ -457,6 +500,7 @@ impl App {
             path: path.clone(),
             is_dir: true,
             size: 0,
+            modified: 0,
             indices: Vec::new(),
         }];
         if let Some(parent) = path.parent() {
@@ -465,6 +509,7 @@ impl App {
                 path: parent.to_path_buf(),
                 is_dir: true,
                 size: 0,
+                modified: 0,
                 indices: Vec::new(),
             });
         }
@@ -489,6 +534,7 @@ impl App {
             if !path.is_dir() {
                 continue;
             }
+            self.plugins.notify_navigate(self.manager.directory());
             self.show_browser(path.clone());
             self.status = format!("back  {}", path.display());
             return;
@@ -500,10 +546,326 @@ impl App {
             if !path.is_dir() {
                 continue;
             }
+            self.plugins.notify_navigate(self.manager.directory());
             self.show_browser(path.clone());
             self.status = format!("forward  {}", path.display());
             return;
         }
+    }
+
+    fn tab_mut(&mut self) -> &mut Tab {
+        let idx = self.tab_idx.min(self.tabs.len().saturating_sub(1));
+        self.tab_idx = idx;
+        &mut self.tabs[idx]
+    }
+
+    fn marked(&self, path: &Path) -> bool {
+        self.tabs
+            .get(self.tab_idx)
+            .is_some_and(|tab| tab.marked.contains(path))
+    }
+
+    fn mark_count(&self) -> usize {
+        self.tabs.get(self.tab_idx).map_or(0, Tab::mark_count)
+    }
+
+    /// Paths on screen right now: search rows, or the active browser pane.
+    fn visible_paths(&self) -> Vec<PathBuf> {
+        if self.surface == Surface::Tree {
+            match self.browser_pane {
+                BrowserPane::Folders => self
+                    .browser_folders
+                    .iter()
+                    .map(|row| row.path.clone())
+                    .collect(),
+                BrowserPane::Items => self
+                    .browser_items
+                    .iter()
+                    .map(|row| row.path.clone())
+                    .collect(),
+            }
+        } else {
+            self.rows.iter().map(|row| row.path.clone()).collect()
+        }
+    }
+
+    fn mark_toggle(&mut self) {
+        let Some(path) = self.selected_row().map(|row| row.path.clone()) else {
+            return;
+        };
+        let (now, count) = {
+            let tab = self.tab_mut();
+            (tab.toggle_mark(path.clone()), tab.mark_count())
+        };
+        self.status = if now {
+            format!("marked {}  ({count})", path.display())
+        } else {
+            format!("unmarked  ({count})")
+        };
+    }
+
+    fn mark_all_toggle(&mut self) {
+        let paths = self.visible_paths();
+        if paths.is_empty() {
+            self.status = "nothing to mark".into();
+            return;
+        }
+        let tab = self.tab_mut();
+        if paths.iter().all(|path| tab.marked.contains(path)) {
+            tab.clear_marks();
+            self.status = "cleared marks".into();
+        } else {
+            tab.marked.extend(paths);
+            self.status = format!("marked {} rows", tab.mark_count());
+        }
+    }
+
+    fn push_undo(&mut self, op: UndoOp) {
+        if self.undo.len() >= MAX_UNDO {
+            self.undo.remove(0);
+        }
+        self.undo.push(op);
+    }
+
+    /// Re-read the live directory (Tree view) and queue a Catalog rebuild so
+    /// search results catch up with a mutation.
+    fn after_mutation(&mut self) {
+        if self.surface == Surface::Tree
+            && let Some(dir) = self.browser_dir.clone()
+        {
+            self.show_browser(dir);
+        }
+        self.request_catalog_refresh();
+    }
+
+    fn trash_selection(&mut self) {
+        let mut targets: Vec<PathBuf> = {
+            let tab = self.tab_mut();
+            if tab.marked.is_empty() {
+                Vec::new()
+            } else {
+                tab.marked.iter().cloned().collect()
+            }
+        };
+        if targets.is_empty() {
+            let Some(row) = self.selected_row() else {
+                self.status = "nothing to trash".into();
+                return;
+            };
+            targets.push(row.path.clone());
+        }
+        targets.sort();
+        let mut trashed = 0usize;
+        let mut failed: Option<String> = None;
+        for path in targets {
+            match qfind_core::trash(&path) {
+                Ok((staged, _)) => {
+                    trashed += 1;
+                    self.tab_mut().marked.remove(&path);
+                    self.push_undo(UndoOp::Trash { staged, orig: path });
+                }
+                Err(error) => {
+                    failed = Some(format!("{}: {error}", path.display()));
+                    break;
+                }
+            }
+        }
+        self.status = match failed {
+            Some(error) => format!("trashed {trashed}, stopped: {error}"),
+            None => format!("trashed {trashed}  (Ctrl+Z undo)"),
+        };
+        self.after_mutation();
+    }
+
+    fn undo_last(&mut self) {
+        let Some(op) = self.undo.pop() else {
+            self.status = "nothing to undo".into();
+            return;
+        };
+        match op.undo() {
+            Ok(message) => {
+                self.status = message;
+                self.after_mutation();
+            }
+            Err(error) => self.status = format!("undo failed: {error}"),
+        }
+    }
+
+    /// Right-click menu and keyboard menu agree by index; keep in sync with
+    /// [`overlay::MENU_ITEMS`].
+    fn activate_menu(&mut self, pick: usize) {
+        match pick {
+            0 => self.open_selected(),
+            1 => self.preview_selected(),
+            2 => self.copy_selected(),
+            3 => self.reveal_selected(),
+            4 => self.mark_toggle(),
+            5 => self.open_rename_prompt(),
+            6 => self.trash_selection(),
+            _ => {}
+        }
+    }
+
+    fn open_rename_prompt(&mut self) {
+        let Some(row) = self.selected_row() else {
+            self.status = "nothing to rename".into();
+            return;
+        };
+        let name = row
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.overlays.open_prompt(
+            "Rename".into(),
+            name,
+            overlay::PromptKind::Rename {
+                from: row.path.clone(),
+            },
+        );
+    }
+
+    fn open_mkdir_prompt(&mut self) {
+        let parent = self
+            .browser_dir
+            .clone()
+            .or_else(|| self.manager.directory().map(Path::to_path_buf))
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+        self.overlays.open_prompt(
+            "New folder".into(),
+            String::new(),
+            overlay::PromptKind::Mkdir { parent },
+        );
+    }
+
+    fn apply_prompt(&mut self, kind: overlay::PromptKind, input: String) {
+        let name = input.trim();
+        if name.is_empty() || name.contains('/') {
+            self.status = "name must not be empty".into();
+            return;
+        }
+        match kind {
+            overlay::PromptKind::Rename { from } => {
+                let Some(parent) = from.parent() else {
+                    self.status = "cannot rename the filesystem root".into();
+                    return;
+                };
+                let to = parent.join(name);
+                if to == from {
+                    self.status = "unchanged".into();
+                    return;
+                }
+                match qfind_core::rename(&from, &to) {
+                    Ok(_) => {
+                        self.push_undo(UndoOp::Rename {
+                            from,
+                            to: to.clone(),
+                        });
+                        self.status = format!("renamed to {}  (Ctrl+Z undo)", to.display());
+                        self.after_mutation();
+                    }
+                    Err(error) => self.status = format!("rename failed: {error}"),
+                }
+            }
+            overlay::PromptKind::Mkdir { parent } => {
+                let path = parent.join(name);
+                match qfind_core::create_dir(&path) {
+                    Ok(_) => {
+                        self.push_undo(UndoOp::Created { path: path.clone() });
+                        self.status = format!("created {}  (Ctrl+Z undo)", path.display());
+                        self.after_mutation();
+                    }
+                    Err(error) => self.status = format!("mkdir failed: {error}"),
+                }
+            }
+        }
+    }
+
+    fn tab_save(&mut self) {
+        let title = if self.query.is_empty() {
+            format!("Tab {}", self.tab_idx + 1)
+        } else {
+            self.query.chars().take(24).collect()
+        };
+        if let Some(tab) = self.tabs.get_mut(self.tab_idx) {
+            tab.title = title;
+            tab.query = self.query.clone();
+            tab.selected = self.selected;
+            tab.browser = self.browser_dir.clone();
+        }
+    }
+
+    /// Restore a tab's search state plus the directory it was browsing.
+    fn tab_load(&mut self, idx: usize, label: &str) {
+        let (title, query, selected, browser) = {
+            let tab = &self.tabs[idx];
+            (
+                tab.title.clone(),
+                tab.query.clone(),
+                tab.selected,
+                tab.browser.clone(),
+            )
+        };
+        self.query = query;
+        self.selected = selected.min(self.rows.len().saturating_sub(1));
+        match browser {
+            Some(dir) if dir.is_dir() => self.show_browser(dir),
+            _ => {
+                self.surface = Surface::Auto;
+            }
+        }
+        self.focus = Focus::Search;
+        self.mark_dirty();
+        self.status = format!("{label} {title} ({}/{})", idx + 1, self.tabs.len());
+    }
+
+    fn tab_switch_to(&mut self, idx: usize) {
+        if self.tabs.is_empty() {
+            return;
+        }
+        self.tab_save();
+        let idx = idx.min(self.tabs.len() - 1);
+        self.tab_idx = idx;
+        self.tab_load(idx, "tab");
+    }
+
+    fn tab_new(&mut self) {
+        self.tab_save();
+        let idx = self.tabs.len();
+        self.tabs.push(Tab::new(format!("Tab {}", idx + 1)));
+        self.tab_idx = idx;
+        self.query.clear();
+        self.selected = 0;
+        self.surface = Surface::Auto;
+        self.focus = Focus::Search;
+        self.mark_dirty();
+        self.status = format!("tab {} ({}/{})", idx + 1, idx + 1, self.tabs.len());
+    }
+
+    fn tab_close(&mut self) {
+        if self.tabs.len() <= 1 {
+            self.query.clear();
+            self.selected = 0;
+            self.surface = Surface::Auto;
+            self.tab_mut().clear_marks();
+            self.mark_dirty();
+            self.status = "tab cleared".into();
+            return;
+        }
+        self.tabs.remove(self.tab_idx);
+        self.tab_idx = self.tab_idx.min(self.tabs.len() - 1);
+        let idx = self.tab_idx;
+        self.tab_load(idx, "closed tab,");
+    }
+
+    fn tab_step(&mut self, direction: i8) {
+        if self.tabs.len() <= 1 {
+            return;
+        }
+        let len = self.tabs.len();
+        let next = (self.tab_idx as isize + direction as isize).rem_euclid(len as isize) as usize;
+        self.tab_switch_to(next);
     }
 
     fn preview_folder(&mut self) {
@@ -944,6 +1306,11 @@ fn read_directory(path: &Path, show_hidden: bool) -> Vec<Row> {
                 path: entry.path(),
                 is_dir: meta.is_dir(),
                 size: if meta.is_file() { meta.len() } else { 0 },
+                modified: meta
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |elapsed| elapsed.as_secs() as i64),
                 indices: Vec::new(),
             })
         })
@@ -1089,13 +1456,7 @@ fn handle_mouse(app: &mut App, m: MouseEvent) {
                     }
                     overlay::Click::Menu(i) => {
                         app.overlays.pop();
-                        match i {
-                            0 => app.open_selected(),
-                            1 => app.preview_selected(),
-                            2 => app.copy_selected(),
-                            3 => app.reveal_selected(),
-                            _ => {}
-                        }
+                        app.activate_menu(i);
                     }
                     overlay::Click::Settings(i) => {
                         if let Some(overlay::Layer::Settings { selected }) = app.overlays.top_mut()
@@ -1436,6 +1797,16 @@ fn handle_mouse(app: &mut App, m: MouseEvent) {
                 }
             }
         }
+        MouseEventKind::Down(MouseButton::Left)
+            if app.surface != Surface::Tree
+                && pos.y == app.hits_area.y.saturating_sub(1)
+                && pos.x >= app.hits_area.x
+                && pos.x < app.hits_area.right() =>
+        {
+            app.sort = next_sort(app.sort);
+            app.status = format!("sort  {}", sort_label(app.sort));
+            app.mark_dirty();
+        }
         _ => {}
     }
 }
@@ -1466,6 +1837,41 @@ fn overlay_key(app: &mut App, key: KeyEvent) -> bool {
     if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c' | 'q'))
     {
         return true;
+    }
+    if matches!(app.overlays.top(), Some(overlay::Layer::Prompt { .. })) {
+        match key.code {
+            KeyCode::Esc => {
+                app.overlays.pop();
+            }
+            KeyCode::Enter => {
+                let (kind, input) = match app.overlays.pop() {
+                    Some(overlay::Layer::Prompt { kind, input, .. }) => (kind, input),
+                    _ => return false,
+                };
+                app.apply_prompt(kind, input);
+            }
+            KeyCode::Backspace => {
+                if let Some(overlay::Layer::Prompt { input, .. }) = app.overlays.top_mut() {
+                    input.pop();
+                }
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(overlay::Layer::Prompt { input, .. }) = app.overlays.top_mut() {
+                    input.clear();
+                }
+            }
+            KeyCode::Char(c)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                if let Some(overlay::Layer::Prompt { input, .. }) = app.overlays.top_mut() {
+                    input.push(c);
+                }
+            }
+            _ => {}
+        }
+        return false;
     }
     if matches!(app.overlays.top(), Some(overlay::Layer::Location { .. })) {
         match key.code {
@@ -1604,13 +2010,7 @@ fn overlay_key(app: &mut App, key: KeyEvent) -> bool {
                     app.selected = idx;
                 }
                 app.overlays.pop();
-                match pick {
-                    0 => app.open_selected(),
-                    1 => app.preview_selected(),
-                    2 => app.copy_selected(),
-                    3 => app.reveal_selected(),
-                    _ => {}
-                }
+                app.activate_menu(pick);
             }
             Some(overlay::Layer::Settings { selected }) => {
                 adjust_setting(app, selected, 1, true);
@@ -1857,6 +2257,50 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
                 };
                 return false;
             }
+            KeyCode::Delete if app.focus == Focus::Results => {
+                app.trash_selection();
+                return false;
+            }
+            KeyCode::Insert if app.focus == Focus::Results => {
+                app.mark_toggle();
+                return false;
+            }
+            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.mark_all_toggle();
+                return false;
+            }
+            KeyCode::F(2) => {
+                app.open_rename_prompt();
+                return false;
+            }
+            KeyCode::F(7) => {
+                app.open_mkdir_prompt();
+                return false;
+            }
+            KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.undo_last();
+                return false;
+            }
+            KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::ALT) => {
+                app.zebra = !app.zebra;
+                return false;
+            }
+            KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.tab_new();
+                return false;
+            }
+            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.tab_close();
+                return false;
+            }
+            KeyCode::Char(']') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.tab_step(1);
+                return false;
+            }
+            KeyCode::Char('[') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.tab_step(-1);
+                return false;
+            }
             KeyCode::Left | KeyCode::Right => {
                 app.focus = Focus::Results;
                 app.browser_pane = match app.browser_pane {
@@ -2028,11 +2472,47 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             app.mark_dirty();
         }
         KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.undo_last();
+        }
+        KeyCode::Char('z')
+            if key.modifiers.contains(KeyModifiers::ALT)
+                && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
             app.zebra = !app.zebra;
         }
         KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.tab_new();
+        }
+        KeyCode::Char('t')
+            if key.modifiers.contains(KeyModifiers::ALT)
+                && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
             app.class = next_class(app.class);
             app.mark_dirty();
+        }
+        KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.tab_close();
+        }
+        KeyCode::Char(']') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.tab_step(1);
+        }
+        KeyCode::Char('[') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.tab_step(-1);
+        }
+        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.mark_all_toggle();
+        }
+        KeyCode::Delete if app.focus == Focus::Results => {
+            app.trash_selection();
+        }
+        KeyCode::Insert if app.focus == Focus::Results => {
+            app.mark_toggle();
+        }
+        KeyCode::F(2) => {
+            app.open_rename_prompt();
+        }
+        KeyCode::F(7) => {
+            app.open_mkdir_prompt();
         }
         KeyCode::Backspace => {
             app.focus = Focus::Search;
@@ -2618,6 +3098,7 @@ fn draw_prompt(frame: &mut Frame, area: Rect, app: &App) {
 fn draw_list(frame: &mut Frame, area: Rect, app: &mut App) {
     let th = app.theme;
     let list = area;
+    draw_column_header(frame, area, th);
     let height = app.view_h;
     let start = app.scroll.min(app.rows.len());
     let end = (start + height).min(app.rows.len());
@@ -2626,14 +3107,15 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &mut App) {
     for (i, row) in app.rows.get(start..end).into_iter().flatten().enumerate() {
         let idx = start + i;
         let selected = idx == app.selected;
-        let hovered = app.hover == Some(idx) && !selected;
-        let zebra = app.zebra && idx % 2 == 1;
         lines.push(row_line(
             row,
-            selected,
-            hovered,
-            zebra,
-            app.focus == Focus::Results,
+            RowFlags {
+                selected,
+                hovered: app.hover == Some(idx) && !selected,
+                zebra: app.zebra && idx % 2 == 1,
+                focused: app.focus == Focus::Results,
+                marked: app.marked(&row.path),
+            },
             list.width,
             th,
         ));
@@ -2647,6 +3129,29 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &mut App) {
         height,
         th,
         app.scroll_hover || app.dragging_bar,
+    );
+}
+
+/// `NAME | MODIFIED | SIZE` label row on the line `prepare_list` reserved
+/// above the rows. Right-hand columns share the fixed widths of `row_line`.
+fn draw_column_header(frame: &mut Frame, area: Rect, th: Theme) {
+    let y = area.y.saturating_sub(1);
+    let left = "  NAME";
+    let right = format!("MODIFIED {:>SIZE_W$}", "SIZE");
+    let pad = (area.width as usize).saturating_sub(left.chars().count() + right.chars().count());
+    let line = Line::from(vec![
+        Span::styled(
+            format!("{left}{}", " ".repeat(pad)),
+            Style::new()
+                .fg(th.dim)
+                .bg(th.bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(right, Style::new().fg(th.dim).bg(th.bg)),
+    ]);
+    frame.render_widget(
+        Paragraph::new(line).style(Style::new().bg(th.bg)),
+        Rect::new(area.x, y, area.width, 1),
     );
 }
 
@@ -2838,32 +3343,37 @@ fn draw_tree(frame: &mut Frame, area: Rect, app: &mut App) {
             Span::styled(format!(" {item_title} "), Style::new().fg(th.dim).bg(th.bg)),
         ]));
     frame.render_widget(item_block.style(Style::new().bg(th.bg)), app.item_pane);
+    let marked = app.tabs.get(app.tab_idx).map(|tab| &tab.marked);
     draw_browser_rows(
         frame,
         app.folders_area,
-        &app.browser_folders,
-        (
-            app.folder_selected,
-            app.folder_scroll,
-            app.browser_hover
+        BrowserRows {
+            rows: &app.browser_folders,
+            selected: app.folder_selected,
+            scroll: app.folder_scroll,
+            hovered: app
+                .browser_hover
                 .and_then(|(pane, i)| (pane == BrowserPane::Folders).then_some(i)),
-        ),
-        false,
-        app.focus == Focus::Results && app.browser_pane == BrowserPane::Folders,
+            sizes: false,
+            focused: app.focus == Focus::Results && app.browser_pane == BrowserPane::Folders,
+            marked,
+        },
         th,
     );
     draw_browser_rows(
         frame,
         app.items_area,
-        &app.browser_items,
-        (
-            app.item_selected,
-            app.item_scroll,
-            app.browser_hover
+        BrowserRows {
+            rows: &app.browser_items,
+            selected: app.item_selected,
+            scroll: app.item_scroll,
+            hovered: app
+                .browser_hover
                 .and_then(|(pane, i)| (pane == BrowserPane::Items).then_some(i)),
-        ),
-        true,
-        app.focus == Focus::Results && app.browser_pane == BrowserPane::Items,
+            sizes: true,
+            focused: app.focus == Focus::Results && app.browser_pane == BrowserPane::Items,
+            marked,
+        },
         th,
     );
     draw_scroll(
@@ -2886,16 +3396,26 @@ fn draw_tree(frame: &mut Frame, area: Rect, app: &mut App) {
     );
 }
 
-fn draw_browser_rows(
-    frame: &mut Frame,
-    area: Rect,
-    rows: &[Row],
-    selection: (usize, usize, Option<usize>),
+struct BrowserRows<'a> {
+    rows: &'a [Row],
+    selected: usize,
+    scroll: usize,
+    hovered: Option<usize>,
     sizes: bool,
     focused: bool,
-    th: Theme,
-) {
-    let (selected, scroll, hovered) = selection;
+    marked: Option<&'a std::collections::HashSet<PathBuf>>,
+}
+
+fn draw_browser_rows(frame: &mut Frame, area: Rect, view: BrowserRows<'_>, th: Theme) {
+    let BrowserRows {
+        rows,
+        selected,
+        scroll,
+        hovered,
+        sizes,
+        focused,
+        marked,
+    } = view;
     let end = (scroll + area.height as usize).min(rows.len());
     let lines = rows
         .get(scroll..end)
@@ -2912,7 +3432,13 @@ fn draw_browser_rows(
                 th.bg
             };
             let icon = icon_for(&row.path, row.is_dir);
-            let marker = if active && focused { "▌" } else { " " };
+            let marker = if active && focused {
+                "▌"
+            } else if marked.is_some_and(|set| set.contains(&row.path)) {
+                "+"
+            } else {
+                " "
+            };
             let mut label = format!("{marker} {icon} {}", row.name);
             if sizes && !row.is_dir && area.width >= 24 {
                 let size = human_size(row.size);
@@ -3154,15 +3680,23 @@ fn draw_scroll(
     }
 }
 
-fn row_line(
-    row: &Row,
+#[derive(Clone, Copy)]
+struct RowFlags {
     selected: bool,
     hovered: bool,
     zebra: bool,
     focused: bool,
-    width: u16,
-    th: Theme,
-) -> Line<'static> {
+    marked: bool,
+}
+
+fn row_line(row: &Row, flags: RowFlags, width: u16, th: Theme) -> Line<'static> {
+    let RowFlags {
+        selected,
+        hovered,
+        zebra,
+        focused,
+        marked,
+    } = flags;
     let bg = if selected && focused {
         th.select_bg
     } else if selected || hovered {
@@ -3175,13 +3709,19 @@ fn row_line(
     let bar = Span::styled(
         if selected && focused {
             "▌ "
+        } else if marked {
+            "+ "
         } else if selected || hovered {
             "▎ "
         } else {
             "  "
         },
         Style::new()
-            .fg(if selected || hovered { th.accent } else { bg })
+            .fg(if selected || hovered || marked {
+                th.accent
+            } else {
+                bg
+            })
             .bg(bg),
     );
     let glyph = icon_for(&row.path, row.is_dir);
@@ -3194,13 +3734,19 @@ fn row_line(
     let mut spans = vec![bar, icon];
     spans.extend(highlight_chars(&row.name, &row.indices, bg, th));
     let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-    let size = if row.is_dir {
-        "folder".to_owned()
-    } else {
-        human_size(row.size)
-    };
+    // Fixed details columns: age (8) + gap (1) + size (10). Slack is absorbed
+    // before them so NAME | MODIFIED | SIZE line up on every row.
+    let size = format!(
+        "{:>SIZE_W$}",
+        if row.is_dir {
+            "folder".to_owned()
+        } else {
+            human_size(row.size)
+        }
+    );
+    let age = format!("{:>AGE_W$}", age_string(row.modified));
     let path = row.path.display().to_string();
-    let remain = (width as usize).saturating_sub(used + size.chars().count() + 3);
+    let remain = (width as usize).saturating_sub(used + AGE_W + 1 + SIZE_W + 2);
     let shown = if remain == 0 {
         String::new()
     } else if path.chars().count() + 1 > remain {
@@ -3212,12 +3758,14 @@ fn row_line(
     };
     let shown_cols = shown.chars().count();
     spans.push(Span::styled(shown, Style::new().fg(th.dim).bg(bg)));
-    let pad = (width as usize).saturating_sub(used + shown_cols + size.chars().count() + 1);
+    let pad = (width as usize).saturating_sub(used + shown_cols + AGE_W + 1 + SIZE_W);
     if pad > 0 {
         spans.push(Span::styled(" ".repeat(pad), Style::new().bg(bg)));
     }
+    spans.push(Span::styled(age, Style::new().fg(th.dim).bg(bg)));
+    spans.push(Span::styled(" ", Style::new().bg(bg)));
     spans.push(Span::styled(
-        format!(" {size}"),
+        size,
         Style::new()
             .fg(if selected { th.accent } else { th.dim })
             .bg(bg),
@@ -3259,6 +3807,11 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(8), Constraint::Length(sw)])
         .split(area);
+    let tab_label = app
+        .tabs
+        .get(app.tab_idx)
+        .map(|tab| format!("{}: {}/{}", tab.title, app.tab_idx + 1, app.tabs.len()))
+        .unwrap_or_else(|| "Tab".into());
     let mut chips = vec![
         Chip::new(
             match app.focus {
@@ -3268,9 +3821,19 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             th.bg,
             th.accent,
         ),
-        Chip::new("Tab Switch", th.text, th.surface),
+        Chip::new(tab_label, th.text, th.surface),
         Chip::new("↑↓ Navigate", th.text, th.surface),
     ];
+    if app.mark_count() > 0 {
+        chips.push(Chip::new(
+            format!("{} marked", app.mark_count()),
+            th.accent,
+            th.surface,
+        ));
+    }
+    if !app.undo.is_empty() {
+        chips.push(Chip::new("Ctrl+Z Undo", th.text, th.surface));
+    }
     if app.zoom.is_grid() {
         chips.push(Chip::new("− More", th.text, th.surface));
         chips.push(Chip::new("+ Bigger", th.text, th.surface));
@@ -3278,6 +3841,8 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     chips.extend([
         Chip::new("Enter Open", th.text, th.surface),
         Chip::new("Space Preview", th.text, th.surface),
+        Chip::new("Del Trash", th.text, th.surface),
+        Chip::new("F1 Help", th.text, th.surface),
         Chip::new("Mouse Drag", th.match_fg, th.select_bg),
         Chip::new("F4 Browse", th.text, th.surface),
         Chip::new("F8 Settings", th.text, th.surface),

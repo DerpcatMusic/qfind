@@ -66,14 +66,13 @@ pub(crate) fn prepare(app: &mut App, area: Rect) {
 
 fn prepare_list(app: &mut App, area: Rect) {
     let bar_width = u16::from(area.height as usize + 1 < app.rows.len() || app.rows.len() > 8) * 2;
-    app.hits_area = Rect::new(
-        area.x,
-        area.y,
-        area.width.saturating_sub(bar_width),
-        area.height,
-    );
+    // The top line belongs to the NAME | MODIFIED | SIZE header drawn by
+    // draw_list; rows, hit-testing, and scrolling all start below it.
+    let list_y = area.y.saturating_add(1).min(area.bottom());
+    let list_h = area.bottom().saturating_sub(list_y);
+    app.hits_area = Rect::new(area.x, list_y, area.width.saturating_sub(bar_width), list_h);
     app.scroll_bar = if bar_width > 0 {
-        Rect::new(area.right().saturating_sub(1), area.y, 1, area.height)
+        Rect::new(area.right().saturating_sub(1), list_y, 1, list_h)
     } else {
         Rect::default()
     };

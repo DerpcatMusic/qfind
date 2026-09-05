@@ -11,4 +11,4 @@ description = "Stable native bridge for Qfind desktop adapters"
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
-qfind-core.workspace = true
+qfind-core = { workspace = true, features = ["archives"] }
