@@ -4,12 +4,19 @@ on:
   push:
     tags: ['megaman-v*']
   workflow_dispatch:
+    inputs:
+      platform:
+        type: choice
+        default: all
+        options: [all, macos, windows]
+        description: Native platforms to build
 
 permissions:
   contents: read
 
 jobs:
   macos:
+    if: github.event_name == 'push' || inputs.platform != 'windows'
     strategy:
       fail-fast: false
       matrix:
@@ -34,6 +41,7 @@ jobs:
           if-no-files-found: error
 
   windows:
+    if: github.event_name == 'push' || inputs.platform != 'macos'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
