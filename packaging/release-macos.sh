@@ -1,13 +1,38 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-root="$(cd "$(dirname "$0")/.." && pwd)"
-version="${1:-$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -1)}"
-dist="$root/target/dist"
-work="$(mktemp -d)"
-keychain="$work/signing.keychain-db"
-keychain_password="$(uuidgen)"
+case "$(uname -s)" in
+  Darwin) ;;
+  *) echo "release-macos.sh must run on macOS" >&2; exit 1 ;;
+esac
 
+root="$(cd "$(dirname "$0")/.." && pwd)"
+version=""
+preview="${MEGAMAN_PREVIEW:-0}"
+for argument in "$@"; do
+  case "$argument" in
+    --preview) preview=1 ;;
+    -*) echo "unknown option: $argument" >&2; exit 2 ;;
+    *)
+      [[ -z "$version" ]] || { echo "version specified more than once" >&2; exit 2; }
+      version="$argument"
+      ;;
+  esac
+done
+version="${version:-$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -1)}"
+[[ "$version" =~ ^[0-9]+(\.[0-9]+){1,2}([.-][A-Za-z0-9.-]+)?$ ]] || {
+  echo "invalid release version: $version" >&2
+  exit 2
+}
+case "$preview" in
+  0|false|no) preview=0 ;;
+  1|true|yes) preview=1 ;;
+  *) echo "MEGAMAN_PREVIEW must be 0 or 1" >&2; exit 2 ;;
+esac
+dist="$root/target/dist"
+mkdir -p "$dist"
+
+missing_signing=()
 for name in \
   APPLE_APPLICATION_CERTIFICATE_P12_BASE64 \
   APPLE_INSTALLER_CERTIFICATE_P12_BASE64 \
@@ -17,8 +42,48 @@ for name in \
   APPLE_ID \
   APPLE_APP_SPECIFIC_PASSWORD \
   APPLE_TEAM_ID; do
-  [[ -n "${!name:-}" ]] || { echo "missing required environment variable: $name" >&2; exit 1; }
+  [[ -n "${!name:-}" ]] || missing_signing+=("$name")
 done
+
+if (( preview || ${#missing_signing[@]} )); then
+  if (( ${#missing_signing[@]} )); then
+    echo "signing secrets incomplete; creating an unsigned, non-notarized macOS test ZIP" >&2
+    printf 'missing: %s\n' "${missing_signing[*]}" >&2
+  else
+    echo "MEGAMAN_PREVIEW=1; creating an unsigned, non-notarized macOS test ZIP" >&2
+  fi
+  "$root/packaging/build-macos-app.sh"
+  app="$root/target/release/Qfind.app"
+  [[ -d "$app" ]] || { echo "native macOS app was not built: $app" >&2; exit 1; }
+  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" \
+    "$app/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $version" \
+    "$app/Contents/Info.plist" 2>/dev/null || \
+    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $version" \
+      "$app/Contents/Info.plist"
+  codesign --force --deep --sign - "$app"
+  codesign --verify --deep --strict "$app"
+  case "$(uname -m)" in
+    arm64|aarch64) architecture=arm64 ;;
+    x86_64|amd64) architecture=x86_64 ;;
+    *) echo "unsupported macOS architecture: $(uname -m)" >&2; exit 1 ;;
+  esac
+  while IFS= read -r -d '' binary; do
+    lipo "$binary" -verify_arch "$architecture"
+  done < <(find "$app/Contents" -type f \( -perm -111 -o -name '*.dylib' \) -print0)
+  label="qfind-${version}-macos-${architecture}"
+  (( preview )) && label+="-preview"
+  zip="$dist/${label}-unsigned.zip"
+  rm -f "$zip" "$zip.sha256"
+  ditto -c -k --sequesterRsrc --keepParent "$app" "$zip"
+  (cd "$dist" && shasum -a 256 "$(basename "$zip")" > "$(basename "$zip").sha256")
+  echo "$zip"
+  exit 0
+fi
+
+work="$(mktemp -d)"
+keychain="$work/signing.keychain-db"
+keychain_password="$(uuidgen)"
 
 cleanup() {
   security delete-keychain "$keychain" >/dev/null 2>&1 || true

@@ -16,12 +16,41 @@
     <AppxPackage>false</AppxPackage>
     <RustTarget Condition="'$(Platform)' == 'ARM64'">aarch64-pc-windows-msvc</RustTarget>
     <RustTarget Condition="'$(RustTarget)' == ''">x86_64-pc-windows-msvc</RustTarget>
+    <MegamanVcpkgRoot Condition="'$(VCPKG_ROOT)' != ''">$(VCPKG_ROOT)</MegamanVcpkgRoot>
+    <MegamanVcpkgRoot Condition="'$(MegamanVcpkgRoot)' == '' and '$(VcpkgRoot)' != ''">$(VcpkgRoot)</MegamanVcpkgRoot>
+    <MegamanVcpkgRoot Condition="'$(MegamanVcpkgRoot)' == '' and '$(VCPKG_INSTALLATION_ROOT)' != ''">$(VCPKG_INSTALLATION_ROOT)</MegamanVcpkgRoot>
+    <MegamanVcpkgTriplet Condition="'$(VCPKGRS_TRIPLET)' != ''">$(VCPKGRS_TRIPLET)</MegamanVcpkgTriplet>
+    <MegamanVcpkgTriplet Condition="'$(MegamanVcpkgTriplet)' == '' and '$(VCPKGRS_DYNAMIC)' != '' and '$(Platform)' == 'ARM64'">arm64-windows</MegamanVcpkgTriplet>
+    <MegamanVcpkgTriplet Condition="'$(MegamanVcpkgTriplet)' == '' and '$(VCPKGRS_DYNAMIC)' != ''">x64-windows</MegamanVcpkgTriplet>
+    <MegamanVcpkgTriplet Condition="'$(MegamanVcpkgTriplet)' == '' and '$(Platform)' == 'ARM64'">arm64-windows-static-md</MegamanVcpkgTriplet>
+    <MegamanVcpkgTriplet Condition="'$(MegamanVcpkgTriplet)' == ''">x64-windows-static-md</MegamanVcpkgTriplet>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.260804001" />
   </ItemGroup>
   <Target Name="BuildQfindCore" BeforeTargets="Build" Condition="'$(SkipRustNative)' != 'true'">
-    <Exec Command="cargo build --release -p qfind-native --target $(RustTarget)" WorkingDirectory="..\.." />
+    <Error Condition="'$(VCPKGRS_DYNAMIC)' != '' and '$(MegamanVcpkgRoot)' == ''" Text="VCPKGRS_DYNAMIC is enabled; set VCPKG_ROOT so Megaman can bundle libarchive runtime DLLs." />
+    <Error Condition="'$(MegamanVcpkgRoot)' != '' and !Exists('$(MegamanVcpkgRoot)\installed\$(MegamanVcpkgTriplet)\include\archive.h')" Text="libarchive is missing for vcpkg triplet $(MegamanVcpkgTriplet); install libarchive into $(MegamanVcpkgRoot)." />
+    <Error Condition="'$(MegamanVcpkgRoot)' != '' and !Exists('$(MegamanVcpkgRoot)\installed\$(MegamanVcpkgTriplet)\lib\archive.lib')" Text="libarchive archive.lib is missing for vcpkg triplet $(MegamanVcpkgTriplet); install libarchive into $(MegamanVcpkgRoot)." />
+    <Error Condition="'$(VCPKGRS_DYNAMIC)' != '' and '$(MegamanVcpkgRoot)' != '' and !Exists('$(MegamanVcpkgRoot)\installed\$(MegamanVcpkgTriplet)\bin\archive.dll')" Text="libarchive archive.dll is missing for the dynamic vcpkg triplet $(MegamanVcpkgTriplet)." />
+    <Exec Condition="'$(MegamanVcpkgRoot)' != ''" Command="set &quot;VCPKG_ROOT=$(MegamanVcpkgRoot)&quot; &amp;&amp; set &quot;VCPKGRS_TRIPLET=$(MegamanVcpkgTriplet)&quot; &amp;&amp; cargo build --release -p qfind-native --target $(RustTarget)" WorkingDirectory="..\.." />
+    <Exec Condition="'$(MegamanVcpkgRoot)' == ''" Command="cargo build --release -p qfind-native --target $(RustTarget)" WorkingDirectory="..\.." />
+    <Error Condition="!Exists('..\..\target\$(RustTarget)\release\qfind_native.dll')" Text="Rust native build completed without producing qfind_native.dll for target $(RustTarget)." />
     <Copy SourceFiles="..\..\target\$(RustTarget)\release\qfind_native.dll" DestinationFolder="$(OutDir)" />
+  </Target>
+  <Target Name="BundleLibarchiveRuntime" AfterTargets="BuildQfindCore" Condition="'$(VCPKGRS_DYNAMIC)' != '' and '$(MegamanVcpkgRoot)' != ''">
+    <ItemGroup>
+      <MegamanLibarchiveRuntime Include="$(MegamanVcpkgRoot)\installed\$(MegamanVcpkgTriplet)\bin\*.dll" />
+    </ItemGroup>
+    <Copy SourceFiles="@(MegamanLibarchiveRuntime)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
+  <Target Name="PackageNativeBridge" AfterTargets="Publish" Condition="'$(SkipRustNative)' != 'true'">
+    <Error Condition="!Exists('..\..\target\$(RustTarget)\release\qfind_native.dll')" Text="Rust native build completed without producing qfind_native.dll for target $(RustTarget)." />
+    <MakeDir Directories="$(PublishDir)" />
+    <Copy SourceFiles="..\..\target\$(RustTarget)\release\qfind_native.dll" DestinationFolder="$(PublishDir)" />
+    <ItemGroup Condition="'$(VCPKGRS_DYNAMIC)' != '' and '$(MegamanVcpkgRoot)' != ''">
+      <MegamanPublishedLibarchiveRuntime Include="$(MegamanVcpkgRoot)\installed\$(MegamanVcpkgTriplet)\bin\*.dll" />
+    </ItemGroup>
+    <Copy SourceFiles="@(MegamanPublishedLibarchiveRuntime)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" Condition="'$(VCPKGRS_DYNAMIC)' != '' and '$(MegamanVcpkgRoot)' != ''" />
   </Target>
 </Project>
