@@ -1225,8 +1225,10 @@ private final class ProjectWindowStore {
         window.isReleasedWhenClosed = false
         windows.append(window)
         NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self, weak window] _ in
-            guard let window else { return }
-            self?.windows.removeAll { $0 === window }
+            Task { @MainActor [weak self, weak window] in
+                guard let window else { return }
+                self?.windows.removeAll { $0 === window }
+            }
         }
         window.makeKeyAndOrderFront(nil)
     }
@@ -2222,54 +2224,63 @@ private struct StatusBar: View {
 
 // MARK: - Content
 
-private struct ContentView: View {
-    @StateObject private var browser: Browser
-
-    init(browser: Browser) { _browser = StateObject(wrappedValue: browser) }
+private struct WorkspaceView: View {
+    @ObservedObject var browser: Browser
 
     var body: some View {
-        NavigationSplitView {
-            Sidebar(browser: browser)
-        } detail: {
-            Group {
-                if browser.workspace == .projects {
-                    ProjectsWorkspace(browser: browser)
-                } else {
-                    VStack(spacing: 0) {
-                        if browser.showPathBar { PathBar(browser: browser).padding(.top, 6) }
-                        HSplitView {
-                            Group {
-                                switch browser.viewMode {
-                                case .icon: IconSurface(browser: browser)
-                                case .list: ListSurface(browser: browser)
-                                case .columns: ColumnsSurface(browser: browser)
-                                case .gallery: GallerySurface(browser: browser)
-                                }
-                            }
-                            .frame(minWidth: 420)
-                            .overlay {
-                                if browser.sortedRows.isEmpty {
-                                    ContentUnavailableView.search(text: browser.query.isEmpty ? "Empty folder" : browser.query)
-                                }
-                            }
-                            if browser.showBatch {
-                                BatchPanel(browser: browser)
-                                    .frame(minWidth: 320, idealWidth: 380)
-                            } else if browser.showArchive {
-                                ArchivePanel(browser: browser)
-                                    .frame(minWidth: 320, idealWidth: 380)
-                            } else if browser.showInspector || browser.showChart {
-                                Inspector(browser: browser)
-                                    .frame(minWidth: 280, idealWidth: 340)
-                            }
-                        }
-                        if browser.showStatusBar {
-                            Divider()
-                            StatusBar(browser: browser)
-                        }
+        if browser.workspace == .projects {
+            ProjectsWorkspace(browser: browser)
+        } else {
+            StorageWorkspace(browser: browser)
+        }
+    }
+}
+
+private struct StorageWorkspace: View {
+    @ObservedObject var browser: Browser
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if browser.showPathBar { PathBar(browser: browser).padding(.top, 6) }
+            HSplitView {
+                Group {
+                    switch browser.viewMode {
+                    case .icon: IconSurface(browser: browser)
+                    case .list: ListSurface(browser: browser)
+                    case .columns: ColumnsSurface(browser: browser)
+                    case .gallery: GallerySurface(browser: browser)
                     }
                 }
+                .frame(minWidth: 420)
+                .overlay {
+                    if browser.sortedRows.isEmpty {
+                        ContentUnavailableView.search(text: browser.query.isEmpty ? "Empty folder" : browser.query)
+                    }
+                }
+                if browser.showBatch {
+                    BatchPanel(browser: browser)
+                        .frame(minWidth: 320, idealWidth: 380)
+                } else if browser.showArchive {
+                    ArchivePanel(browser: browser)
+                        .frame(minWidth: 320, idealWidth: 380)
+                } else if browser.showInspector || browser.showChart {
+                    Inspector(browser: browser)
+                        .frame(minWidth: 280, idealWidth: 340)
+                }
             }
+            if browser.showStatusBar {
+                Divider()
+                StatusBar(browser: browser)
+            }
+        }
+    }
+}
+
+private struct BrowserDetailView: View {
+    @ObservedObject var browser: Browser
+
+    var body: some View {
+        WorkspaceView(browser: browser)
             .navigationTitle(browser.workspace == .projects ? "Projects" : URL(fileURLWithPath: browser.directory).lastPathComponent)
             .searchable(text: $browser.query, placement: .toolbar, prompt: browser.globalSearch ? "Megaman search across indexed folders" : browser.recursive ? "Megaman search below this folder" : "Find in this folder")
             .onSubmit(of: .search) { browser.refreshNow() }
@@ -2300,64 +2311,83 @@ private struct ContentView: View {
             } message: {
                 Text(browser.operationError ?? "The operation failed.")
             }
-            .toolbar {
-                ToolbarItemGroup {
-                    Button(action: browser.back) { Image(systemName: "chevron.left") }.help("Back")
-                    Button(action: browser.forward) { Image(systemName: "chevron.right") }.help("Forward")
-                    Button(action: browser.goParent) { Image(systemName: "chevron.up") }.help("Parent folder")
-                    Picker("Mode", selection: $browser.recursive) {
-                        Text("Classic").tag(false); Text("Qfind").tag(true)
-                    }.pickerStyle(.segmented).help("Classic lists this folder; Megaman searches below it")
-                    Picker("View", selection: $browser.viewMode) {
-                        ForEach(ViewMode.allCases) { mode in
-                            Image(systemName: mode.symbol).tag(mode).help(mode.title)
-                        }
-                    }.pickerStyle(.segmented)
+            .toolbar { BrowserToolbar(browser: browser) }
+    }
+}
+
+private struct BrowserToolbar: ToolbarContent {
+    @ObservedObject var browser: Browser
+
+    var body: some ToolbarContent {
+        ToolbarItemGroup {
+            Button(action: browser.back) { Image(systemName: "chevron.left") }.help("Back")
+            Button(action: browser.forward) { Image(systemName: "chevron.right") }.help("Forward")
+            Button(action: browser.goParent) { Image(systemName: "chevron.up") }.help("Parent folder")
+            Picker("Mode", selection: $browser.recursive) {
+                Text("Classic").tag(false); Text("Qfind").tag(true)
+            }.pickerStyle(.segmented).help("Classic lists this folder; Megaman searches below it")
+            Picker("View", selection: $browser.viewMode) {
+                ForEach(ViewMode.allCases) { mode in
+                    Image(systemName: mode.symbol).tag(mode).help(mode.title)
+                }
+            }.pickerStyle(.segmented)
+            Menu {
+                Toggle("Search all indexed folders", isOn: $browser.globalSearch)
+                    .keyboardShortcut("g", modifiers: [.command])
+                Divider()
+                Picker("Sort", selection: $browser.sortKey) {
+                    ForEach(SortKey.allCases) { key in Text(key.title).tag(key) }
+                }
+                Toggle("Ascending", isOn: $browser.ascending)
+                Toggle("Folders first", isOn: $browser.foldersFirst)
+                Divider()
+                Toggle("Kind column", isOn: $browser.showKindColumn)
+                Toggle("Modified column", isOn: $browser.showModifiedColumn)
+                Toggle("Size column", isOn: $browser.showSizeColumn)
+                Divider()
+                Text("Column widths")
+                Slider(value: $browser.nameColumnWidth, in: 140...520) { Text("Name") }
+                Slider(value: $browser.kindColumnWidth, in: 80...260) { Text("Kind") }
+                Slider(value: $browser.modifiedColumnWidth, in: 100...260) { Text("Modified") }
+                Slider(value: $browser.sizeColumnWidth, in: 72...220) { Text("Size") }
+            } label: { Image(systemName: "arrow.up.arrow.down") }.help("Sort")
+            if browser.viewMode == .icon {
+                Slider(value: $browser.density, in: 88...220).frame(width: 110).help("Icon size")
+            }
+            Button(action: browser.newFolder) { Image(systemName: "folder.badge.plus") }.help("New folder")
+            Button { browser.showBatch.toggle(); browser.showArchive = false } label: { Image(systemName: "rectangle.3.group") }.help("Batch actions")
+            Button { browser.showChart.toggle() }
+                label: { Image(systemName: browser.showChart ? "doc.richtext" : "chart.pie") }
+                .help("WeightMap")
+            Button { browser.showInspector.toggle() }
+                label: { Image(systemName: "sidebar.right") }
+                .help("Preview inspector")
+            ForEach(browser.components) { component in
+                if !component.commands.isEmpty {
                     Menu {
-                        Toggle("Search all indexed folders", isOn: $browser.globalSearch)
-                            .keyboardShortcut("g", modifiers: [.command])
-                        Divider()
-                        Picker("Sort", selection: $browser.sortKey) {
-                            ForEach(SortKey.allCases) { key in Text(key.title).tag(key) }
+                        ForEach(component.commands) { command in
+                            Button(command.title) { browser.runComponent(component, command: command) }
                         }
-                        Toggle("Ascending", isOn: $browser.ascending)
-                        Toggle("Folders first", isOn: $browser.foldersFirst)
-                        Divider()
-                        Toggle("Kind column", isOn: $browser.showKindColumn)
-                        Toggle("Modified column", isOn: $browser.showModifiedColumn)
-                        Toggle("Size column", isOn: $browser.showSizeColumn)
-                        Divider()
-                        Text("Column widths")
-                        Slider(value: $browser.nameColumnWidth, in: 140...520) { Text("Name") }
-                        Slider(value: $browser.kindColumnWidth, in: 80...260) { Text("Kind") }
-                        Slider(value: $browser.modifiedColumnWidth, in: 100...260) { Text("Modified") }
-                        Slider(value: $browser.sizeColumnWidth, in: 72...220) { Text("Size") }
-                    } label: { Image(systemName: "arrow.up.arrow.down") }.help("Sort")
-                    if browser.viewMode == .icon {
-                        Slider(value: $browser.density, in: 88...220).frame(width: 110).help("Icon size")
-                    }
-                    Button(action: browser.newFolder) { Image(systemName: "folder.badge.plus") }.help("New folder")
-                    Button { browser.showBatch.toggle(); browser.showArchive = false } label: { Image(systemName: "rectangle.3.group") }.help("Batch actions")
-                    Button { browser.showChart.toggle() }
-                        label: { Image(systemName: browser.showChart ? "doc.richtext" : "chart.pie") }
-                        .help("WeightMap")
-                    Button { browser.showInspector.toggle() }
-                        label: { Image(systemName: "sidebar.right") }
-                        .help("Preview inspector")
-                    ForEach(browser.components) { component in
-                        if !component.commands.isEmpty {
-                            Menu {
-                                ForEach(component.commands) { command in
-                                    Button(command.title) { browser.runComponent(component, command: command) }
-                                }
-                            } label: {
-                                Image(systemName: nativeSymbol(component.icon))
-                            }.help(component.title)
-                        }
-                    }
-                    Button(action: browser.refreshNow) { Image(systemName: "arrow.clockwise") }.help("Refresh")
+                    } label: {
+                        Image(systemName: nativeSymbol(component.icon))
+                    }.help(component.title)
                 }
             }
+            Button(action: browser.refreshNow) { Image(systemName: "arrow.clockwise") }.help("Refresh")
+        }
+    }
+}
+
+private struct ContentView: View {
+    @StateObject private var browser: Browser
+
+    init(browser: Browser) { _browser = StateObject(wrappedValue: browser) }
+
+    var body: some View {
+        NavigationSplitView {
+            Sidebar(browser: browser)
+        } detail: {
+            BrowserDetailView(browser: browser)
         }
     }
 }
