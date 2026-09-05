@@ -2279,30 +2279,42 @@ private struct StorageWorkspace: View {
 private struct BrowserDetailView: View {
     @ObservedObject var browser: Browser
 
-    var body: some View {
+    private var searchPrompt: String {
+        if browser.globalSearch { return "Megaman search across indexed folders" }
+        return browser.recursive ? "Megaman search below this folder" : "Find in this folder"
+    }
+
+    private var searchableWorkspace: some View {
         WorkspaceView(browser: browser)
             .navigationTitle(browser.workspace == .projects ? "Projects" : URL(fileURLWithPath: browser.directory).lastPathComponent)
-            .searchable(text: $browser.query, placement: .toolbar, prompt: browser.globalSearch ? "Megaman search across indexed folders" : browser.recursive ? "Megaman search below this folder" : "Find in this folder")
+            .searchable(text: $browser.query, placement: .toolbar, prompt: searchPrompt)
             .onSubmit(of: .search) { browser.refreshNow() }
-            .onChange(of: browser.query) { _ in browser.refresh() }
-            .onChange(of: browser.recursive) { _ in browser.refreshNow() }
-            .onChange(of: browser.globalSearch) { enabled in browser.setGlobalSearch(enabled) }
-            .onChange(of: browser.sortKey) { _ in browser.applySort() }
-            .onChange(of: browser.ascending) { _ in browser.applySort() }
-            .onChange(of: browser.showKindColumn) { _ in browser.saveColumnLayout() }
-            .onChange(of: browser.showModifiedColumn) { _ in browser.saveColumnLayout() }
-            .onChange(of: browser.showSizeColumn) { _ in browser.saveColumnLayout() }
-            .onChange(of: browser.nameColumnWidth) { _ in browser.saveColumnLayout() }
-            .onChange(of: browser.kindColumnWidth) { _ in browser.saveColumnLayout() }
-            .onChange(of: browser.modifiedColumnWidth) { _ in browser.saveColumnLayout() }
-            .onChange(of: browser.sizeColumnWidth) { _ in browser.saveColumnLayout() }
-            .onChange(of: browser.viewMode) { _ in browser.refreshNow() }
-            .onChange(of: browser.workspace) { workspace in
+            .onChange(of: browser.query) { _, _ in browser.refresh() }
+            .onChange(of: browser.recursive) { _, _ in browser.refreshNow() }
+            .onChange(of: browser.globalSearch) { _, enabled in browser.setGlobalSearch(enabled) }
+    }
+
+    private var configuredWorkspace: some View {
+        searchableWorkspace
+            .onChange(of: browser.sortKey) { _, _ in browser.applySort() }
+            .onChange(of: browser.ascending) { _, _ in browser.applySort() }
+            .onChange(of: [browser.showKindColumn, browser.showModifiedColumn, browser.showSizeColumn]) { _, _ in browser.saveColumnLayout() }
+            .onChange(of: [browser.nameColumnWidth, browser.kindColumnWidth, browser.modifiedColumnWidth, browser.sizeColumnWidth]) { _, _ in browser.saveColumnLayout() }
+    }
+
+    private var observedWorkspace: some View {
+        configuredWorkspace
+            .onChange(of: browser.viewMode) { _, _ in browser.refreshNow() }
+            .onChange(of: browser.workspace) { _, workspace in
                 if workspace == .projects { browser.refreshProjects() }
             }
-            .onChange(of: browser.showChart) { visible in
+            .onChange(of: browser.showChart) { _, visible in
                 if visible { browser.refreshChart(); browser.refreshStorageComponent() }
             }
+    }
+
+    var body: some View {
+        observedWorkspace
             .alert("Megaman", isPresented: Binding(
                 get: { browser.operationError != nil },
                 set: { if !$0 { browser.operationError = nil } }
