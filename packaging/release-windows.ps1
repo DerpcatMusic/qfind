@@ -13,6 +13,8 @@ $Rid = if ($Arch -eq "arm64") { "win-arm64" } else { "win-x64" }
 $Name = "qfind-$Version-windows-$Arch"
 $Stage = "$Root\target\dist\$Name"
 
+$Dynamic = $false
+if (-not $env:MEGAMAN_PUBLISHED_ZIP) {
 $VcpkgRoot = $env:VCPKG_ROOT
 if ([string]::IsNullOrWhiteSpace($VcpkgRoot)) { $VcpkgRoot = $env:VCPKG_INSTALLATION_ROOT }
 if ([string]::IsNullOrWhiteSpace($VcpkgRoot)) { $VcpkgRoot = "C:\vcpkg" }
@@ -56,6 +58,8 @@ if ($Dynamic -and -not (Test-Path (Join-Path $VcpkgTripletRoot "bin\archive.dll"
     throw "libarchive archive.dll is missing for dynamic vcpkg triplet $Triplet."
 }
 
+}
+
 $VsWhereCommand = Get-Command vswhere.exe -ErrorAction SilentlyContinue
 $VsWhere = if ($null -ne $VsWhereCommand) { $VsWhereCommand.Source } else { Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe" }
 if (-not (Test-Path $VsWhere)) {
@@ -71,22 +75,21 @@ $VsRedistRoot = Join-Path $VsInstallPath "VC\Redist\MSVC"
 if (-not (Test-Path $VsRedistRoot)) {
     throw "Visual Studio MSVC redist directory was not found: $VsRedistRoot"
 }
-$LatestRedist = Join-Path $VsRedistRoot "latest"
-if (-not (Test-Path $LatestRedist)) {
-    $LatestRedist = Get-ChildItem $VsRedistRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1 -ExpandProperty FullName
-}
 $CrtArch = if ($Arch -eq "arm64") { "arm64" } else { "x64" }
-$CrtRoot = Join-Path $LatestRedist $CrtArch
-$CrtPackages = @(Get-ChildItem $CrtRoot -Directory -Filter "Microsoft.VC*.CRT")
-$CrtDlls = @($CrtPackages | ForEach-Object { Get-ChildItem $_.FullName -File -Filter "*.dll" })
-if ($CrtDlls.Count -eq 0 -or -not ($CrtDlls.Name -contains "vcruntime140.dll")) {
-    throw "MSVC runtime DLLs were not found under $CrtRoot; expected Microsoft.VC*.CRT\vcruntime140.dll."
-}
+$CrtRuntime = Get-ChildItem $VsRedistRoot -Recurse -File -Filter "vcruntime140.dll" |
+    Where-Object { $_.DirectoryName -match "[\\/]$CrtArch[\\/]Microsoft\.VC[^\\/]+\.CRT$" } |
+    Sort-Object FullName -Descending | Select-Object -First 1
+if ($null -eq $CrtRuntime) { throw "MSVC $CrtArch runtime was not found under $VsRedistRoot." }
+$CrtDlls = @(Get-ChildItem $CrtRuntime.DirectoryName -File -Filter "*.dll")
 
 Remove-Item $Stage -Recurse -Force -ErrorAction SilentlyContinue
 New-Item $Stage -ItemType Directory -Force | Out-Null
+if ($env:MEGAMAN_PUBLISHED_ZIP) {
+    Expand-Archive -LiteralPath $env:MEGAMAN_PUBLISHED_ZIP -DestinationPath "$Root\target\dist" -Force
+} else {
 dotnet publish "$Root\apps\windows\Qfind.Windows.csproj" -c Release -r $Rid --self-contained true -p:Platform=$Platform -o $Stage
 if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed (exit code $LASTEXITCODE)." }
+}
 if (-not (Test-Path (Join-Path $Stage "qfind_native.dll"))) {
     throw "The published app is missing qfind_native.dll; the Rust native bridge was not packaged."
 }

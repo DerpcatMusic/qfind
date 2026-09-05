@@ -10,9 +10,14 @@ on:
         default: all
         options: [all, macos, windows]
         description: Native platforms to build
+      windows_run:
+        type: string
+        default: ''
+        description: Optional successful Windows run to repackage without rebuilding
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   macos:
@@ -47,9 +52,26 @@ jobs:
       - uses: actions/checkout@v6
       - name: Use current stable Rust
         run: rustup update stable --no-self-update
+      - name: Download existing Windows build
+        if: inputs.windows_run != ''
+        uses: actions/download-artifact@v5
+        with:
+          name: megaman-windows-x64
+          path: target/prebuilt
+          run-id: ${{ inputs.windows_run }}
+          github-token: ${{ github.token }}
       - name: Build native test app
         shell: pwsh
-        run: ./packaging/release-windows.ps1
+        env:
+          MEGAMAN_REUSE_WINDOWS_RUN: ${{ inputs.windows_run }}
+        run: |
+          if ($env:MEGAMAN_REUSE_WINDOWS_RUN) {
+            $archive = Get-ChildItem target/prebuilt -Filter '*.zip' | Select-Object -First 1
+            $expected = (Get-Content "$($archive.FullName).sha256").Split(' ')[0]
+            if ((Get-FileHash $archive.FullName -Algorithm SHA256).Hash -ne $expected) { throw 'Downloaded archive checksum mismatch' }
+            $env:MEGAMAN_PUBLISHED_ZIP = $archive.FullName
+          }
+          ./packaging/release-windows.ps1
       - uses: actions/upload-artifact@v4
         with:
           name: megaman-windows-x64
