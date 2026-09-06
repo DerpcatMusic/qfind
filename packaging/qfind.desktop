@@ -2,9 +2,11 @@
 Type=Application
 Name=Megaman
 Comment=Files, storage, and projects
-Exec=qfind-gtk
+Exec=qfind-gtk %f
 Icon=megaman
 Terminal=false
 Categories=Utility;Filesystem;
 Keywords=megaman;qfind;search;files;projects;storage;
 StartupWMClass=org.qfind.Qfind
+MimeType=inode/directory;application/zip;application/x-tar;application/x-compressed-tar;application/gzip;application/x-gzip;application/x-bzip;application/x-bzip2;application/x-bzip-compressed-tar;application/x-xz;application/x-xz-compressed-tar;application/zstd;application/x-zstd;application/x-zstd-compressed-tar;application/x-7z-compressed;application/vnd.rar;application/x-rar;application/x-rar-compressed;
+StartupNotify=true

@@ -82,7 +82,7 @@ const MAX_UNDO: usize = 32;
 
 fn main() -> glib::ExitCode {
     glib::set_application_name("Megaman");
-    if let Some(root) = parse_here() {
+    if let Some(root) = initial_root() {
         let _ = QFIND_ROOT.set(root.canonicalize().unwrap_or(root));
     }
     let protected = QFIND_ROOT.get().cloned();
@@ -96,6 +96,15 @@ fn main() -> glib::ExitCode {
         .next()
         .unwrap_or_else(|| "qfind-gtk".into())];
     app.run_with_args(&argv)
+}
+
+fn initial_root() -> Option<PathBuf> {
+    let path = parse_here()?;
+    if path.is_file() && archive::is_archive(&path) {
+        archive::unpack(&path).ok()
+    } else {
+        Some(path)
+    }
 }
 
 fn activate_path(window: &gtk::ApplicationWindow, navigate: &Navigator, path: String) {
@@ -132,6 +141,9 @@ fn parse_here() -> Option<PathBuf> {
             if !p.is_empty() {
                 return Some(PathBuf::from(p));
             }
+        }
+        if !a.starts_with('-') {
+            return Some(PathBuf::from(a));
         }
     }
     std::env::var("QFIND_ROOT")
