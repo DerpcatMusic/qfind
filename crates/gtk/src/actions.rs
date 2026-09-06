@@ -1,7 +1,6 @@
 //! Open / reveal / preview / clipboard — file-manager conventions.
 //!
-//! Reveal uses GTK FileLauncher (FileManager1.ShowItems under the hood) and
-//! falls back to opening the parent folder. Preview tries GNOME Sushi
+//! Reveal opens Megaman's own browser at the containing folder. Preview tries GNOME Sushi
 //! (`org.gnome.NautilusPreviewer2.ShowFile`, then `sushi`), then a small
 //! built-in window.
 
@@ -167,7 +166,7 @@ pub fn open_with(window: &impl IsA<gtk::Window>, path: &str) {
 /// Highlight the Hit in the default file manager (Nautilus, Dolphin, Thunar, …).
 pub fn reveal(window: &impl IsA<gtk::Window>, path: &str) {
     let file = gio::File::for_path(path);
-    if show_items_dbus(&file) {
+    if open_megaman(&file, false) {
         return;
     }
     let launcher = gtk::FileLauncher::new(Some(&file));
@@ -193,7 +192,7 @@ pub fn open_folder(window: &impl IsA<gtk::Window>, path: &str, is_dir: bool) {
             .to_path_buf()
     };
     let file = gio::File::for_path(&target);
-    if show_folders_dbus(&file) {
+    if open_megaman(&file, true) {
         return;
     }
     let launcher = gtk::FileLauncher::new(Some(&file));
@@ -261,32 +260,16 @@ fn dbus_show_file(uri: &str) -> bool {
     .is_ok()
 }
 
-fn show_items_dbus(file: &gio::File) -> bool {
-    file_manager1("ShowItems", file)
-}
-
-fn show_folders_dbus(file: &gio::File) -> bool {
-    file_manager1("ShowFolders", file)
-}
-
-fn file_manager1(method: &str, file: &gio::File) -> bool {
-    let Ok(conn) = gio::bus_get_sync(gio::BusType::Session, None::<&gio::Cancellable>) else {
+fn open_megaman(file: &gio::File, directory: bool) -> bool {
+    let Some(path) = file.path() else {
         return false;
     };
-    let uri = file.uri();
-    let args = (vec![uri.as_str()], "").to_variant();
-    conn.call_sync(
-        Some("org.freedesktop.FileManager1"),
-        "/org/freedesktop/FileManager1",
-        "org.freedesktop.FileManager1",
-        method,
-        Some(&args),
-        None,
-        gio::DBusCallFlags::NONE,
-        1200,
-        None::<&gio::Cancellable>,
-    )
-    .is_ok()
+    let target = if directory {
+        path
+    } else {
+        path.parent().unwrap_or_else(|| Path::new("/")).to_path_buf()
+    };
+    Command::new("qfind-gtk").arg(target).spawn().is_ok()
 }
 
 fn builtin_preview(parent: &gtk::Window, path: &str) -> gtk::Window {
