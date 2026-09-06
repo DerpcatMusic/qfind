@@ -8,7 +8,12 @@ stage="$root/target/dist/qfind-${ver}-${arch}"
 rm -rf "$stage"
 mkdir -p "$stage"
 
-cargo build --release --manifest-path "$root/Cargo.toml" -p qfind -p qfind-tui -p qfind-gtk -p qfind-native
+cargo build --release --manifest-path "$root/Cargo.toml" -p qfind -p qfind-tui -p qfind-native
+if [ "$(uname -s)" = Linux ]; then
+  cargo build --release --manifest-path "$root/Cargo.toml" -p qfind-gtk --features portal
+else
+  cargo build --release --manifest-path "$root/Cargo.toml" -p qfind-gtk
+fi
 native_library="$root/target/release/libqfind_native.so"
 if [ "$(uname -s)" = Darwin ]; then
   native_library="$root/target/release/libqfind_native.dylib"
@@ -17,6 +22,12 @@ install -Dm755 "$root/target/release/qfind" "$stage/qfind"
 install -Dm755 "$root/target/release/qfind-tui" "$stage/qfind-tui"
 install -Dm755 "$root/target/release/qfind-gtk" "$stage/qfind-gtk"
 install -Dm644 "$root/packaging/qfind.desktop" "$stage/qfind.desktop"
+if [ "$(uname -s)" = Linux ]; then
+  install -Dm755 "$root/target/release/qfind-portal" "$stage/qfind-portal"
+  install -Dm644 "$root/packaging/qfind.portal" "$stage/qfind.portal"
+  install -Dm644 "$root/packaging/org.freedesktop.impl.portal.desktop.qfind.service" \
+    "$stage/org.freedesktop.impl.portal.desktop.qfind.service"
+fi
 install -Dm644 "$root/assets/megaman.svg" "$stage/megaman.svg"
 install -Dm644 "$root/packaging/nautilus/qfind.py" "$stage/qfind.py"
 install -Dm644 "$root/LICENSE" "$stage/LICENSE"

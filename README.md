@@ -88,6 +88,8 @@ cd qfind
 
 This installs `qfind` and `qfind-tui` in `~/.local/bin`. If GTK4 is available through `pkg-config`, it also installs `qfind-gtk`, the desktop launcher, and the Nautilus plugin. If Qt6 is available, it builds `qfind-qt` with Breeze styling.
 
+The GTK install also provides `qfind-portal`, a Linux `xdg-desktop-portal` FileChooser backend for open, save, folder, and multi-file requests. Select it in `~/.config/xdg-desktop-portal/portals.conf` with `org.freedesktop.impl.portal.FileChooser=qfind;gtk`.
+
 For CLI and TUI only:
 
 ```bash

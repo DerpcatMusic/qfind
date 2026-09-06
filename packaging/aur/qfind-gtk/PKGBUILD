@@ -27,13 +27,18 @@ build() {
   cd "qfind-$pkgver"
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
-  cargo build --frozen --release -p qfind-gtk
+  cargo build --frozen --release -p qfind-gtk --features portal
 }
 
 package() {
   cd "qfind-$pkgver"
   install -Dm755 target/release/qfind-gtk -t "$pkgdir/usr/bin"
+  install -Dm755 target/release/qfind-portal -t "$pkgdir/usr/bin"
   install -Dm644 packaging/qfind.desktop "$pkgdir/usr/share/applications/qfind.desktop"
+  install -Dm644 packaging/qfind.portal \
+    "$pkgdir/usr/share/xdg-desktop-portal/portals/qfind.portal"
+  install -Dm644 packaging/org.freedesktop.impl.portal.desktop.qfind.service \
+    "$pkgdir/usr/share/dbus-1/services/org.freedesktop.impl.portal.desktop.qfind.service"
   install -Dm644 packaging/nautilus/qfind.py \
     "$pkgdir/usr/share/nautilus-python/extensions/qfind.py"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"

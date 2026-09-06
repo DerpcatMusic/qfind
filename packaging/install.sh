@@ -12,12 +12,26 @@ install -Dm755 "$root/target/release/qfind" "$prefix/bin/qfind"
 install -Dm755 "$root/target/release/qfind" "$prefix/bin/qfind-cli"
 install -Dm755 "$root/target/release/qfind-tui" "$prefix/bin/qfind-tui"
 if command -v pkg-config >/dev/null && pkg-config --exists gtk4; then
-  cargo build --release --manifest-path "$root/Cargo.toml" -p qfind-gtk
+  if [ "$(uname -s)" = Linux ]; then
+    cargo build --release --manifest-path "$root/Cargo.toml" -p qfind-gtk --features portal
+  else
+    cargo build --release --manifest-path "$root/Cargo.toml" -p qfind-gtk
+  fi
   install -Dm755 "$root/target/release/qfind-gtk" "$prefix/bin/qfind-gtk"
   install -Dm644 "$root/packaging/qfind.desktop" "$prefix/share/applications/qfind.desktop"
+  if [ "$(uname -s)" = Linux ]; then
+    install -Dm755 "$root/target/release/qfind-portal" "$prefix/bin/qfind-portal"
+    install -Dm644 "$root/packaging/qfind.portal" \
+      "$prefix/share/xdg-desktop-portal/portals/qfind.portal"
+    sed "s|^Exec=qfind-portal$|Exec=$prefix/bin/qfind-portal|" \
+      "$root/packaging/org.freedesktop.impl.portal.desktop.qfind.service" \
+      | install -Dm644 /dev/stdin \
+        "$prefix/share/dbus-1/services/org.freedesktop.impl.portal.desktop.qfind.service"
+  fi
   install -Dm644 "$root/packaging/nautilus/qfind.py" \
     "$HOME/.local/share/nautilus-python/extensions/qfind.py"
   echo "installed $prefix/bin/qfind-gtk"
+  [ "$(uname -s)" = Linux ] && echo "installed $prefix/bin/qfind-portal (FileChooser backend)"
   echo "launcher: $prefix/share/applications/qfind.desktop"
   echo "Nautilus: ~/.local/share/nautilus-python/extensions/qfind.py  (restart: nautilus -q ; Ctrl+F)"
 else

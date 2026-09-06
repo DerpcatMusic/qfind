@@ -1,0 +1,4 @@
+[portal]
+DBusName=org.freedesktop.impl.portal.desktop.qfind
+Interfaces=org.freedesktop.impl.portal.FileChooser
+UseIn=gnome;KDE;Hyprland;wlroots;sway;niri;

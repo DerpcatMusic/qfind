@@ -7,8 +7,12 @@ rust-version.workspace = true
 publish.workspace = true
 description = "Qfind GTK application"
 
+[features]
+portal = ["dep:async-channel", "dep:zbus"]
+
 [dependencies]
 anyhow.workspace = true
+async-channel = { workspace = true, optional = true }
 dirs.workspace = true
 glow = "0.16"
 gtk.workspace = true
@@ -17,3 +21,9 @@ image.workspace = true
 qfind-core = { workspace = true, features = ["archives"] }
 
 tempfile.workspace = true
+zbus = { workspace = true, optional = true }
+
+[[bin]]
+name = "qfind-portal"
+path = "src/bin/qfind-portal.rs"
+required-features = ["portal"]
