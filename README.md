@@ -1,8 +1,13 @@
 <div align="center">
 
-# Qfind
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/megaman-logo-dark.svg">
+  <img src="assets/megaman-logo.svg" alt="Megaman — Bit, the voxel file keeper" width="640">
+</picture>
 
-Instant filename search for Linux, macOS, and Windows, with a keyboard-first TUI, live previews, a folder browser, and an interactive WeightMap.
+Files, storage, and projects. One native workspace for Linux, macOS, and Windows.
+
+Meet **Bit**, Megaman’s little voxel file keeper.
 
 [![Release](https://img.shields.io/github/v/release/DerpcatMusic/qfind?style=flat-square)](https://github.com/DerpcatMusic/qfind/releases/latest)
 [![License](https://img.shields.io/github/license/DerpcatMusic/qfind?style=flat-square)](LICENSE)

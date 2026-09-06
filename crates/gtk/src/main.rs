@@ -428,6 +428,7 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
         .build();
 
     icons::install();
+    gtk::Window::set_default_icon_name("megaman");
     let css = gtk::CssProvider::new();
     css.load_from_string(include_str!("design.css"));
     if let Some(display) = gdk::Display::default() {

@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 336" role="img" aria-labelledby="title"><title id="title">Megaman, with Bit the voxel file keeper</title><g transform="scale(.64)">  <!-- Feet: two small blocks, separated by transparent space. -->
+  <path d="M144 366L184 346L220 364V416L180 436L144 416Z" fill="#243D3D"/>
+  <path d="M144 366L180 384L220 364L184 346Z" fill="#456663"/>
+  <path d="M180 384L220 364V416L180 436Z" fill="#172C30"/>
+  <path d="M268 374L308 354L344 372V424L304 444L268 424Z" fill="#243D3D"/>
+  <path d="M268 374L304 392L344 372L308 354Z" fill="#456663"/>
+  <path d="M304 392L344 372V424L304 444Z" fill="#172C30"/>
+  <!-- The folder-tab crown belongs to the body, rather than sitting on it. -->
+  <path d="M112 130H208L240 162H336V386H112Z" fill="#83BBA8"/>
+  <path d="M336 162L400 130V354L336 386Z" fill="#477E74"/>
+  <path d="M208 130L272 98L304 130L240 162Z" fill="#A9D8BC"/>
+  <path d="M112 130L176 98H272L208 130Z" fill="#C0E8CD"/>
+  <path d="M240 162L304 130H400L336 162Z" fill="#C0E8CD"/>
+  <!-- One unbroken visor and two pixels: expression without animal features. -->
+  <path d="M136 190H312V278H136Z" fill="#172C30"/>
+  <path d="M160 214H188V242H160Z" fill="#E6F3D9"/>
+  <path d="M256 214H284V242H256Z" fill="#E6F3D9"/>
+  <!-- A recessed folder bay, with one visible paper edge. -->
+  <path d="M136 302H312V362H136Z" fill="#477E74"/>
+  <path d="M152 290H200L216 306H296V366H152Z" fill="#B77635"/>
+  <path d="M168 306H280V330H168Z" fill="#F5EBCD"/>
+  <path d="M152 322H296V370H152Z" fill="#F5B75C"/>
+  <path d="M152 322H296V330H152Z" fill="#FFD78B"/>
+  <!-- Tiny block hands hold the folder; the right one wraps around the side. -->
+  <path d="M96 302H136V350H96Z" fill="#A9D8BC"/>
+  <path d="M96 350H136V366H96Z" fill="#477E74"/>
+  <path d="M312 302H352V350H312Z" fill="#A9D8BC"/>
+  <path d="M352 302L376 290V338L352 350Z" fill="#315E59"/>
+  <path d="M312 302L336 290H376L352 302Z" fill="#C0E8CD"/>
+  <path d="M312 350H352V366H312Z" fill="#477E74"/>
+</g><g fill="#EDF2E6" fill-rule="evenodd"><path d="M0 100V0H22L45 38L68 0H90V100H68V37L45 70L22 37V100Z" transform="translate(342 126) scale(.88)"/><path d="M0 0H72V20H22V39H65V59H22V80H72V100H0Z" transform="translate(446 126) scale(.88)"/><path d="M22 0H82V20H27L22 25V75L27 80H60V62H43V42H82V100H22L0 78V22Z" transform="translate(536 126) scale(.88)"/><path d="M0 100L30 0H60L90 100H67L60 77H30L23 100ZM36 57H54L45 27Z" transform="translate(626 126) scale(.88)"/><path d="M0 100V0H22L45 38L68 0H90V100H68V37L45 70L22 37V100Z" transform="translate(730 126) scale(.88)"/><path d="M0 100L30 0H60L90 100H67L60 77H30L23 100ZM36 57H54L45 27Z" transform="translate(834 126) scale(.88)"/><path d="M0 100V0H23L66 60V0H88V100H66L22 39V100Z" transform="translate(938 126) scale(.88)"/></g></svg>

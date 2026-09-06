@@ -19,6 +19,7 @@
 #include <QFileSystemWatcher>
 #include <QImage>
 #include <QImageReader>
+#include <QIcon>
 #include <QHash>
 #include <QHeaderView>
 #include <QCheckBox>
@@ -721,6 +722,7 @@ public:
           preview_pool_(asyncPools().preview),
           thumbnail_pool_(asyncPools().thumbnail)
     {
+        setWindowIcon(QIcon(QStringLiteral(":/megaman.png")));
         setWindowTitle(QStringLiteral("Megaman"));
         resize(1200, 760);
 
@@ -2560,6 +2562,7 @@ int main(int argc, char **argv)
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("Megaman"));
     app.setOrganizationName(QStringLiteral("qfind"));
+    app.setWindowIcon(QIcon(QStringLiteral(":/megaman.png")));
     Window window(initialDirectory(argc, argv));
     window.show();
     return app.exec();

@@ -12,6 +12,7 @@ pub fn install() {
         if std::fs::read_to_string(theme.join("index.theme")).ok().as_deref() != Some(&index) {
             std::fs::write(theme.join("index.theme"), &index)?;
         }
+        std::fs::write(directory.join("megaman.svg"), include_str!("../../../assets/megaman.svg"))?;
         for line in include_str!("icons.tsv").lines() {
             let Some((names, svg)) = line.split_once('\t') else { continue; };
             for name in names.split_whitespace() {

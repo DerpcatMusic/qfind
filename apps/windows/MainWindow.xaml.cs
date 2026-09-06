@@ -82,6 +82,7 @@ public sealed partial class MainWindow : Window
     {
         this.initialDirectory = initialDirectory;
         InitializeComponent();
+        AppWindow.SetIcon(System.IO.Path.Combine(AppContext.BaseDirectory, "megaman.ico"));
         uiQueue = WinUIDispatcherQueue.GetForCurrentThread();
         LoadColumnState();
         FileColumnsHeader.ItemsSource = visibleColumns;

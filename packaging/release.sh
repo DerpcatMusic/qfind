@@ -17,6 +17,7 @@ install -Dm755 "$root/target/release/qfind" "$stage/qfind"
 install -Dm755 "$root/target/release/qfind-tui" "$stage/qfind-tui"
 install -Dm755 "$root/target/release/qfind-gtk" "$stage/qfind-gtk"
 install -Dm644 "$root/packaging/qfind.desktop" "$stage/qfind.desktop"
+install -Dm644 "$root/assets/megaman.svg" "$stage/megaman.svg"
 install -Dm644 "$root/packaging/nautilus/qfind.py" "$stage/qfind.py"
 install -Dm644 "$root/LICENSE" "$stage/LICENSE"
 if command -v cmake >/dev/null \

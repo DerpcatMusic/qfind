@@ -16,6 +16,8 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Frameworks"
 install -m755 "$swift_bin/Qfind" "$app/Contents/MacOS/Qfind"
 install -m755 target/release/libqfind_native.dylib "$app/Contents/Frameworks/libqfind_native.dylib"
 install -m644 apps/macos/Info.plist "$app/Contents/Info.plist"
+mkdir -p "$app/Contents/Resources"
+install -m644 assets/megaman.icns "$app/Contents/Resources/megaman.icns"
 
 frameworks="$app/Contents/Frameworks"
 executable="$app/Contents/MacOS/Qfind"

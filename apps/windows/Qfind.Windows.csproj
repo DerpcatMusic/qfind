@@ -4,6 +4,7 @@
     <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
     <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
     <RootNamespace>Qfind.Windows</RootNamespace>
+    <ApplicationIcon>..\..\assets\megaman.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <Platforms>x64;ARM64</Platforms>
     <PlatformTarget Condition="'$(Platform)' == ''">x64</PlatformTarget>
@@ -26,6 +27,7 @@
     <MegamanVcpkgTriplet Condition="'$(MegamanVcpkgTriplet)' == ''">x64-windows-static-md</MegamanVcpkgTriplet>
   </PropertyGroup>
   <ItemGroup>
+    <Content Include="..\..\assets\megaman.ico" Link="megaman.ico" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.260804001" />
   </ItemGroup>
   <Target Name="BuildQfindCore" BeforeTargets="Build" Condition="'$(SkipRustNative)' != 'true'">

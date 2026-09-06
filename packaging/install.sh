@@ -2,6 +2,7 @@
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 prefix="${PREFIX:-$HOME/.local}"
+install -Dm644 "$root/assets/megaman.svg" "$prefix/share/icons/hicolor/scalable/apps/megaman.svg"
 cargo build --release --manifest-path "$root/Cargo.toml" -p qfind -p qfind-tui -p qfind-native
 native_library="$root/target/release/libqfind_native.so"
 if [ "$(uname -s)" = Darwin ]; then

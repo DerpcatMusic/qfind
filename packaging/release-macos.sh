@@ -113,6 +113,8 @@ install -m755 "$swift_bin/Qfind" "$work/app/Qfind.app/Contents/MacOS/Qfind"
 install -m755 "$work/libqfind_native.dylib" \
   "$work/app/Qfind.app/Contents/Frameworks/libqfind_native.dylib"
 install -m644 apps/macos/Info.plist "$work/app/Qfind.app/Contents/Info.plist"
+mkdir -p "$work/app/Qfind.app/Contents/Resources"
+install -m644 assets/megaman.icns "$work/app/Qfind.app/Contents/Resources/megaman.icns"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" \
   "$work/app/Qfind.app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $version" \
