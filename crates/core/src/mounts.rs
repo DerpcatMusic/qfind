@@ -44,7 +44,7 @@ const KEEP_FS: &[&str] = &[
 ];
 
 /// Local Mounts worth putting in the Catalog.
-pub(crate) fn discover() -> Vec<PathBuf> {
+pub fn discover() -> Vec<PathBuf> {
     #[cfg(target_os = "linux")]
     {
         discover_linux()

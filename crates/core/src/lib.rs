@@ -35,6 +35,8 @@ pub use manager::{
     Action, BrowseMode, ChartScope, LocationScope, Manager, ManagerRow, ManagerSession,
     ManagerView, Outcome,
 };
+pub use mounts::discover as discover_mounts;
+pub use process::CommandOutputExt;
 pub use nav::{Crumb, Location, TreeState, breadcrumb};
 pub use ops::{
     Mutation, copy, create_dir, create_file, delete, delete_entry, move_path, rename, restore,

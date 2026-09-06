@@ -138,7 +138,7 @@ cd packaging/aur/qfind-gtk-bin && makepkg -si  # GTK prebuilt
 
 ```bash
 qfind index    # rebuild the Catalog
-qfind          # open the TUI
+qfind tui      # open the TUI
 ```
 
 With arguments, `qfind` works as a regular CLI:
@@ -149,6 +149,33 @@ qfind .wav --files --sort largest      # extension search
 qfind cat --folders                    # folders only
 qfind logo --class image --json        # JSON lines for scripts
 ```
+
+The terminal commands use the same file operations and workspace components as the GUI:
+
+```bash
+qfind files --help                         # browse, batch operations, and archives
+qfind files list ~/Downloads --extension zip --paths-only --nul
+qfind files batch-rename a.txt b.txt --prefix 'item-{n}-'  # preview; --apply commits
+qfind files batch-copy ~/Backup a.txt b.txt
+qfind files archive compress backup.zip a.txt b.txt
+qfind places list                         # folders, bookmarks, and mounts
+qfind places pin ~/Projects
+qfind places actions list                 # Qfind and Nautilus scripts
+qfind --in ~/Projects --json '*.rs'         # scoped indexed search
+qfind projects                            # repositories for your active gh account
+qfind git diff --path ~/Projects/megaman
+qfind git stage --path ~/Projects/megaman --file README.md
+qfind tasks --path ~/Projects/megaman      # list available build/package commands
+qfind tasks cargo-check --path ~/Projects/megaman
+qfind storage ~/Projects                  # weights plus free/total disk capacity
+qfind storage --global                    # all indexed storage roots
+qfind component                           # discover shared GUI components
+qfind component git '{"action":"status"}' --path ~/Projects/megaman
+qfind config --path                       # shared preferences file
+qfind config --edit                       # edit shared preferences
+```
+
+`projects`, `storage`, and `component` print JSON. Git and task output is plain text by default; use `--json` for structured output. Project discovery requires an index; file operations, Git, and tasks work without one. Failed project commands return a nonzero exit status. Storage folder weights use the same cached/indexed measurements as the GUI. File-list JSON reports an unmeasured folder size as `null`, rather than its directory metadata size. `copy-path`, `copy-name`, and `copy-uri` print values for piping to a clipboard tool.
 
 An empty Query in the TUI lists the Catalog. Fuzzy matching is the default; use `--match substring`, `--match exact`, or `Ctrl+M` in the TUI to change it. `*.wav` is a glob, while `.wav` filters by extension.
 
@@ -163,6 +190,10 @@ An empty Query in the TUI lists the Catalog. Fuzzy matching is the default; use 
 | `F4` | dual-pane folder browser |
 | `F6` | cycle WeightMap size / file types / off |
 | `F8` | appearance, visibility, ignore rules, and folder Excludes |
+| `F9` / `Ctrl+P` | Projects, Storage, Git, and Tasks workspaces |
+| `Ctrl+G` | global indexed search from the browser or a workspace |
+| `F10` | file actions, batch rename, copy/move, archives, and scripts |
+| `Ctrl+B` / `Ctrl+Shift+B` | pin current folder / browse pins |
 | `F1` | shortcuts |
 | `Ctrl+E` | cycle Auto / desktop / editor opening |
 | `Ctrl+scroll`, `+`, `-` | change list or grid density |
@@ -173,6 +204,8 @@ An empty Query in the TUI lists the Catalog. Fuzzy matching is the default; use 
 | `Ctrl+L` | enter an absolute or relative directory path |
 | right-click | Open, Preview, copy, and file-manager actions |
 | mouse drag | hand a Hit to another desktop app in Kitty 0.47+ |
+
+In the workspace, keys `1`–`4` switch Projects, Storage, Git, and Tasks. Projects supports `/` filtering, `s` sorting, and `c` cleanup review. Git supports `s`/`u` staging, `Tab` for staged changes, `v` for split/unified diff, `w` wrapping, `e` an expanded pane, and `[`/`]` hunk navigation. Task output stays available to scroll after completion.
 
 Drag uses Kitty's native OSC 72 protocol on Linux and macOS. Visual files reuse the current Preview as the cursor image; other files use a compact icon-and-name card. Windows terminals do not currently expose a compatible native file-drag protocol.
 
@@ -282,7 +315,7 @@ The shared Rust core owns folder queries, filtering, sorting, navigation, and in
 
 The shared shell registry lives in `crates/core/src/components.json`. Native component hosts discover its labels and commands through `qfind_manager_component`; GTK uses the same core services and registry titles. Projects, Git, build/package commands, storage, batch operations, and archives have shared behavior with native toolkit views. Add behavior in the core once, then implement any new view type in the native adapters. Existing view types pick up registry command and label changes when the shared library is rebuilt.
 
-Project discovery caches GitHub-account-scoped workspaces for ten minutes, invalidates when the file index changes, and rescans on Refresh. Native archive support enables the core `archives` feature and requires libarchive; Unix uses its writer binding, Windows uses `tar.exe` for writing. CLI/TUI-only builds do not enable archive dependencies. Folder measurements also share a bounded background worker and persistent cache, including generated directories excluded from filename search; native views poll the cache revision without rescanning on hover.
+Project discovery caches GitHub-account-scoped workspaces for ten minutes, invalidates when the file index changes, and rescans on Refresh. Native archive support enables the core `archives` feature and requires libarchive; Unix uses its writer binding, Windows uses `tar.exe` for writing. CLI and TUI builds also enable archives and require libarchive development files (for example `libarchive-dev` on Debian/Ubuntu, or `brew install libarchive pkg-config` on macOS). Folder measurements also share a bounded background worker and persistent cache, including generated directories excluded from filename search; native views poll the cache revision without rescanning on hover.
 
 ## Packages
 

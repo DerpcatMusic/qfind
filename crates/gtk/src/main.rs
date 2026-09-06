@@ -145,7 +145,7 @@ fn home_dir() -> Option<PathBuf> {
 }
 
 fn bookmark_file() -> Option<PathBuf> {
-    home_dir().map(|home| home.join(".config/qfind/bookmarks"))
+    Some(qfind_core::Config::path().with_file_name("bookmarks"))
 }
 
 fn qfind_bookmarks() -> Vec<PathBuf> {

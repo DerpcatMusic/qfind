@@ -5,7 +5,7 @@ use std::{
 };
 
 /// Bounded command output without platform-specific `timeout` executables or pipe deadlocks.
-pub(crate) trait CommandOutputExt {
+pub trait CommandOutputExt {
     fn bounded_output(&mut self, timeout: Duration) -> std::io::Result<Output>;
 }
 

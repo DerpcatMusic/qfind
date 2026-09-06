@@ -11,12 +11,22 @@ use crate::theme::Theme;
 
 pub const MENU_ITEMS: &[&str] = &[
     "open",
+    "open with",
     "preview",
     "copy path",
+    "copy name",
+    "copy URI",
     "show in files",
+    "open folder",
     "mark / unmark",
     "rename",
+    "batch rename",
+    "copy selected to…",
+    "move selected to…",
+    "compress selected…",
+    "extract selected…",
     "trash",
+    "run action/script…",
 ];
 pub const SETTINGS_APPEARANCE: usize = 6;
 pub const SETTINGS_ITEMS: usize = 10;
@@ -44,6 +54,15 @@ pub enum Layer {
         row: u16,
         idx: usize,
         pick: usize,
+    },
+    Bookmarks {
+        paths: Vec<std::path::PathBuf>,
+        selected: usize,
+    },
+    Review {
+        title: String,
+        lines: Vec<String>,
+        kind: ReviewKind,
     },
 }
 
@@ -117,6 +136,14 @@ impl Stack {
             });
         }
     }
+
+    pub fn open_bookmarks(&mut self, paths: Vec<std::path::PathBuf>) {
+        self.push(Layer::Bookmarks { paths, selected: 0 });
+    }
+
+    pub fn open_review(&mut self, title: String, lines: Vec<String>, kind: ReviewKind) {
+        self.push(Layer::Review { title, lines, kind });
+    }
 }
 
 /// What an input [`Layer::Prompt`] submits.
@@ -126,6 +153,69 @@ pub enum PromptKind {
     Rename { from: std::path::PathBuf },
     /// Create `<parent>/<input>` as a directory.
     Mkdir { parent: std::path::PathBuf },
+    /// First field of the GTK-compatible batch rename flow.
+    BatchRenameFind { paths: Vec<std::path::PathBuf> },
+    /// Second field of the GTK-compatible batch rename flow.
+    BatchRenameReplace {
+        paths: Vec<std::path::PathBuf>,
+        find: String,
+    },
+    /// Prefix field of the GTK-compatible batch rename flow.
+    BatchRenamePrefix {
+        paths: Vec<std::path::PathBuf>,
+        find: String,
+        replace: String,
+    },
+    /// Suffix field of the GTK-compatible batch rename flow.
+    BatchRenameSuffix {
+        paths: Vec<std::path::PathBuf>,
+        find: String,
+        replace: String,
+        prefix: String,
+    },
+    /// Numbering start field of the GTK-compatible batch rename flow.
+    BatchRenameStart {
+        paths: Vec<std::path::PathBuf>,
+        find: String,
+        replace: String,
+        prefix: String,
+        suffix: String,
+    },
+    /// Destination prompt for copy, move, compression, or extraction.
+    Transfer {
+        paths: Vec<std::path::PathBuf>,
+        action: TransferAction,
+    },
+    /// Application command used to open one item.
+    OpenWith { path: std::path::PathBuf },
+    /// Executable action or Nautilus script invoked with selected paths.
+    Script { paths: Vec<std::path::PathBuf> },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum TransferAction {
+    Copy,
+    Move,
+    Compress,
+    Extract,
+}
+
+#[derive(Clone, Debug)]
+pub enum ReviewKind {
+    BatchRename {
+        pairs: Vec<(std::path::PathBuf, std::path::PathBuf)>,
+    },
+}
+
+impl TransferAction {
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Copy => "Copy selected to folder",
+            Self::Move => "Move selected to folder",
+            Self::Compress => "Compress selected (.zip, .7z, .tar.gz)",
+            Self::Extract => "Extract archives to folder",
+        }
+    }
 }
 
 pub fn draw(frame: &mut Frame, stack: &Stack, th: Theme, area: Rect, settings: &[(&str, &str)]) {
@@ -137,6 +227,10 @@ pub fn draw(frame: &mut Frame, stack: &Stack, th: Theme, area: Rect, settings: &
             Layer::Settings { selected } => draw_settings(frame, area, th, *selected, settings),
             Layer::Theme { selected, .. } => draw_theme(frame, area, th, *selected),
             Layer::Menu { col, row, pick, .. } => draw_menu(frame, area, th, *col, *row, *pick),
+            Layer::Bookmarks { paths, selected } => {
+                draw_bookmarks(frame, area, th, paths, *selected)
+            }
+            Layer::Review { title, lines, .. } => draw_review(frame, area, th, title, lines),
         }
     }
 }
@@ -209,6 +303,31 @@ pub fn click_top(stack: &mut Stack, x: u16, y: u16, area: Rect) -> Click {
                 Click::Ignore
             }
         }
+        Some(Layer::Bookmarks { paths, .. }) => {
+            let r = bookmarks_rect(area, paths.len());
+            if close_hit(r, x, y) || !r.contains(ratatui::layout::Position::new(x, y)) {
+                stack.pop();
+                return Click::Closed;
+            }
+            let i = y.saturating_sub(r.y.saturating_add(1)) as usize;
+            if i < paths.len() {
+                Click::Bookmark(i)
+            } else {
+                Click::Ignore
+            }
+        }
+        Some(Layer::Review { lines, .. }) => {
+            let r = review_rect(area, lines.len());
+            if close_hit(r, x, y) || !r.contains(ratatui::layout::Position::new(x, y)) {
+                stack.pop();
+                return Click::Closed;
+            }
+            if y == r.bottom().saturating_sub(2) {
+                Click::ReviewAccept
+            } else {
+                Click::Ignore
+            }
+        }
         None => Click::Miss,
     }
 }
@@ -221,10 +340,12 @@ pub enum Click {
     Theme(usize),
     Settings(usize),
     Menu(usize),
+    Bookmark(usize),
+    ReviewAccept,
 }
 
 /// Row count used for click hit-testing; kept in sync with `draw_help`.
-const CLICK_HELP_ROWS: usize = 25;
+const CLICK_HELP_ROWS: usize = 33;
 
 fn help_rect(area: Rect, rows: usize) -> Rect {
     let w = 58.min(area.width.saturating_sub(2)).max(2);
@@ -273,7 +394,7 @@ fn settings_index_at(line: u16) -> Option<usize> {
 }
 
 pub fn menu_rect(col: u16, row: u16, area: Rect) -> Rect {
-    let w = 20u16;
+    let w = 24u16;
     let h = MENU_ITEMS.len() as u16 + 2;
     let mut x = col.min(area.x + area.width.saturating_sub(w));
     let mut y = row.min(area.y + area.height.saturating_sub(h));
@@ -283,6 +404,26 @@ pub fn menu_rect(col: u16, row: u16, area: Rect) -> Rect {
     if y < area.y {
         y = area.y;
     }
+    Rect::new(x, y, w, h)
+}
+
+fn bookmarks_rect(area: Rect, count: usize) -> Rect {
+    let w = 64.min(area.width.saturating_sub(2)).max(2);
+    let h = count.saturating_add(2).min(u16::MAX as usize) as u16;
+    let h = h.min(area.height.saturating_sub(2)).max(2);
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    Rect::new(x, y, w, h)
+}
+
+fn review_rect(area: Rect, count: usize) -> Rect {
+    let w = 90.min(area.width.saturating_sub(2)).max(2);
+    let h = count.saturating_add(4).min(u16::MAX as usize) as u16;
+    let h = h
+        .min(area.height.saturating_sub(2))
+        .max(4.min(area.height.max(4)));
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
     Rect::new(x, y, w, h)
 }
 
@@ -357,6 +498,14 @@ fn draw_help(frame: &mut Frame, area: Rect, th: Theme) {
         ("Mouse drag", "drop a result into another app"),
         ("Ctrl+O", "show in files"),
         ("Ctrl+Y", "copy path"),
+        ("Ctrl+C / Shift", "copy paths / names"),
+        ("Ctrl+S", "save archive / cycle sort"),
+        ("Ctrl+G", "search everywhere"),
+        ("F5", "refresh files and catalog"),
+        ("Ctrl+B", "pin current folder"),
+        ("Ctrl+Shift+B", "open pinned folders"),
+        ("F10", "context menu"),
+        ("F9 / Ctrl+P", "projects, storage, Git, tasks"),
         ("Ctrl+M", "change match mode"),
         ("right-click", "actions"),
     ];
@@ -588,6 +737,68 @@ fn draw_menu(frame: &mut Frame, area: Rect, th: Theme, col: u16, row: u16, pick:
         Paragraph::new(lines)
             .style(Style::new().fg(th.text).bg(th.surface))
             .block(window("Actions", th).title_bottom(Line::from(shortcut("Esc", "close", th)))),
+        popup,
+    );
+}
+
+fn draw_bookmarks(
+    frame: &mut Frame,
+    area: Rect,
+    th: Theme,
+    paths: &[std::path::PathBuf],
+    selected: usize,
+) {
+    let popup = bookmarks_rect(area, paths.len());
+    clear_popup(frame, popup, th);
+    let lines: Vec<Line> = paths
+        .iter()
+        .enumerate()
+        .map(|(i, path)| {
+            let on = i == selected;
+            let bg = if on { th.select_bg } else { th.surface };
+            Line::from(Span::styled(
+                format!(" {} ", path.display()),
+                Style::new().fg(if on { th.accent } else { th.text }).bg(bg),
+            ))
+        })
+        .collect();
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::new().fg(th.text).bg(th.surface))
+            .block(window("Places", th).title_bottom(Line::from(shortcut("Enter", "open", th)))),
+        popup,
+    );
+}
+
+fn draw_review(frame: &mut Frame, area: Rect, th: Theme, title: &str, lines: &[String]) {
+    let popup = review_rect(area, lines.len());
+    clear_popup(frame, popup, th);
+    let mut body = lines
+        .iter()
+        .map(|line| {
+            Line::from(Span::styled(
+                line.clone(),
+                Style::new().fg(th.text).bg(th.surface),
+            ))
+        })
+        .collect::<Vec<_>>();
+    body.push(Line::from(""));
+    frame.render_widget(
+        Paragraph::new(body)
+            .style(Style::new().fg(th.text).bg(th.surface))
+            .block(
+                window(title, th)
+                    .title_top(
+                        Line::from(Span::styled("[×]", Style::new().fg(th.dim))).right_aligned(),
+                    )
+                    .title_bottom(Line::from(
+                        [
+                            shortcut("Esc", "cancel", th),
+                            shortcut("Enter", "apply", th),
+                        ]
+                        .concat(),
+                    )),
+            ),
         popup,
     );
 }

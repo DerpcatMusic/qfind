@@ -1809,6 +1809,7 @@ dependencies = [
  "anyhow",
  "clap",
  "qfind-core",
+ "serde_json",
 ]
 
 [[package]]
@@ -1867,6 +1868,7 @@ dependencies = [
  "ratatui",
  "ratatui-image",
  "rayon",
+ "serde_json",
  "tempfile",
 ]
 

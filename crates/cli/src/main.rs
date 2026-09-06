@@ -1,3 +1,4 @@
+mod files;
 #[cfg(target_os = "linux")]
 #[path = "os_linux.rs"]
 mod os;
@@ -10,6 +11,8 @@ mod os;
 #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 #[path = "os_other.rs"]
 mod os;
+mod places;
+mod workspace;
 
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
@@ -26,19 +29,31 @@ use qfind_core::{
 #[command(
     name = "qfind",
     version,
-    about = "Search filenames in the Qfind Catalog"
+    about = "Megaman: files, storage, projects, and indexed global search"
 )]
 struct Cli {
     /// Print paths NUL-separated
     #[arg(short = '0', long = "nul", global = true)]
     nul: bool,
 
-    /// Folders only
+    /// Use a particular search catalog
     #[arg(long)]
+    snapshot: Option<PathBuf>,
+
+    /// Search recursively inside this indexed directory
+    #[arg(long = "in")]
+    directory: Option<PathBuf>,
+
+    /// Override the shared hidden-file preference
+    #[arg(long, action = clap::ArgAction::Set)]
+    hidden: Option<bool>,
+
+    /// Folders only
+    #[arg(long, conflicts_with = "files")]
     folders: bool,
 
     /// Files only
-    #[arg(long)]
+    #[arg(long, conflicts_with = "folders")]
     files: bool,
 
     /// Filter by FileClass
@@ -69,7 +84,7 @@ struct Cli {
     command: Option<Command>,
 
     /// Query tokens (AND). Globs allowed: *.wav
-    #[arg(trailing_var_arg = true)]
+    #[arg(num_args = 0..)]
     query: Vec<String>,
 }
 
@@ -110,6 +125,17 @@ enum DateArg {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Open the interactive terminal manager
+    Tui,
+    /// Bookmarks, mounted devices, and file-manager scripts
+    #[command(subcommand)]
+    Places(places::PlaceCommand),
+    /// File operations, batch actions, and archives
+    #[command(subcommand)]
+    Files(files::FileCommand),
+    /// Shared GUI workspaces: projects, Git, tasks, and storage
+    #[command(flatten)]
+    Workspace(workspace::WorkspaceCommand),
     /// Rebuild the Catalog from local Mounts
     Index {
         /// Mount to include (repeatable). Default: discover local disks
@@ -131,25 +157,39 @@ fn main() -> ExitCode {
     }
 }
 
-fn json_esc(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out
-}
-
 fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
     match cli.command {
+        Some(Command::Tui) => {
+            let name = if cfg!(windows) {
+                "qfind-tui.exe"
+            } else {
+                "qfind-tui"
+            };
+            let sibling = std::env::current_exe()?.with_file_name(name);
+            let status = std::process::Command::new(if sibling.is_file() {
+                sibling
+            } else {
+                PathBuf::from(name)
+            })
+            .status()
+            .context("launch qfind-tui")?;
+            Ok(ExitCode::from(
+                status.code().unwrap_or(1).clamp(0, 255) as u8
+            ))
+        }
+        Some(Command::Places(command)) => {
+            places::run(command)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Some(Command::Files(command)) => {
+            files::run(command)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Some(Command::Workspace(command)) => {
+            workspace::run(command)?;
+            Ok(ExitCode::SUCCESS)
+        }
         Some(Command::Index { roots, snapshot }) => {
             let snapshot = snapshot.unwrap_or_else(default_snapshot_path);
             let cfg = Config::load();
@@ -168,8 +208,8 @@ fn run() -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         None => {
-            if cli.query.is_empty() && !cli.json {
-                let snapshot = default_snapshot_path();
+            if cli.query.is_empty() && !cli.json && cli.directory.is_none() {
+                let snapshot = cli.snapshot.clone().unwrap_or_else(default_snapshot_path);
                 let catalog = Catalog::open(&snapshot).with_context(|| {
                     format!("open {} (run `qfind index` first)", snapshot.display())
                 })?;
@@ -184,7 +224,7 @@ fn run() -> Result<ExitCode> {
                 }
                 return Ok(ExitCode::SUCCESS);
             }
-            let snapshot = default_snapshot_path();
+            let snapshot = cli.snapshot.clone().unwrap_or_else(default_snapshot_path);
             let catalog = Catalog::open(&snapshot).with_context(|| {
                 format!("open {} (run `qfind index` first)", snapshot.display())
             })?;
@@ -233,10 +273,26 @@ fn run() -> Result<ExitCode> {
             let mut ignores = IgnoreMatcher::new(cfg.respect_gitignore, cfg.respect_ignore);
             let limit = opts.limit;
             if ignores.is_some() && limit > 0 {
-                opts.limit = limit.saturating_mul(8);
+                opts.limit = 0;
             }
-            let show_hidden = cfg.show_hidden;
-            let hits = catalog.search_with_hidden_cancel(&query, opts, show_hidden, || false)?;
+            let show_hidden = cli.hidden.unwrap_or(cfg.show_hidden);
+            let folder = cli
+                .directory
+                .as_ref()
+                .map(|path| {
+                    let path = path
+                        .canonicalize()
+                        .with_context(|| format!("open {}", path.display()))?;
+                    catalog
+                        .folder(&path)
+                        .with_context(|| format!("directory not indexed: {}", path.display()))
+                })
+                .transpose()?;
+            let hits = if let Some(folder) = &folder {
+                folder.search_with_hidden_cancel(&query, opts, show_hidden, || false)?
+            } else {
+                catalog.search_with_hidden_cancel(&query, opts, show_hidden, || false)?
+            };
             let mut out = io::stdout().lock();
             let mut emitted = 0usize;
             for hit in hits.iter() {
@@ -250,10 +306,11 @@ fn run() -> Result<ExitCode> {
                 if cli.json {
                     writeln!(
                         out,
-                        "{{\"name\":\"{}\",\"path\":\"{}\",\"dir\":{}}}",
-                        json_esc(hit.name()),
-                        json_esc(&path.to_string_lossy()),
-                        hit.is_dir()
+                        "{}",
+                        serde_json::json!({
+                            "name":hit.name(), "path":path.to_string_lossy(), "dir":hit.is_dir(),
+                            "bytes":hit.size(), "modified":hit.mtime()
+                        })
                     )?;
                 } else if cli.nul {
                     #[cfg(windows)]

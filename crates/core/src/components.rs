@@ -274,13 +274,18 @@ pub fn run_task(path: &Path, id: &str) -> Result<String, String> {
         }
     }
     let output = output.map_err(|error| error.to_string())?;
-    Ok(format!(
+    let report = format!(
         "{title}\nIn {}\nExit: {}\n\n{}{}",
         path.display(),
         output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
-    ))
+    );
+    if output.status.success() {
+        Ok(report)
+    } else {
+        Err(report)
+    }
 }
 
 fn task_component(path: &Path, request: &Value) -> Result<Value, String> {
@@ -344,7 +349,8 @@ fn storage_component(manager: &Manager, path: &Path) -> Result<Value, String> {
     Ok(json!({"entries":entries,"free":free,"total":total,"path":path,"remaining":remaining}))
 }
 
-fn capacity(path: &Path) -> Result<(u64, u64), String> {
+/// Available and total filesystem bytes for any path on that filesystem.
+pub fn capacity(path: &Path) -> Result<(u64, u64), String> {
     #[cfg(unix)]
     {
         let stat = rustix::fs::statvfs(path).map_err(|error| error.to_string())?;

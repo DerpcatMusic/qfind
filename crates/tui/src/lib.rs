@@ -25,6 +25,7 @@ use ratatui_image::picker::Picker;
 use ratatui_image::{Image, Resize, StatefulImage};
 
 mod dnd;
+mod manager_workspace;
 mod overlay;
 mod preview;
 mod query;
@@ -33,6 +34,7 @@ mod splash;
 mod surface;
 mod theme;
 pub mod workspace;
+use overlay::TransferAction;
 use theme::{Chip, Theme, compact, fit_chips, icon_for, icon_prompt, toolbar};
 use workspace::{Tab, UndoOp};
 
@@ -198,6 +200,16 @@ enum WorkEvent {
     Query(query::Event),
     Preview(Box<preview::Event>),
     Catalog(std::result::Result<PathBuf, String>),
+    ArchiveOpen(std::result::Result<PathBuf, String>),
+    ArchiveSave(std::result::Result<String, String>),
+    Workspace(u64, std::result::Result<serde_json::Value, String>),
+    Mutation(std::result::Result<MutationResult, String>),
+}
+
+struct MutationResult {
+    message: String,
+    undo: Vec<UndoOp>,
+    refresh: bool,
 }
 
 struct App {
@@ -229,6 +241,7 @@ struct App {
     scroll_bar: Rect,
     dragging_bar: bool,
     overlays: overlay::Stack,
+    workspace: Option<manager_workspace::Workspace>,
     manager: ManagerSession,
     plugins: PluginHost,
     tabs: Vec<Tab>,
@@ -282,6 +295,7 @@ struct App {
     events: reactor::Sender<WorkEvent>,
     rebuilding: bool,
     rebuild_pending: bool,
+    archive_save_pending: bool,
     exit_command: Option<(String, Vec<String>, PathBuf)>,
 }
 
@@ -343,6 +357,7 @@ impl App {
             scroll_bar: Rect::default(),
             dragging_bar: false,
             overlays: overlay::Stack::default(),
+            workspace: None,
             manager: ManagerSession::default(),
             plugins: PluginHost::new(),
             tabs: vec![Tab::new("Tab 1")],
@@ -396,6 +411,7 @@ impl App {
             events,
             rebuilding: false,
             rebuild_pending: false,
+            archive_save_pending: false,
             exit_command: None,
         }
     }
@@ -620,6 +636,66 @@ impl App {
         }
     }
 
+    fn operation_paths(&mut self) -> Vec<PathBuf> {
+        let mut paths: Vec<_> = self
+            .tabs
+            .get(self.tab_idx)
+            .filter(|tab| !tab.marked.is_empty())
+            .map(|tab| tab.marked.iter().cloned().collect())
+            .unwrap_or_default();
+        if paths.is_empty()
+            && let Some(path) = self.selected_row().map(|row| row.path.clone())
+        {
+            paths.push(path);
+        }
+        paths.sort();
+        paths
+    }
+
+    fn open_batch_rename(&mut self) {
+        let paths = self.operation_paths();
+        if paths.is_empty() {
+            self.status = "nothing to rename".into();
+            return;
+        }
+        self.overlays.open_prompt(
+            "Batch rename · find".into(),
+            String::new(),
+            overlay::PromptKind::BatchRenameFind { paths },
+        );
+    }
+
+    fn open_transfer(&mut self, action: TransferAction) {
+        let paths = self.operation_paths();
+        if paths.is_empty() {
+            self.status = "nothing selected".into();
+            return;
+        }
+        let initial = if matches!(action, TransferAction::Compress) {
+            self.manager
+                .directory()
+                .map(|path| path.join("Archive.zip"))
+                .or_else(|| {
+                    std::env::current_dir()
+                        .ok()
+                        .map(|path| path.join("Archive.zip"))
+                })
+                .unwrap_or_else(|| PathBuf::from("Archive.zip"))
+        } else {
+            self.manager
+                .directory()
+                .map(Path::to_path_buf)
+                .or_else(|| paths[0].parent().map(Path::to_path_buf))
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_else(|| PathBuf::from("."))
+        };
+        self.overlays.open_prompt(
+            action.title().into(),
+            initial.to_string_lossy().into_owned(),
+            overlay::PromptKind::Transfer { paths, action },
+        );
+    }
+
     fn push_undo(&mut self, op: UndoOp) {
         if self.undo.len() >= MAX_UNDO {
             self.undo.remove(0);
@@ -655,26 +731,53 @@ impl App {
             targets.push(row.path.clone());
         }
         targets.sort();
-        let mut trashed = 0usize;
-        let mut failed: Option<String> = None;
-        for path in targets {
-            match qfind_core::trash(&path) {
-                Ok((staged, _)) => {
-                    trashed += 1;
-                    self.tab_mut().marked.remove(&path);
-                    self.push_undo(UndoOp::Trash { staged, orig: path });
-                }
-                Err(error) => {
-                    failed = Some(format!("{}: {error}", path.display()));
-                    break;
+        if targets
+            .iter()
+            .any(|path| std::fs::symlink_metadata(path).is_err())
+        {
+            self.status = "one selected item no longer exists".into();
+            return;
+        }
+        let identities: Vec<_> = targets
+            .iter()
+            .map(|path| path.canonicalize().unwrap_or_else(|_| path.clone()))
+            .collect();
+        if identities.iter().enumerate().any(|(i, source)| {
+            identities
+                .iter()
+                .enumerate()
+                .any(|(j, other)| i != j && source.starts_with(other))
+        }) {
+            self.status = "select either a folder or its contents, not both".into();
+            return;
+        }
+        let events = self.events.clone();
+        self.status = format!("moving {} item(s) to Trash…", targets.len());
+        thread::spawn(move || {
+            let mut undo = Vec::new();
+            let mut done = 0usize;
+            for path in targets {
+                match qfind_core::trash(&path) {
+                    Ok((staged, _)) => {
+                        undo.push(UndoOp::Trash { staged, orig: path });
+                        done += 1;
+                    }
+                    Err(error) => {
+                        let _ = events.send(WorkEvent::Mutation(Ok(MutationResult {
+                            message: format!("trashed {done}; stopped: {error}"),
+                            undo,
+                            refresh: true,
+                        })));
+                        return;
+                    }
                 }
             }
-        }
-        self.status = match failed {
-            Some(error) => format!("trashed {trashed}, stopped: {error}"),
-            None => format!("trashed {trashed}  (Ctrl+Z undo)"),
-        };
-        self.after_mutation();
+            let _ = events.send(WorkEvent::Mutation(Ok(MutationResult {
+                message: format!("trashed {done}  (Ctrl+Z undo)"),
+                undo,
+                refresh: true,
+            })));
+        });
     }
 
     fn undo_last(&mut self) {
@@ -696,12 +799,22 @@ impl App {
     fn activate_menu(&mut self, pick: usize) {
         match pick {
             0 => self.open_selected(),
-            1 => self.preview_selected(),
-            2 => self.copy_selected(),
-            3 => self.reveal_selected(),
-            4 => self.mark_toggle(),
-            5 => self.open_rename_prompt(),
-            6 => self.trash_selection(),
+            1 => self.open_with_selected(),
+            2 => self.preview_selected(),
+            3 => self.copy_selected(),
+            4 => self.copy_names(),
+            5 => self.copy_uris(),
+            6 => self.reveal_selected(),
+            7 => self.open_folder_selected(),
+            8 => self.mark_toggle(),
+            9 => self.open_rename_prompt(),
+            10 => self.open_batch_rename(),
+            11 => self.open_transfer(TransferAction::Copy),
+            12 => self.open_transfer(TransferAction::Move),
+            13 => self.open_transfer(TransferAction::Compress),
+            14 => self.open_transfer(TransferAction::Extract),
+            15 => self.trash_selection(),
+            16 => self.open_script_prompt(),
             _ => {}
         }
     }
@@ -740,13 +853,13 @@ impl App {
     }
 
     fn apply_prompt(&mut self, kind: overlay::PromptKind, input: String) {
-        let name = input.trim();
-        if name.is_empty() || name.contains('/') {
-            self.status = "name must not be empty".into();
-            return;
-        }
         match kind {
             overlay::PromptKind::Rename { from } => {
+                let name = input.trim();
+                if name.is_empty() || name.contains(['/', '\\']) {
+                    self.status = "name must not be empty or contain a path separator".into();
+                    return;
+                }
                 let Some(parent) = from.parent() else {
                     self.status = "cannot rename the filesystem root".into();
                     return;
@@ -769,6 +882,11 @@ impl App {
                 }
             }
             overlay::PromptKind::Mkdir { parent } => {
+                let name = input.trim();
+                if name.is_empty() || name.contains(['/', '\\']) {
+                    self.status = "name must not be empty or contain a path separator".into();
+                    return;
+                }
                 let path = parent.join(name);
                 match qfind_core::create_dir(&path) {
                     Ok(_) => {
@@ -779,7 +897,294 @@ impl App {
                     Err(error) => self.status = format!("mkdir failed: {error}"),
                 }
             }
+            overlay::PromptKind::BatchRenameFind { paths } => {
+                self.overlays.open_prompt(
+                    "Batch rename · replace".into(),
+                    String::new(),
+                    overlay::PromptKind::BatchRenameReplace { paths, find: input },
+                );
+            }
+            overlay::PromptKind::BatchRenameReplace { paths, find } => {
+                self.overlays.open_prompt(
+                    "Batch rename · prefix".into(),
+                    String::new(),
+                    overlay::PromptKind::BatchRenamePrefix {
+                        paths,
+                        find,
+                        replace: input,
+                    },
+                );
+            }
+            overlay::PromptKind::BatchRenamePrefix {
+                paths,
+                find,
+                replace,
+            } => {
+                self.overlays.open_prompt(
+                    "Batch rename · suffix".into(),
+                    String::new(),
+                    overlay::PromptKind::BatchRenameSuffix {
+                        paths,
+                        find,
+                        replace,
+                        prefix: input,
+                    },
+                );
+            }
+            overlay::PromptKind::BatchRenameSuffix {
+                paths,
+                find,
+                replace,
+                prefix,
+            } => {
+                self.overlays.open_prompt(
+                    "Batch rename · numbering start".into(),
+                    "1".into(),
+                    overlay::PromptKind::BatchRenameStart {
+                        paths,
+                        find,
+                        replace,
+                        prefix,
+                        suffix: input,
+                    },
+                );
+            }
+            overlay::PromptKind::BatchRenameStart {
+                paths,
+                find,
+                replace,
+                prefix,
+                suffix,
+            } => {
+                let start = match input.trim().parse::<usize>() {
+                    Ok(start) => start,
+                    Err(_) => {
+                        self.status = "numbering start must be a nonnegative integer".into();
+                        return;
+                    }
+                };
+                let pairs = match qfind_core::components::rename_pairs(
+                    &paths, &find, &replace, &prefix, &suffix, start,
+                ) {
+                    Ok(pairs) => pairs,
+                    Err(error) => {
+                        self.status = format!("batch rename failed: {error}");
+                        return;
+                    }
+                };
+                let lines = pairs
+                    .iter()
+                    .filter(|(from, to)| from != to)
+                    .map(|(from, to)| format!("{}  →  {}", from.display(), to.display()))
+                    .collect();
+                self.overlays.open_review(
+                    "Review batch rename".into(),
+                    lines,
+                    overlay::ReviewKind::BatchRename { pairs },
+                );
+            }
+            overlay::PromptKind::Transfer { paths, action } => {
+                self.apply_transfer(paths, action, input.trim());
+            }
+            overlay::PromptKind::OpenWith { path } => {
+                let program = input.trim();
+                if program.is_empty() {
+                    self.status = "application command is required".into();
+                    return;
+                }
+                match Command::new(program).arg(&path).spawn() {
+                    Ok(_) => self.status = format!("opened with {program}  {}", path.display()),
+                    Err(error) => self.status = format!("open with failed: {error}"),
+                }
+            }
+            overlay::PromptKind::Script { paths } => {
+                let script = input.trim();
+                if script.is_empty() {
+                    self.status = "action/script executable is required".into();
+                    return;
+                }
+                let current = paths
+                    .first()
+                    .and_then(|path| path.parent())
+                    .map_or_else(String::new, |path| path.to_string_lossy().into_owned());
+                let path_text = paths
+                    .iter()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>();
+                let uri_text = paths
+                    .iter()
+                    .map(|path| format!("{}\n", file_uri(path)))
+                    .collect::<String>();
+                let mut command = Command::new(script);
+                command
+                    .args(&path_text)
+                    .env("QFIND_SELECTED_PATHS", path_text.join("\n"))
+                    .env("QFIND_CURRENT_DIRECTORY", &current)
+                    .env(
+                        "NAUTILUS_SCRIPT_SELECTED_FILE_PATHS",
+                        format!("{}\n", path_text.join("\n")),
+                    )
+                    .env("NAUTILUS_SCRIPT_SELECTED_URIS", uri_text)
+                    .env("NAUTILUS_SCRIPT_CURRENT_URI", file_uri(Path::new(&current)));
+                match spawn_detached(&mut command) {
+                    Ok(_) => self.status = format!("ran action/script  {script}"),
+                    Err(error) => self.status = format!("action/script failed: {error}"),
+                }
+            }
         }
+    }
+
+    fn apply_batch_rename(&mut self, pairs: Vec<(PathBuf, PathBuf)>) {
+        let mut done = 0usize;
+        for (from, to) in pairs.into_iter().filter(|(from, to)| from != to) {
+            match qfind_core::rename(&from, &to) {
+                Ok(_) => {
+                    let tab = self.tab_mut();
+                    if tab.marked.remove(&from) {
+                        tab.marked.insert(to.clone());
+                    }
+                    self.push_undo(UndoOp::Rename {
+                        from,
+                        to: to.clone(),
+                    });
+                    done += 1;
+                }
+                Err(error) => {
+                    self.status = format!("renamed {done}; stopped at {}: {error}", from.display());
+                    if done > 0 {
+                        self.after_mutation();
+                    }
+                    return;
+                }
+            }
+        }
+        self.status = format!("renamed {done} items  (Ctrl+Z undo)");
+        if done > 0 {
+            self.after_mutation();
+        }
+    }
+
+    fn apply_transfer(&mut self, paths: Vec<PathBuf>, action: TransferAction, raw: &str) {
+        if raw.is_empty() {
+            self.status = "destination is required".into();
+            return;
+        }
+        let destination = PathBuf::from(raw);
+        if !destination.is_absolute() {
+            self.status = "enter an absolute destination path".into();
+            return;
+        }
+        if matches!(action, TransferAction::Compress) {
+            let events = self.events.clone();
+            self.status = format!("compressing {}…", destination.display());
+            thread::spawn(move || {
+                let result = qfind_core::archive::compress(&paths, &destination)
+                    .map_err(|error| error.to_string())
+                    .map(|()| MutationResult {
+                        message: format!("created {}  (Ctrl+Z undo)", destination.display()),
+                        undo: vec![UndoOp::Created { path: destination }],
+                        refresh: true,
+                    });
+                let _ = events.send(WorkEvent::Mutation(result));
+            });
+            return;
+        }
+        let Some(destination) = destination.canonicalize().ok().filter(|path| path.is_dir()) else {
+            self.status = "destination must be an existing folder".into();
+            return;
+        };
+        if paths
+            .iter()
+            .any(|path| std::fs::symlink_metadata(path).is_err())
+        {
+            self.status = "one selected source no longer exists".into();
+            return;
+        }
+        let identities: Vec<_> = paths
+            .iter()
+            .map(|path| path.canonicalize().unwrap_or_else(|_| path.clone()))
+            .collect();
+        if identities.iter().enumerate().any(|(i, source)| {
+            identities
+                .iter()
+                .enumerate()
+                .any(|(j, other)| i != j && source.starts_with(other))
+        }) {
+            self.status = "select either a folder or its contents, not both".into();
+            return;
+        }
+        let mut pairs = Vec::with_capacity(paths.len());
+        let mut targets = HashSet::new();
+        for (path, identity) in paths.into_iter().zip(identities) {
+            let Some(name) = path.file_name() else {
+                self.status = "cannot operate on a filesystem root".into();
+                return;
+            };
+            if destination.starts_with(&identity) {
+                self.status = "destination is inside the selection".into();
+                return;
+            }
+            if matches!(action, TransferAction::Extract) && !qfind_core::archive::is_archive(&path)
+            {
+                self.status = format!("not a supported archive: {}", path.display());
+                return;
+            }
+            let target_name = if matches!(action, TransferAction::Extract) {
+                std::ffi::OsString::from(format!("{}.extracted", name.to_string_lossy()))
+            } else {
+                name.to_os_string()
+            };
+            let target = destination.join(target_name);
+            if std::fs::symlink_metadata(&target).is_ok() || !targets.insert(target.clone()) {
+                self.status = format!("destination exists or repeats: {}", target.display());
+                return;
+            }
+            pairs.push((path, target));
+        }
+        let events = self.events.clone();
+        self.status = format!("{} {} item(s)…", action.title(), pairs.len());
+        thread::spawn(move || {
+            let mut undo = Vec::new();
+            let mut done = 0usize;
+            for (source, target) in pairs {
+                let result = match action {
+                    TransferAction::Copy => qfind_core::copy(&source, &target)
+                        .map(|_| ())
+                        .map_err(|error| error.to_string()),
+                    TransferAction::Move => qfind_core::move_path(&source, &target)
+                        .map(|_| ())
+                        .map_err(|error| error.to_string()),
+                    TransferAction::Extract => qfind_core::archive::extract(&source, &target)
+                        .map_err(|error| error.to_string()),
+                    TransferAction::Compress => unreachable!(),
+                };
+                if let Err(error) = result {
+                    let _ = events.send(WorkEvent::Mutation(Ok(MutationResult {
+                        message: format!(
+                            "completed {done}; stopped at {}: {error}",
+                            source.display()
+                        ),
+                        undo,
+                        refresh: true,
+                    })));
+                    return;
+                }
+                if matches!(action, TransferAction::Move) {
+                    undo.push(UndoOp::Move {
+                        from: source,
+                        to: target,
+                    });
+                } else {
+                    undo.push(UndoOp::Created { path: target });
+                }
+                done += 1;
+            }
+            let _ = events.send(WorkEvent::Mutation(Ok(MutationResult {
+                message: format!("completed {done} items in {}", destination.display()),
+                undo,
+                refresh: true,
+            })));
+        });
     }
 
     fn tab_save(&mut self) {
@@ -1018,6 +1423,45 @@ impl App {
             WorkEvent::Query(message) => self.apply_query(message),
             WorkEvent::Preview(event) => return self.previews.apply(*event),
             WorkEvent::Catalog(result) => self.finish_catalog_refresh(result),
+            WorkEvent::ArchiveOpen(Ok(contents)) => {
+                self.browse(contents);
+                self.status = "opened archive".into();
+            }
+            WorkEvent::ArchiveOpen(Err(error)) => {
+                self.status = format!("archive open failed: {error}");
+            }
+            WorkEvent::ArchiveSave(result) => {
+                self.archive_save_pending = false;
+                match result {
+                    Ok(message) => {
+                        self.status = message;
+                        self.after_mutation();
+                    }
+                    Err(error) => self.status = format!("archive save failed: {error}"),
+                }
+            }
+            WorkEvent::Workspace(id, result) => {
+                if let Some(workspace) = self.workspace.as_mut() {
+                    workspace.apply(id, result);
+                }
+            }
+            WorkEvent::Mutation(result) => match result {
+                Ok(done) => {
+                    let changed = !done.undo.is_empty();
+                    let refresh = done.refresh;
+                    for operation in done.undo {
+                        if let UndoOp::Trash { orig, .. } = &operation {
+                            self.tab_mut().marked.remove(orig);
+                        }
+                        self.push_undo(operation);
+                    }
+                    self.status = done.message;
+                    if changed || refresh {
+                        self.after_mutation();
+                    }
+                }
+                Err(error) => self.status = format!("operation failed: {error}"),
+            },
         }
         true
     }
@@ -1130,6 +1574,15 @@ impl App {
         };
         let path = row.path.clone();
         let is_dir = row.is_dir;
+        if !is_dir && qfind_core::archive::is_archive(&path) {
+            let events = self.events.clone();
+            self.status = format!("opening archive  {}…", path.display());
+            thread::spawn(move || {
+                let result = qfind_core::archive::unpack(&path).map_err(|error| error.to_string());
+                let _ = events.send(WorkEvent::ArchiveOpen(result));
+            });
+            return;
+        }
         let mut cfg = Config::load();
         cfg.open = self.open;
         cfg.editor.clone_from(&self.editor);
@@ -1182,7 +1635,7 @@ impl App {
         let path = row.path.clone();
         #[cfg(target_os = "linux")]
         {
-            let uri = format!("file://{}", path.display());
+            let uri = file_uri(&path);
             let mut command = Command::new("gdbus");
             command.args([
                 "call",
@@ -1196,11 +1649,33 @@ impl App {
                 &format!("['{uri}']"),
                 "",
             ]);
-            let dbus = spawn_detached(&mut command);
-            if dbus.is_ok() {
-                self.status = format!("show in files  {}", path.display());
-                return;
-            }
+            let events = self.events.clone();
+            self.status = format!("revealing {}…", path.display());
+            thread::spawn(move || {
+                use qfind_core::CommandOutputExt;
+                let result = if command
+                    .bounded_output(Duration::from_secs(10))
+                    .is_ok_and(|output| output.status.success())
+                {
+                    Ok(format!("show in files  {}", path.display()))
+                } else {
+                    let folder = if path.is_dir() {
+                        path.clone()
+                    } else {
+                        path.parent().unwrap_or(&path).to_path_buf()
+                    };
+                    desktop_open(&folder)
+                        .1
+                        .map(|_| format!("opened folder  {}", folder.display()))
+                        .map_err(|error| error.to_string())
+                };
+                let _ = events.send(WorkEvent::Mutation(result.map(|message| MutationResult {
+                    message,
+                    undo: Vec::new(),
+                    refresh: false,
+                })));
+            });
+            return;
         }
         #[cfg(target_os = "macos")]
         {
@@ -1222,7 +1697,7 @@ impl App {
             }
             return;
         }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
         {
             let folder = if row.is_dir {
                 path.clone()
@@ -1238,31 +1713,278 @@ impl App {
     }
 
     fn copy_selected(&mut self) {
-        let Some(row) = self.selected_row() else {
+        let paths = self.operation_paths();
+        if paths.is_empty() {
             return;
-        };
-        let text = row.path.to_string_lossy().into_owned();
+        }
+        let text = paths
+            .iter()
+            .map(|path| path.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.copy_text(&text, "copied path");
+    }
+
+    fn copy_names(&mut self) {
+        let paths = self.operation_paths();
+        if paths.is_empty() {
+            return;
+        }
+        let text = paths
+            .iter()
+            .filter_map(|path| path.file_name())
+            .map(|name| name.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.copy_text(&text, "copied name");
+    }
+
+    fn copy_uris(&mut self) {
+        let paths = self.operation_paths();
+        if paths.is_empty() {
+            return;
+        }
+        let text = paths
+            .iter()
+            .map(|path| file_uri(path))
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.copy_text(&text, "copied URI");
+    }
+
+    fn copy_text(&mut self, text: &str, label: &str) {
         #[cfg(target_os = "linux")]
         let (ok, hint) = (
-            pipe_copy("wl-copy", &[], &text)
-                || pipe_copy("xclip", &["-selection", "clipboard"], &text),
+            pipe_copy("wl-copy", &[], text)
+                || pipe_copy("xclip", &["-selection", "clipboard"], text),
             "copy: install wl-copy or xclip",
         );
         #[cfg(target_os = "macos")]
-        let (ok, hint) = (pipe_copy("pbcopy", &[], &text), "copy: pbcopy unavailable");
+        let (ok, hint) = (pipe_copy("pbcopy", &[], text), "copy: pbcopy unavailable");
         #[cfg(target_os = "windows")]
         let (ok, hint) = (
-            pipe_copy("clip.exe", &[], &text),
+            pipe_copy("clip.exe", &[], text),
             "copy: clip.exe unavailable",
         );
         #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
         let (ok, hint) = (false, "copy unavailable");
         self.status = if ok {
-            format!("copied  {text}")
+            format!("{label}  {text}")
         } else {
             hint.into()
         };
     }
+
+    fn open_folder_selected(&mut self) {
+        let Some(row) = self.selected_row() else {
+            return;
+        };
+        let folder = if row.is_dir {
+            row.path.clone()
+        } else {
+            row.path.parent().unwrap_or(Path::new(".")).to_path_buf()
+        };
+        self.spawn_desktop(&folder);
+    }
+
+    fn open_with_selected(&mut self) {
+        let Some(path) = self.selected_row().map(|row| row.path.clone()) else {
+            return;
+        };
+        let default = if cfg!(target_os = "windows") {
+            "explorer.exe"
+        } else if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        self.overlays.open_prompt(
+            "Open with · command".into(),
+            default.into(),
+            overlay::PromptKind::OpenWith { path },
+        );
+    }
+
+    fn open_script_prompt(&mut self) {
+        let paths = self.operation_paths();
+        if paths.is_empty() {
+            self.status = "nothing selected".into();
+            return;
+        }
+        let initial = default_script_path().unwrap_or_default();
+        self.overlays.open_prompt(
+            "Run action/script · executable".into(),
+            initial,
+            overlay::PromptKind::Script { paths },
+        );
+    }
+
+    fn open_context_menu(&mut self) {
+        let (idx, exists) = if self.surface == Surface::Tree {
+            if self.browser_pane != BrowserPane::Items {
+                self.status = "select an item pane row first".into();
+                return;
+            }
+            let idx = self.item_selected;
+            (idx, self.browser_items.get(idx).is_some())
+        } else {
+            let idx = self.selected;
+            (idx, self.rows.get(idx).is_some())
+        };
+        if !exists {
+            self.status = "nothing selected".into();
+            return;
+        }
+        self.overlays.push(overlay::Layer::Menu {
+            col: self.content_area.x.saturating_add(3),
+            row: self.content_area.y.saturating_add(2),
+            idx,
+            pick: 0,
+        });
+    }
+
+    fn open_workspace(&mut self) {
+        let path = self
+            .manager
+            .directory()
+            .map(Path::to_path_buf)
+            .or_else(|| self.browser_dir.clone())
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+        self.workspace = Some(manager_workspace::Workspace::new(
+            self.catalog.clone(),
+            path,
+            self.events.clone(),
+        ));
+    }
+
+    fn bookmark_toggle(&mut self) {
+        let Some(path) = self.manager.directory().map(Path::to_path_buf) else {
+            self.status = "browse to a folder before pinning it".into();
+            return;
+        };
+        let mut saved = bookmark_paths();
+        let active = if let Some(index) = saved.iter().position(|candidate| candidate == &path) {
+            saved.remove(index);
+            false
+        } else {
+            saved.push(path.clone());
+            true
+        };
+        match write_bookmarks(&saved) {
+            Ok(()) => {
+                self.status = if active {
+                    format!("pinned  {}", path.display())
+                } else {
+                    format!("unpinned  {}", path.display())
+                };
+            }
+            Err(error) => self.status = format!("bookmark failed: {error}"),
+        }
+    }
+
+    fn open_bookmarks(&mut self) {
+        let paths = bookmark_paths();
+        if paths.is_empty() {
+            self.status = "no pinned folders".into();
+        } else {
+            self.overlays.open_bookmarks(paths);
+        }
+    }
+
+    fn save_archive(&mut self) -> bool {
+        if self.archive_save_pending {
+            self.status = "archive save already running…".into();
+            return true;
+        }
+        let Some(path) = self.manager.directory() else {
+            return false;
+        };
+        let Some(workspace) = qfind_core::archive::workspace(path) else {
+            return false;
+        };
+        if !qfind_core::archive::can_repack(&workspace.source) {
+            return false;
+        }
+        let source = workspace.source.clone();
+        let events = self.events.clone();
+        self.archive_save_pending = true;
+        self.status = format!("saving archive  {}…", source.display());
+        thread::spawn(move || {
+            let result = qfind_core::archive::repack(&workspace)
+                .map_err(|error| error.to_string())
+                .map(|()| format!("saved archive  {}", source.display()));
+            let _ = events.send(WorkEvent::ArchiveSave(result));
+        });
+        true
+    }
+}
+
+fn bookmark_file() -> Option<PathBuf> {
+    Some(Config::path().with_file_name("bookmarks"))
+}
+
+fn default_script_path() -> Option<String> {
+    let data_home = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"))
+        })?;
+    [
+        data_home.join("qfind/actions"),
+        data_home.join("nautilus/scripts"),
+    ]
+    .into_iter()
+    .flat_map(|directory| std::fs::read_dir(directory).into_iter().flatten())
+    .filter_map(|entry| entry.ok())
+    .map(|entry| entry.path())
+    .find(|path| path.is_file() && is_executable(path))
+    .map(|path| path.to_string_lossy().into_owned())
+}
+
+fn is_executable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        path.extension()
+            .is_some_and(|extension| matches!(extension.to_str(), Some("exe" | "bat" | "cmd")))
+    }
+}
+
+fn bookmark_paths() -> Vec<PathBuf> {
+    let mut paths = bookmark_file()
+        .and_then(|file| std::fs::read_to_string(file).ok())
+        .map(|text| {
+            text.lines()
+                .map(PathBuf::from)
+                .filter(|path| path.is_dir())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn write_bookmarks(paths: &[PathBuf]) -> std::io::Result<()> {
+    let Some(file) = bookmark_file() else {
+        return Ok(());
+    };
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(
+        file,
+        paths
+            .iter()
+            .map(|path| path.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
 }
 
 fn catalog_staging_path() -> PathBuf {
@@ -1439,6 +2161,9 @@ fn handle_dnd(app: &mut App, event: dnd::Event) {
 
 fn handle_mouse(app: &mut App, m: MouseEvent) {
     let pos = Position::new(m.column, m.row);
+    if app.workspace.is_some() {
+        return;
+    }
     if !app.overlays.is_empty() {
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -1457,6 +2182,28 @@ fn handle_mouse(app: &mut App, m: MouseEvent) {
                     overlay::Click::Menu(i) => {
                         app.overlays.pop();
                         app.activate_menu(i);
+                    }
+                    overlay::Click::Bookmark(index) => {
+                        let path = match app.overlays.pop() {
+                            Some(overlay::Layer::Bookmarks { paths, .. }) => {
+                                paths.get(index).cloned()
+                            }
+                            _ => None,
+                        };
+                        if let Some(path) = path {
+                            app.browse(path);
+                        }
+                    }
+                    overlay::Click::ReviewAccept => {
+                        let kind = match app.overlays.pop() {
+                            Some(overlay::Layer::Review { kind, .. }) => kind,
+                            _ => return,
+                        };
+                        match kind {
+                            overlay::ReviewKind::BatchRename { pairs } => {
+                                app.apply_batch_rename(pairs)
+                            }
+                        }
                     }
                     overlay::Click::Settings(i) => {
                         if let Some(overlay::Layer::Settings { selected }) = app.overlays.top_mut()
@@ -1838,6 +2585,24 @@ fn overlay_key(app: &mut App, key: KeyEvent) -> bool {
     {
         return true;
     }
+    if matches!(app.overlays.top(), Some(overlay::Layer::Review { .. })) {
+        match key.code {
+            KeyCode::Esc => {
+                app.overlays.pop();
+            }
+            KeyCode::Enter => {
+                let kind = match app.overlays.pop() {
+                    Some(overlay::Layer::Review { kind, .. }) => kind,
+                    _ => return false,
+                };
+                match kind {
+                    overlay::ReviewKind::BatchRename { pairs } => app.apply_batch_rename(pairs),
+                }
+            }
+            _ => {}
+        }
+        return false;
+    }
     if matches!(app.overlays.top(), Some(overlay::Layer::Prompt { .. })) {
         match key.code {
             KeyCode::Esc => {
@@ -1954,6 +2719,12 @@ fn overlay_key(app: &mut App, key: KeyEvent) -> bool {
                     *selected = selected.saturating_sub(1);
                     None
                 }
+                Some(overlay::Layer::Bookmarks { paths, selected }) => {
+                    *selected = selected
+                        .saturating_sub(1)
+                        .min(paths.len().saturating_sub(1));
+                    None
+                }
                 _ => None,
             };
             if let Some(selected) = selected {
@@ -1972,6 +2743,10 @@ fn overlay_key(app: &mut App, key: KeyEvent) -> bool {
                 }
                 Some(overlay::Layer::Settings { selected }) => {
                     *selected = (*selected + 1).min(overlay::SETTINGS_ITEMS - 1);
+                    None
+                }
+                Some(overlay::Layer::Bookmarks { paths, selected }) => {
+                    *selected = (*selected + 1).min(paths.len().saturating_sub(1));
                     None
                 }
                 _ => None,
@@ -2014,6 +2789,12 @@ fn overlay_key(app: &mut App, key: KeyEvent) -> bool {
             }
             Some(overlay::Layer::Settings { selected }) => {
                 adjust_setting(app, selected, 1, true);
+            }
+            Some(overlay::Layer::Bookmarks { paths, selected }) => {
+                app.overlays.pop();
+                if let Some(path) = paths.get(selected) {
+                    app.browse(path.clone());
+                }
             }
             _ => {
                 app.overlays.pop();
@@ -2232,8 +3013,72 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     if !app.overlays.is_empty() {
         return overlay_key(app, key);
     }
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('q') {
+        return true;
+    }
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('g') {
+        app.workspace = None;
+        app.search_folder = None;
+        app.surface = Surface::Auto;
+        app.focus = Focus::Search;
+        app.status = "searching everywhere".into();
+        app.mark_dirty();
+        return false;
+    }
+    if app.workspace.is_some() {
+        if key.code == KeyCode::F(9)
+            || (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p'))
+        {
+            app.workspace = None;
+            return false;
+        }
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            return false;
+        }
+        let outcome = app
+            .workspace
+            .as_mut()
+            .map(|workspace| workspace.key(key))
+            .unwrap_or(manager_workspace::Outcome::Stay);
+        match outcome {
+            manager_workspace::Outcome::Stay => {}
+            manager_workspace::Outcome::Close => {
+                app.workspace = None;
+            }
+            manager_workspace::Outcome::Browse(path) => {
+                app.workspace = None;
+                if path.is_dir() {
+                    app.browse(path);
+                } else if let Some(parent) = path.parent().map(Path::to_path_buf) {
+                    app.browse(parent);
+                }
+            }
+            manager_workspace::Outcome::Copy(text) => app.copy_text(&text, "copied workspace text"),
+        }
+        return false;
+    }
+    if key.code == KeyCode::F(9)
+        || (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p'))
+    {
+        app.open_workspace();
+        return false;
+    }
     if app.surface == Surface::Tree {
         match key.code {
+            KeyCode::F(5) => {
+                app.reload_browser();
+                app.request_catalog_refresh();
+                return false;
+            }
+            KeyCode::Up if key.modifiers.contains(KeyModifiers::ALT) => {
+                if let Some(parent) = app.manager.parent() {
+                    app.browse(parent);
+                }
+                return false;
+            }
             KeyCode::Left if key.modifiers.contains(KeyModifiers::ALT) => {
                 app.browse_back();
                 return false;
@@ -2409,9 +3254,26 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         }
     }
     match key.code {
-        KeyCode::Char('c' | 'q') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
+        KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
+        KeyCode::Char('c')
+            if key.modifiers.contains(KeyModifiers::CONTROL) && app.focus == Focus::Results =>
+        {
+            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                app.copy_names();
+            } else {
+                app.copy_selected();
+            }
+        }
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
         KeyCode::Esc => return true,
         KeyCode::F(1) => app.overlays.toggle_help(),
+        KeyCode::F(10) => app.open_context_menu(),
+        KeyCode::F(5) => {
+            if app.surface == Surface::Tree {
+                app.reload_browser();
+            }
+            app.request_catalog_refresh();
+        }
         KeyCode::Enter => app.enter_selected(),
         KeyCode::Char(' ') if app.focus == Focus::Results => app.preview_selected(),
         KeyCode::F(3) => app.preview_selected(),
@@ -2424,6 +3286,25 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         }
         KeyCode::F(6) => adjust_setting(app, 4, 1, false),
         KeyCode::F(8) => app.overlays.toggle_settings(),
+        KeyCode::Char('b')
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && key.modifiers.contains(KeyModifiers::SHIFT) =>
+        {
+            app.open_bookmarks();
+        }
+        KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.bookmark_toggle();
+        }
+        KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.search_folder = None;
+            app.surface = Surface::Auto;
+            app.focus = Focus::Search;
+            app.status = "searching everywhere".into();
+            app.mark_dirty();
+        }
+        KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.focus = Focus::Search;
+        }
         KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             let location = app
                 .manager
@@ -2446,6 +3327,12 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Char('-') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             adjust_zoom(app, -1, false);
         }
+        KeyCode::Char('o')
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && key.modifiers.contains(KeyModifiers::SHIFT) =>
+        {
+            app.open_with_selected();
+        }
         KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.reveal_selected();
         }
@@ -2463,8 +3350,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
             }
         }
         KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.sort = next_sort(app.sort);
-            app.mark_dirty();
+            if !app.save_archive() {
+                app.sort = next_sort(app.sort);
+                app.mark_dirty();
+            }
         }
         KeyCode::Char('m') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.match_mode = app.match_mode.cycle();
@@ -2611,6 +3500,32 @@ fn pipe_copy(bin: &str, args: &[&str], text: &str) -> bool {
     child.wait().map(|s| s.success()).unwrap_or(false)
 }
 
+fn file_uri(path: &Path) -> String {
+    let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    #[cfg(windows)]
+    let raw = path.to_string_lossy().replace('\\', "/").into_bytes();
+    #[cfg(not(windows))]
+    let raw = path.as_os_str().as_encoded_bytes().to_vec();
+    let mut uri = String::from(if cfg!(windows) {
+        if raw.starts_with(b"//") {
+            "file:"
+        } else {
+            "file:///"
+        }
+    } else {
+        "file://"
+    });
+    for byte in raw {
+        if byte.is_ascii_alphanumeric() || b"-._~/:".contains(&byte) {
+            uri.push(byte as char);
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(uri, "%{byte:02X}");
+        }
+    }
+    uri
+}
+
 fn spawn_detached(command: &mut Command) -> std::io::Result<std::process::Child> {
     command
         .stdin(Stdio::null())
@@ -2748,6 +3663,9 @@ fn draw(frame: &mut Frame, app: &mut App) {
         ("Selected folder", selected_folder_state),
     ];
     overlay::draw(frame, &app.overlays, th, area, &settings);
+    if let Some(workspace) = app.workspace.as_mut() {
+        workspace.draw(frame, area, th);
+    }
 }
 
 fn weight_setting_label(app: &App) -> &'static str {

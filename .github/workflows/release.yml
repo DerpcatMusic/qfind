@@ -13,6 +13,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
+      - run: sudo apt-get update && sudo apt-get install -y libarchive-dev pkg-config
       - run: ./packaging/release-tui.sh
       - uses: actions/upload-artifact@v4
         with:

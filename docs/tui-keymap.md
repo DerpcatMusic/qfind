@@ -16,6 +16,15 @@ this file wins — update all three together.
 | `F7` | New folder inside the current directory (prompt). |
 | `Ctrl+Z` | Undo the last trash / rename / mkdir (up to 32 deep). |
 
+Right-click a result for `Open With`, `Open Folder`, copy path/name/URI,
+batch rename, copy, move, compress, extract, and action/script execution. Batch rename prompts for
+find, replace, prefix, suffix, and numbering start, then shows a review before applying. Copy, move,
+compression, and extraction run in the background and reject occupied or
+nested destinations.
+
+Opening a supported archive enters its persistent extracted workspace. `Ctrl+S`
+saves changes back atomically when inside a writable archive workspace.
+
 ## List columns
 
 List rows read `NAME | MODIFIED | SIZE` with fixed right-hand columns.
@@ -37,7 +46,7 @@ The footer shows `title: i/n`.
 
 | Keys | Action |
 | --- | --- |
-| `↑↓` / `Ctrl+N` / `Ctrl+P` | Move in results. |
+| `↑↓` / `Ctrl+N` | Move in results. |
 | `←→` | Grid columns, or folder / item pane in the browser. |
 | `Tab` | Switch Search / Results focus. |
 | `Enter` | Open file, or enter folder. |
@@ -62,9 +71,15 @@ The footer shows `title: i/n`.
 | Keys | Action |
 | --- | --- |
 | `Ctrl+O` | Reveal in the system file manager. |
-| `Ctrl+Y` | Copy focused path. `Ctrl+E`: open mode. |
-| `Ctrl+C` / `Ctrl+Q` / `Esc` | Quit (Esc also closes popups first). |
-| Mouse drag | Drop a result into another app. Right-click: actions menu (open, preview, copy path, show in files, mark, rename, trash). |
+| `Ctrl+Y` | Copy focused path. `Ctrl+C` with Results focus copies path(s); `Ctrl+Shift+C` copies name(s). |
+| `Ctrl+Shift+O` | Open focused item with a command entered in a prompt. |
+| `Ctrl+B` / `Ctrl+Shift+B` | Pin the current folder / open pinned folders. |
+| `F9` / `Ctrl+P` | Open Projects, Storage, Git, and Tasks workspace. |
+| `F5` | Refresh the live browser and rebuild the Catalog. |
+| `Ctrl+G` | Search everywhere. |
+| `Ctrl+E` | Cycle open mode. |
+| `Ctrl+C` without Results focus / `Ctrl+Q` / `Esc` | Quit (Esc also closes popups first). |
+| Mouse drag | Drop a result into another app. Right-click or `F10`: actions menu (open, open with, preview, reveal, copy variants, mark, rename, batch rename, transfer, trash). |
 
 ## Prompts (rename / new folder / location)
 

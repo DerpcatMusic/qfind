@@ -83,8 +83,12 @@ impl UndoOp {
                 Ok(format!("moved back {}", from.display()))
             }
             Self::Created { path } => {
-                remove_path(&path)?;
-                Ok(format!("removed {}", path.display()))
+                let (staged, _) = qfind_core::trash(&path).map_err(|error| error.to_string())?;
+                Ok(format!(
+                    "moved {} to recoverable trash {}",
+                    path.display(),
+                    staged.display()
+                ))
             }
         }
     }
@@ -92,39 +96,15 @@ impl UndoOp {
 
 /// Move `src` to `dst`, falling back to copy+remove across devices.
 pub fn relocate(src: &Path, dst: &Path) -> Result<(), String> {
-    if std::fs::rename(src, dst).is_ok() {
-        return Ok(());
-    }
-    if src.is_dir() {
-        copy_dir_all(src, dst)?;
-        remove_path(src)
-    } else {
-        std::fs::copy(src, dst).map_err(|e| e.to_string())?;
-        std::fs::remove_file(src).map_err(|e| e.to_string())?;
-        Ok(())
-    }
+    qfind_core::move_path(src, dst)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 pub fn remove_path(path: &Path) -> Result<(), String> {
-    if path.is_dir() && !path.is_symlink() {
-        std::fs::remove_dir_all(path).map_err(|e| e.to_string())
-    } else {
-        std::fs::remove_file(path).map_err(|e| e.to_string())
-    }
-}
-
-fn copy_dir_all(src: &Path, dst: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(dst).map_err(|e| e.to_string())?;
-    for entry in std::fs::read_dir(src).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let to = dst.join(entry.file_name());
-        if entry.file_type().map_err(|e| e.to_string())?.is_dir() {
-            copy_dir_all(&entry.path(), &to)?;
-        } else {
-            std::fs::copy(entry.path(), &to).map_err(|e| e.to_string())?;
-        }
-    }
-    Ok(())
+    qfind_core::delete(path)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

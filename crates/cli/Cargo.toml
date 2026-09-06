@@ -10,4 +10,5 @@ description = "Qfind command-line search"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-qfind-core.workspace = true
+qfind-core = { workspace = true, features = ["archives"] }
+serde_json = "1"
