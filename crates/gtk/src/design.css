@@ -32,6 +32,8 @@ columnview row:hover { background: alpha(@theme_fg_color, 0.035); }
 columnview row:selected, gridview child:selected { background: alpha(@qfind_accent, 0.20); color: @theme_fg_color; }
 .qfind-odd { background: alpha(@theme_fg_color, 0.022); }
 .qfind-odd:selected { background: alpha(@qfind_accent, 0.20); }
+.qfind-dirty { color: #e9bc72; font-weight: 600; }
+.qfind-dirty:selected { color: @theme_fg_color; }
 .qfind-tile { margin: 3px; padding: 3px; border-radius: 10px; }
 .qfind-tile:hover { background: alpha(@theme_fg_color, 0.035); }
 .qfind-tile .qfind-name { font-size: 13px; font-weight: 500; }

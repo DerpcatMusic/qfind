@@ -1,6 +1,51 @@
 use super::*;
 use manager_tools::Project;
 
+fn status_pill(project: &Project) -> String {
+    let mut pill = project.branch.clone();
+    if !pill.is_empty() && !project.target.is_empty() {
+        pill.push_str(&format!(" → {}", project.target));
+    }
+    if project.ahead > 0 || project.behind > 0 {
+        pill.push_str(&format!(" ⇡{} ⇣{}", project.ahead, project.behind));
+    }
+    pill
+}
+
+fn health_text(project: &Project) -> String {
+    if project.conflicted > 0 {
+        return format!("✖ {} conflicted · {} dirty", project.conflicted, project.dirty);
+    }
+    if project.dirty == 0 && project.untracked == 0 {
+        return "clean".into();
+    }
+    if project.untracked > 0 && project.dirty == 0 {
+        return format!("{} untracked", project.untracked);
+    }
+    format!("●{} · {} untracked", project.dirty, project.untracked)
+}
+
+fn toolchain_text(project: &Project) -> String {
+    let mut kinds = Vec::new();
+    if project.rust {
+        kinds.push("Rust".to_owned());
+    }
+    if project.node {
+        kinds.push(if project.web_tool.is_empty() {
+            "JS".into()
+        } else {
+            project.web_tool.clone()
+        });
+    }
+    if project.git {
+        kinds.push("Git".into());
+    }
+    if kinds.is_empty() {
+        kinds.push("local".into());
+    }
+    kinds.join(" · ")
+}
+
 pub fn new(window: &gtk::ApplicationWindow, state: Rc<RefCell<State>>, open: impl Fn(PathBuf) + 'static) -> gtk::Box {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 12);
@@ -10,15 +55,31 @@ pub fn new(window: &gtk::ApplicationWindow, state: Rc<RefCell<State>>, open: imp
     toolbar.append(&title);
     let search = gtk::SearchEntry::builder().placeholder_text("Find a project…").hexpand(true).build();
     toolbar.append(&search);
+    let status = gtk::Label::new(Some("Opening project index…"));
+    status.set_xalign(0.0);
+    status.set_margin_start(16);
+    status.set_margin_top(6);
+    status.set_margin_bottom(6);
     let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
-    refresh.set_tooltip_text(Some("Refresh the project and file index"));
+    refresh.set_tooltip_text(Some("Refresh projects (fast — does not rebuild the file index)"));
     toolbar.append(&refresh);
     {
         let state = state.clone();
         let window = window.clone();
+        let button = refresh.clone();
+        let status = status.clone();
         refresh.connect_clicked(move |_| {
+            // Projects-only refresh. Rebuilding the whole Catalog here
+            // froze the app for minutes on large Mounts.
+            button.set_sensitive(false);
+            status.set_text("Refreshing projects…");
             manager_tools::refresh_project_account();
-            start_rebuild(&state, &window, true);
+            if let Some(catalog) = state.borrow().catalog.clone() {
+                state.borrow().storage.refresh_projects(catalog, true);
+            } else {
+                status.set_text("No file index yet — rebuilding Catalog…");
+                start_rebuild(&state, &window, true);
+            }
         });
     }
     root.append(&toolbar);
@@ -32,7 +93,7 @@ pub fn new(window: &gtk::ApplicationWindow, state: Rc<RefCell<State>>, open: imp
     let table = gtk::ColumnView::new(Some(selection.clone()));
     table.set_vexpand(true);
     let storage = state.borrow().storage.clone();
-    for (column, width) in [("Project", 180), ("Repository", 180), ("Branch", 115), ("Location", 220), ("Kind", 70), ("Indexed size", 90), ("Modified", 100), ("Builds / caches", 130)] {
+    for (column, width) in [("Project", 180), ("Status", 170), ("Health", 130), ("Last commit", 170), ("Toolchain", 110), ("Repository", 150), ("Location", 220), ("Indexed size", 90), ("Modified", 100), ("Builds / caches", 130)] {
         let factory = if column == "Indexed size" {
             surface::make_size_factory(Rc::new(Cell::new(false)), storage.clone())
         } else {
@@ -58,15 +119,22 @@ pub fn new(window: &gtk::ApplicationWindow, state: Rc<RefCell<State>>, open: imp
                 let Some(project) = projects.iter().find(|project| project.path == Path::new(&path)) else { return; };
                 let text = match column {
                     "Project" => data.name(),
+                    "Status" => status_pill(project),
+                    "Health" => health_text(project),
+                    "Last commit" => if project.last_commit.is_empty() { "—".into() } else { project.last_commit.clone() },
+                    "Toolchain" => toolchain_text(project),
                     "Repository" => project.repository.clone(),
-                    "Branch" => project.branch.clone(),
                     "Location" => project.path.to_string_lossy().into_owned(),
-                    "Kind" => [project.rust.then_some("Rust"), project.node.then_some("JS"), project.git.then_some("Git")].into_iter().flatten().collect::<Vec<_>>().join(" · "),
                     "Modified" => if project.modified > 0 { actions::human_mtime(project.modified) } else { "—".into() },
                     _ => if project.artifacts.is_empty() { "No local artifacts".into() } else { project.artifacts.iter().map(|(path, _)| path.file_name().unwrap_or_default().to_string_lossy()).collect::<Vec<_>>().join(" · ") },
                 };
                 label.set_text(&text);
-                label.set_tooltip_text(Some(&project.path.to_string_lossy()));
+                label.set_tooltip_text(Some(&format!("{}\n{}\n{}", project.path.to_string_lossy(), status_pill(project), health_text(project))));
+                if column == "Health" && (project.conflicted > 0 || project.dirty > 0) {
+                    label.add_css_class("qfind-dirty");
+                } else {
+                    label.remove_css_class("qfind-dirty");
+                }
             });
             factory
         };
@@ -86,9 +154,11 @@ pub fn new(window: &gtk::ApplicationWindow, state: Rc<RefCell<State>>, open: imp
             let order = match column {
                 "Indexed size" => storage.known_size(&pa.path).cmp(&storage.known_size(&pb.path)),
                 "Modified" => pa.modified.cmp(&pb.modified),
-                "Kind" => (pa.rust, pa.node).cmp(&(pb.rust, pb.node)),
+                "Toolchain" => toolchain_text(pa).cmp(&toolchain_text(pb)),
+                "Status" => (pa.branch.clone(), pa.ahead, pa.behind).cmp(&(pb.branch.clone(), pb.ahead, pb.behind)),
+                "Health" => (pa.conflicted, pa.dirty, pa.untracked).cmp(&(pb.conflicted, pb.dirty, pb.untracked)),
+                "Last commit" => pa.last_commit.cmp(&pb.last_commit),
                 "Repository" => pa.repository.to_lowercase().cmp(&pb.repository.to_lowercase()),
-                "Branch" => pa.branch.cmp(&pb.branch),
                 "Location" => ap.cmp(&bp),
                 "Builds / caches" => pa.artifacts.len().cmp(&pb.artifacts.len()),
                 _ => a.name().to_lowercase().cmp(&b.name().to_lowercase()),
@@ -175,11 +245,6 @@ pub fn new(window: &gtk::ApplicationWindow, state: Rc<RefCell<State>>, open: imp
     split.set_shrink_start_child(true);
     split.set_shrink_end_child(false);
     root.append(&split);
-    let status = gtk::Label::new(Some("Opening project index…"));
-    status.set_xalign(0.0);
-    status.set_margin_start(16);
-    status.set_margin_top(6);
-    status.set_margin_bottom(6);
     root.append(&status);
     {
         let selected = project_path.clone();
@@ -200,14 +265,20 @@ pub fn new(window: &gtk::ApplicationWindow, state: Rc<RefCell<State>>, open: imp
             };
             pages.set_visible(true);
             *project_path.borrow_mut() = Some(project.path.clone());
-            heading.set_text(project.repository.rsplit('/').next().unwrap_or_default());
-            path_label.set_text(&project.path.to_string_lossy());
+            let title = if project.repository.is_empty() {
+                project.path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| project.path.to_string_lossy().into_owned())
+            } else {
+                project.repository.rsplit('/').next().unwrap_or_default().to_owned()
+            };
+            heading.set_text(&title);
+            let subtitle = format!("{}\n{} · {}", project.path.to_string_lossy(), status_pill(&project), health_text(&project));
+            path_label.set_text(&subtitle);
             path_label.set_tooltip_text(Some(&project.path.to_string_lossy()));
             open_files.set_sensitive(true);
             while let Some(child) = overview.first_child() { overview.remove(&child); }
             while let Some(child) = caches.first_child() { caches.remove(&child); }
             let panels = details.borrow_mut().entry(project.path.clone()).or_insert_with(|| (
-                manager_tools::project_detail_content(&window, &state, project.path.clone(), project.rust, project.node, project.git),
+                manager_tools::project_detail_content(&window, &state, project.clone()),
                 manager_tools::project_content_at(&window, &state, project.path.clone()),
             )).clone();
             overview.append(&panels.0);
@@ -235,9 +306,32 @@ pub fn new(window: &gtk::ApplicationWindow, state: Rc<RefCell<State>>, open: imp
                 projects.borrow().iter().find(|project| project.path == Path::new(&path)).cloned()
             });
             changing.set(true);
-            let mut items: Vec<_> = selected.as_ref().map(|selected| projects.borrow().iter().filter(|project| project.repository.eq_ignore_ascii_case(&selected.repository)).cloned().collect()).unwrap_or_default();
+            // Group linked worktrees: same non-empty repository, else the
+            // explicit worktree list from the backend. Local-only checkouts
+            // never group together.
+            let mut items: Vec<_> = selected.as_ref().map(|selected| {
+                if selected.repository.is_empty() {
+                    vec![selected.clone()]
+                } else {
+                    projects.borrow().iter().filter(|project| !project.repository.is_empty() && project.repository.eq_ignore_ascii_case(&selected.repository)).cloned().collect()
+                }
+            }).unwrap_or_default();
+            // Prefer the backend's sibling list when available.
+            if let Some(active) = &selected {
+                if !active.worktrees.is_empty() {
+                    let known: HashSet<PathBuf> = items.iter().map(|project| project.path.clone()).collect();
+                    for sibling in &active.worktrees {
+                        if !known.contains(sibling) {
+                            if let Some(extra) = projects.borrow().iter().find(|project| &project.path == sibling).cloned() {
+                                items.push(extra);
+                            }
+                        }
+                    }
+                }
+            }
             items.sort_by(|a, b| a.path.cmp(&b.path));
-            let labels: Vec<_> = items.iter().map(|project| format!("{} · {}", project.branch, project.path.display())).collect();
+            items.dedup_by(|a, b| a.path == b.path);
+            let labels: Vec<_> = items.iter().map(|project| format!("{} · {} · {}", project.branch, health_text(project), project.path.display())).collect();
             let model = gtk::StringList::new(&labels.iter().map(String::as_str).collect::<Vec<_>>());
             let position = selected.as_ref().and_then(|selected| remembered.borrow().get(&selected.repository).cloned().or_else(|| Some(selected.path.clone())))
                 .and_then(|path| items.iter().position(|project| project.path == path)).unwrap_or(0);
@@ -252,6 +346,7 @@ pub fn new(window: &gtk::ApplicationWindow, state: Rc<RefCell<State>>, open: imp
     }
     let weak = root.downgrade();
     let mut last = None;
+    let refresh_button = refresh.clone();
     glib::timeout_add_local(Duration::from_millis(200), move || {
         let Some(root) = weak.upgrade() else { return glib::ControlFlow::Break; };
         if !root.is_mapped() { return glib::ControlFlow::Continue; }
@@ -259,29 +354,50 @@ pub fn new(window: &gtk::ApplicationWindow, state: Rc<RefCell<State>>, open: imp
             status.set_text(&error);
             model.remove_all();
             last = None;
+            refresh_button.set_sensitive(true);
             return glib::ControlFlow::Continue;
         }
         let key = (search.text().to_lowercase(), storage.catalog_revision());
         if last.as_ref() == Some(&key) { return glib::ControlFlow::Continue; }
         let Some(mut items) = storage.projects(Path::new("/")) else {
             if model.n_items() > 0 { model.remove_all(); }
-            status.set_text("Matching local repositories and worktrees to your GitHub account…");
+            status.set_text("Reading local repositories and worktrees…");
             return glib::ControlFlow::Continue;
         };
         *projects.borrow_mut() = items.clone();
-        items.retain(|project| project.path.to_string_lossy().to_lowercase().contains(&key.0) || project.repository.to_lowercase().contains(&key.0));
+        items.retain(|project| {
+            let hay = format!(
+                "{} {} {} {} {}",
+                project.path.to_string_lossy().to_lowercase(),
+                project.repository.to_lowercase(),
+                project.branch.to_lowercase(),
+                project.last_commit.to_lowercase(),
+                toolchain_text(project).to_lowercase()
+            );
+            hay.contains(&key.0)
+        });
         {
             items.sort_by_key(|project| (
                 project.path.components().any(|part| matches!(part.as_os_str().to_str(), Some("actions-runners" | "_work"))),
                 !matches!(project.branch.as_str(), "main" | "master"), project.path.components().count(),
             ));
+            // One row per checkout path: linked worktrees stay visible.
             let mut seen = HashSet::new();
-            items.retain(|project| seen.insert(project.repository.to_lowercase()));
+            items.retain(|project| seen.insert(project.path.clone()));
         }
-        status.set_text(&format!("{} connected GitHub repositories · double-click to open a project file manager", items.len()));
-        let rows: Vec<_> = items.iter().map(|project| RowData::new(project.repository.rsplit('/').next().unwrap_or_default().to_owned(), project.path.to_string_lossy(), true, 0, project.modified)).collect();
+        let dirty = items.iter().filter(|project| project.dirty > 0 || project.conflicted > 0).count();
+        status.set_text(&format!("{} projects · {} with changes · double-click to open files", items.len(), dirty));
+        let rows: Vec<_> = items.iter().map(|project| {
+            let name = if project.repository.is_empty() {
+                project.path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| project.path.to_string_lossy().into_owned())
+            } else {
+                project.repository.rsplit('/').next().unwrap_or_default().to_owned()
+            };
+            RowData::new(name, project.path.to_string_lossy(), true, 0, project.modified)
+        }).collect();
         model.splice(0, model.n_items(), &rows);
         last = Some(key);
+        refresh_button.set_sensitive(true);
         glib::ControlFlow::Continue
     });
     root

@@ -659,21 +659,14 @@ impl Pane {
         self.project_generation.set(generation);
         let this = self.clone();
         gtk::glib::MainContext::default().spawn_local(async move {
-            let account = gtk::gio::spawn_blocking(crate::manager_tools::active_project_account).await;
+            // Offline-first: GitHub account is best-effort enrichment only.
+            // Local repositories must list even without `gh auth`.
+            let account = gtk::gio::spawn_blocking(crate::manager_tools::active_project_account)
+                .await
+                .ok()
+                .and_then(|result| result.ok())
+                .unwrap_or_default();
             if this.project_generation.get() != generation { return; }
-            let account = match account {
-                Ok(Ok(account)) => account,
-                result => {
-                    *this.projects.borrow_mut() = None;
-                    *this.project_account.borrow_mut() = None;
-                    *this.project_error.borrow_mut() = Some(match result {
-                        Ok(Err(error)) => error,
-                        _ => "Could not read the GitHub account.".into(),
-                    });
-                    this.project_revision.set(this.project_revision.get().wrapping_add(1));
-                    return;
-                }
-            };
             let changed = this.project_account.borrow().as_ref() != Some(&account);
             if !changed && !force && this.projects.borrow().is_some() { return; }
             if changed {
@@ -684,10 +677,7 @@ impl Pane {
             *this.project_error.borrow_mut() = None;
             let result = gtk::gio::spawn_blocking(move || {
                 let projects = crate::manager_tools::index_projects(&catalog)?;
-                if crate::manager_tools::active_project_account()? != account {
-                    return Err("GitHub account changed. Refresh projects.".into());
-                }
-                Ok(projects)
+                Ok::<_, String>(projects)
             }).await;
             if this.project_generation.get() != generation { return; }
             match result {

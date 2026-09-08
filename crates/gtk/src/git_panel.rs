@@ -57,6 +57,49 @@ pub fn new(state: Rc<RefCell<State>>, project: Option<Rc<RefCell<Option<PathBuf>
         });
     }
     root.append(&controls);
+    let refresh_requested = Rc::new(Cell::new(true));
+    let sync_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let fetch = gtk::Button::with_label("Fetch");
+    fetch.set_tooltip_text(Some("git fetch --all"));
+    let pull = gtk::Button::with_label("Pull");
+    pull.set_tooltip_text(Some("git pull --ff-only"));
+    let push = gtk::Button::with_label("Push");
+    push.set_tooltip_text(Some("git push"));
+    let branches = gtk::Button::with_label("Branches");
+    branches.set_tooltip_text(Some("List local branches"));
+    for button in [&fetch, &pull, &push, &branches] {
+        button.add_css_class("flat");
+        sync_bar.append(button);
+    }
+    root.append(&sync_bar);
+    {
+        let state_sync = state.clone();
+        let project_sync = project.clone();
+        let refresh_sync = refresh_requested.clone();
+        for (button, args) in [
+            (fetch, vec!["fetch", "--all"]),
+            (pull, vec!["pull", "--ff-only"]),
+            (push, vec!["push"]),
+        ] {
+            let refresh = refresh_sync.clone();
+            let state_sync = state_sync.clone();
+            let project_sync = project_sync.clone();
+            button.connect_clicked(move |button| {
+                button.set_sensitive(false);
+                let button = button.clone();
+                let directory = project_sync.as_ref().and_then(|path| path.borrow().clone()).unwrap_or_else(|| current_dir(&state_sync));
+                let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+                let refresh = refresh.clone();
+                glib::MainContext::default().spawn_local(async move {
+                    let _ = gio::spawn_blocking(move || {
+                        let _ = git(&directory, &args.iter().map(String::as_str).collect::<Vec<_>>(), None);
+                    }).await;
+                    button.set_sensitive(true);
+                    refresh.set(true);
+                });
+            });
+        }
+    }
     let scope = gtk::Label::new(Some("Select a file to inspect its changes"));
     scope.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
     scope.set_xalign(0.0);
@@ -84,7 +127,6 @@ pub fn new(state: Rc<RefCell<State>>, project: Option<Rc<RefCell<Option<PathBuf>
     controls.append(&copy);
     let patch = buffer.clone();
     copy.connect_clicked(move |button| button.display().clipboard().set_text(&patch.text(&patch.start_iter(), &patch.end_iter(), false)));
-    let refresh_requested = Rc::new(Cell::new(true));
     let flag = refresh_requested.clone();
     refresh.connect_clicked(move |_| flag.set(true));
     let reviewed: Rc<RefCell<Option<Query>>> = Rc::new(RefCell::new(None));
@@ -126,6 +168,25 @@ pub fn new(state: Rc<RefCell<State>>, project: Option<Rc<RefCell<Option<PathBuf>
                 }
                 refresh.set(true);
                 button.set_sensitive(true);
+            });
+        });
+    }
+    {
+        let state_sync = state.clone();
+        let project_sync = project.clone();
+        let refresh_sync = refresh_requested.clone();
+        let status_sync = action_status.clone();
+        branches.connect_clicked(move |_| {
+            let directory = project_sync.as_ref().and_then(|path| path.borrow().clone()).unwrap_or_else(|| current_dir(&state_sync));
+            let refresh = refresh_sync.clone();
+            let status = status_sync.clone();
+            glib::MainContext::default().spawn_local(async move {
+                let text = gio::spawn_blocking(move || {
+                    git(&directory, &["branch", "-vv", "--all"], None).unwrap_or_else(|error| error)
+                }).await.unwrap_or_else(|_| "Branch listing failed".into());
+                status.set_text(&text);
+                status.set_visible(true);
+                refresh.set(true);
             });
         });
     }
@@ -174,7 +235,25 @@ pub fn new(state: Rc<RefCell<State>>, project: Option<Rc<RefCell<Option<PathBuf>
                     .or_else(|_| git(&root, &["rev-parse", "--short", "HEAD"], None))?;
                 let status = git(&root, &["status", "--short", "--untracked-files=normal"], None)?;
                 let count = status.lines().count();
-                let label = format!("{} · {}", branch.trim(), if count == 0 { "clean".into() } else { format!("{count} {}", if count == 1 { "change" } else { "changes" }) });
+                let conflicted = status.lines().filter(|line| line.len() >= 2 && matches!((line.as_bytes()[0] as char, line.as_bytes()[1] as char), ('U', _) | (_, 'U') | ('A', 'A') | ('D', 'D'))).count();
+                let counts = git(&root, &["rev-list", "--left-right", "--count", "@{u}...HEAD"], None).unwrap_or_default();
+                let mut ahead = 0u32;
+                let mut behind = 0u32;
+                {
+                    let mut parts = counts.split_whitespace();
+                    if let (Some(left), Some(right)) = (parts.next(), parts.next()) {
+                        behind = left.parse().unwrap_or(0);
+                        ahead = right.parse().unwrap_or(0);
+                    }
+                }
+                let mut label = format!("⎇ {}", branch.trim());
+                if ahead > 0 || behind > 0 {
+                    label.push_str(&format!(" ⇡{ahead} ⇣{behind}"));
+                }
+                label.push_str(&format!(" · {}", if count == 0 { "clean".into() } else { format!("{count} {}", if count == 1 { "change" } else { "changes" }) }));
+                if conflicted > 0 {
+                    label.push_str(&format!(" · ✖{conflicted}"));
+                }
                 let mut diff = String::new();
                 let mut files = Vec::<String>::new();
                 if task.visible {

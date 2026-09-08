@@ -414,22 +414,71 @@ fn transfer(
 
 pub(super) use qfind_core::projects::{Project, active_project_account, index_projects, refresh_project_account};
 
-fn project_details(window: &gtk::ApplicationWindow, state: &Rc<RefCell<State>>, path: PathBuf, rust: bool, node: bool, git: bool) {
+fn project_details(window: &gtk::ApplicationWindow, state: &Rc<RefCell<State>>, project: Project) {
     let (dialog, body) = dialog(window, "Project");
     dialog.set_modal(false);
-    body.append(&project_detail_content(window, state, path, rust, node, git));
+    body.append(&project_detail_content(window, state, project));
     dialog.present();
 }
 
-pub(super) fn project_detail_content(_window: &gtk::ApplicationWindow, _state: &Rc<RefCell<State>>, path: PathBuf, _rust: bool, _node: bool, git: bool) -> gtk::Box {
+pub(super) fn project_detail_content(_window: &gtk::ApplicationWindow, _state: &Rc<RefCell<State>>, project: Project) -> gtk::Box {
+    let path = project.path.clone();
     let body = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    // Dashboard header: branch pill, health, last commit, toolchain.
+    let mut header_lines = Vec::new();
+    let mut pill = project.branch.clone();
+    if !project.target.is_empty() {
+        pill.push_str(&format!(" → {}", project.target));
+    }
+    if project.ahead > 0 || project.behind > 0 {
+        pill.push_str(&format!(" ⇡{} ⇣{}", project.ahead, project.behind));
+    }
+    header_lines.push(format!("⎇ {pill}"));
+    if project.conflicted > 0 {
+        header_lines.push(format!("✖ {} conflicted · {} dirty · {} untracked", project.conflicted, project.dirty, project.untracked));
+    } else if project.dirty > 0 || project.untracked > 0 {
+        header_lines.push(format!("●{} dirty · {} untracked", project.dirty, project.untracked));
+    } else {
+        header_lines.push("clean".into());
+    }
+    if !project.last_commit.is_empty() {
+        header_lines.push(project.last_commit.clone());
+    }
+    let mut tools = Vec::new();
+    if project.rust {
+        tools.push("Rust".to_owned());
+    }
+    if project.node {
+        tools.push(if project.web_tool.is_empty() { "JS".into() } else { project.web_tool.clone() });
+    }
+    if !project.scripts.is_empty() {
+        tools.push(format!("{} scripts", project.scripts.len()));
+    }
+    if !tools.is_empty() {
+        header_lines.push(tools.join(" · "));
+    }
+    if !project.worktrees.is_empty() {
+        header_lines.push(format!("{} linked worktrees", project.worktrees.len()));
+    }
+    let header = gtk::Label::new(Some(&header_lines.join("\n")));
+    header.set_xalign(0.0);
+    header.set_wrap(true);
+    header.add_css_class("dim-label");
+    body.append(&header);
+    if !project.scripts.is_empty() {
+        let scripts = gtk::Label::new(Some(&format!("Scripts: {}", project.scripts.iter().take(8).cloned().collect::<Vec<_>>().join(", "))));
+        scripts.set_xalign(0.0);
+        scripts.set_wrap(true);
+        scripts.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        body.append(&scripts);
+    }
     let output = text_view(&body);
     output.set_text("Reading project…");
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let commands = qfind_core::components::task_commands(&path);
     if !commands.is_empty() {
         let choices = gtk::DropDown::from_strings(
-            &commands.iter().map(|(_, name, _)| *name).collect::<Vec<_>>(),
+            &commands.iter().map(|(_, name, _)| name.as_str()).collect::<Vec<_>>(),
         );
         actions.append(&choices);
         let run = gtk::Button::with_label("Run command");
@@ -439,13 +488,13 @@ pub(super) fn project_detail_content(_window: &gtk::ApplicationWindow, _state: &
         run.connect_clicked(move |button| {
             button.set_sensitive(false);
             let button = button.clone();
-            let command = commands[choices.selected() as usize].0;
+            let command = commands[choices.selected() as usize].0.clone();
             let path = path.clone();
             output.set_text(&format!("Running {}…", command));
             let output = output.clone();
             glib::MainContext::default().spawn_local(async move {
             let result = gio::spawn_blocking(move || -> Result<String, String> {
-                qfind_core::components::run_task(&path, command)
+                qfind_core::components::run_task(&path, &command)
             }).await;
             output.set_text(&match result { Ok(Ok(message)) => message, Ok(Err(error)) => error, Err(_) => "Command worker failed".into() });
             button.set_sensitive(true);
@@ -462,7 +511,7 @@ pub(super) fn project_detail_content(_window: &gtk::ApplicationWindow, _state: &
     glib::MainContext::default().spawn_local(async move {
         let result = gio::spawn_blocking(move || {
             let mut report = format!("{}\n", path.display());
-            if git {
+            if project.git {
                 match Command::new("git")
                     .args([
                         "--no-optional-locks",
@@ -480,6 +529,13 @@ pub(super) fn project_detail_content(_window: &gtk::ApplicationWindow, _state: &
                         report.push_str(&String::from_utf8_lossy(&result.stderr));
                     }
                     Err(error) => report.push_str(&format!("\nGit unavailable: {error}\n")),
+                }
+                // Ahead/behind + last commit for the dashboard header.
+                if let Ok(log) = Command::new("git").args(["log", "-3", "--oneline", "--decorate"]).current_dir(&path).output() {
+                    let text = String::from_utf8_lossy(&log.stdout);
+                    if !text.trim().is_empty() {
+                        report.push_str(&format!("\nRecent commits\n{text}"));
+                    }
                 }
             }
             for name in ["Cargo.toml", "package.json"] {
@@ -588,10 +644,10 @@ pub(super) fn project_content_at(window: &gtk::ApplicationWindow, state: &Rc<Ref
                         label.set_xalign(0.0);
                     }
                     row.append(&title);
-                    let path = project.path.clone();
                     let win = win.clone();
                     let state = state_for_scan.clone();
-                    title.connect_clicked(move |_| project_details(&win, &state, path.clone(), project.rust, project.node, project.git));
+                    let snapshot = project.clone();
+                    title.connect_clicked(move |_| project_details(&win, &state, snapshot.clone()));
                     for (path, bytes) in project.artifacts {
                         let check = gtk::CheckButton::with_label(&format!("{} · {}", path.file_name().unwrap_or_default().to_string_lossy(), storage.indexed_size_text(&path)));
                         let weak = check.downgrade();
