@@ -15,11 +15,12 @@ env:
   RUSTFLAGS: -D warnings
   RUSTDOCFLAGS: -D warnings
   # Linux system libraries this crate links against (space separated). Edit per repo.
+  # gtk4 crate feature v4_12 needs GTK >= 4.12 (24.04 ships 4.14).
   APT_PACKAGES: "libgtk-4-dev libarchive-dev"
 jobs:
   lint:
     name: fmt + clippy + doc
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: read
@@ -50,7 +51,7 @@ jobs:
       fail-fast: false
       matrix:
         # compress-tools links libarchive; the macOS/Windows shells are native apps built elsewhere.
-        os: [ubuntu-22.04]
+        os: [ubuntu-24.04]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -70,7 +71,7 @@ jobs:
 
   # Builds with the oldest compiler declared in Cargo.toml `rust-version`. Skips when none is declared.
   msrv:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: read
