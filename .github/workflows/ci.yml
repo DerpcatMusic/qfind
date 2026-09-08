@@ -16,7 +16,7 @@ env:
   RUSTDOCFLAGS: -D warnings
   # Linux system libraries this crate links against (space separated). Edit per repo.
   # gtk4 crate feature v4_12 needs GTK >= 4.12 (24.04 ships 4.14).
-  APT_PACKAGES: "libgtk-4-dev libarchive-dev"
+  APT_PACKAGES: "libgtk-4-dev libarchive-dev xvfb"
 jobs:
   lint:
     name: fmt + clippy + doc
@@ -66,7 +66,7 @@ jobs:
       - uses: taiki-e/install-action@d438492cf8a250514fa2d34b30bc3c0dc37c65ff # v2.87.8
         with:
           tool: nextest
-      - run: cargo nextest run --workspace --all-features --no-tests=pass
+      - run: xvfb-run -a cargo nextest run --workspace --all-features --no-tests=pass
       - run: cargo test --workspace --all-features --doc
 
   # Builds with the oldest compiler declared in Cargo.toml `rust-version`. Skips when none is declared.
