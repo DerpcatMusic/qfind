@@ -68,6 +68,22 @@ fn toolchain_text(project: &Project) -> String {
     kinds.join(" · ")
 }
 
+fn parent_text(project: &Project) -> String {
+    let home = dirs::home_dir().unwrap_or_default();
+    let parent = project.path.parent().unwrap_or(&project.path);
+    let text = match parent.strip_prefix(&home) {
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => parent.display().to_string(),
+    };
+    // Keep the tail: "…/Repos/.worktrees" beats "/mnt/Windows11/DEV_PR…".
+    let parts: Vec<&str> = text.split('/').collect();
+    if parts.len() > 3 {
+        format!("…/{}", parts[parts.len() - 2..].join("/"))
+    } else {
+        text
+    }
+}
+
 pub fn new(
     window: &gtk::ApplicationWindow,
     state: Rc<RefCell<State>>,
@@ -77,27 +93,16 @@ pub fn new(
     root.add_css_class("megaman-projects");
     let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     toolbar.add_css_class("megaman-project-header");
-    let title = gtk::Label::new(Some(qfind_core::components::title("projects")));
-    title.add_css_class("megaman-page-title");
-    title.set_xalign(0.0);
-    let introduction = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    introduction.set_hexpand(true);
-    introduction.append(&title);
-    let subtitle = gtk::Label::new(Some("Your code. Your next move."));
-    subtitle.set_xalign(0.0);
-    subtitle.add_css_class("dim-label");
-    introduction.append(&subtitle);
-    toolbar.append(&introduction);
     let search = gtk::SearchEntry::builder()
         .placeholder_text("Search projects, branches, tools…")
-        .width_chars(28)
+        .width_chars(32)
         .build();
     toolbar.append(&search);
     let status = gtk::Label::new(Some("Opening project index…"));
     status.set_xalign(0.0);
-    status.set_margin_start(16);
-    status.set_margin_top(6);
-    status.set_margin_bottom(6);
+    status.set_hexpand(true);
+    status.add_css_class("dim-label");
+    toolbar.append(&status);
     let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
     refresh.set_tooltip_text(Some(
         "Refresh projects (fast — does not rebuild the file index)",
@@ -123,34 +128,6 @@ pub fn new(
         });
     }
     root.append(&toolbar);
-    let summary = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-    summary.add_css_class("megaman-summary");
-    let metrics: Vec<_> = [
-        ("REPOSITORIES", "folder-symbolic"),
-        ("WITH CHANGES", "document-edit-symbolic"),
-        ("CONFLICTS", "dialog-warning-symbolic"),
-        ("CACHES ON DISK", "package-x-generic-symbolic"),
-    ]
-    .into_iter()
-    .map(|(caption, icon)| {
-        let card = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        card.add_css_class("megaman-stat");
-        card.set_hexpand(true);
-        let heading = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        heading.append(&gtk::Image::from_icon_name(icon));
-        let label = gtk::Label::new(Some(caption));
-        label.add_css_class("megaman-eyebrow");
-        heading.append(&label);
-        card.append(&heading);
-        let value = gtk::Label::new(Some("—"));
-        value.set_xalign(0.0);
-        value.add_css_class("megaman-stat-value");
-        card.append(&value);
-        summary.append(&card);
-        value
-    })
-    .collect();
-    root.append(&summary);
 
     let projects: Rc<RefCell<Vec<Project>>> = Rc::new(RefCell::new(Vec::new()));
     let model = gio::ListStore::new::<RowData>();
@@ -216,7 +193,7 @@ pub fn new(
                     return;
                 };
                 let text = match column {
-                    "Project" => format!("{}\n{}", data.name(), toolchain_text(project)),
+                    "Project" => format!("{}\n{}", data.name(), parent_text(project)),
                     "Branch" => {
                         if project.branch.is_empty() {
                             "No branch".into()
@@ -293,7 +270,7 @@ pub fn new(
         col.set_resizable(true);
         col.set_visible(matches!(
             column,
-            "Project" | "Branch" | "Changes" | "Caches" | "Worktrees"
+            "Project" | "Branch" | "Changes" | "Last commit"
         ));
         col.set_fixed_width(width);
         col.set_expand(column == "Project");
@@ -1059,9 +1036,6 @@ pub fn new(
             empty_title.set_text("Projects are unavailable");
             empty_hint.set_text(&error);
             project_list.set_visible_child_name("empty");
-            for label in &metrics {
-                label.set_text("—");
-            }
             model.remove_all();
             last = None;
             refresh_button.set_sensitive(true);
@@ -1120,13 +1094,12 @@ pub fn new(
             .filter(|project| project.conflicted > 0)
             .count();
         let outputs: usize = items.iter().map(|project| project.artifacts.len()).sum();
-        for (label, count) in metrics.iter().zip([items.len(), dirty, conflicts, outputs]) {
-            label.set_text(&count.to_string());
-        }
         status.set_text(&format!(
-            "{} projects · {} with changes · double-click to open files",
+            "{} projects · {} with changes · {} conflicts · {} caches",
             items.len(),
-            dirty
+            dirty,
+            conflicts,
+            outputs
         ));
         if items.is_empty() {
             empty_title.set_text(if key.0.is_empty() {

@@ -552,12 +552,18 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     settings::apply_appearance(&Config::load());
 
     let header = gtk::HeaderBar::new();
-    // One mark only: the icon. The window title and app name already say "Megaman".
-    let logo = gtk::Image::from_icon_name("megaman");
-    logo.set_pixel_size(32);
-    logo.set_tooltip_text(Some("Megaman"));
-    logo.set_margin_start(4);
-    header.pack_start(&logo);
+    // One mark only. Desktops whose button layout already shows the window
+    // icon ("icon:minimize,...") get nothing extra; the rest get our logo.
+    let layout_has_icon = gtk::Settings::default()
+        .and_then(|s| s.gtk_decoration_layout())
+        .is_some_and(|l| l.contains("icon"));
+    if !layout_has_icon {
+        let logo = gtk::Image::from_icon_name("megaman");
+        logo.set_pixel_size(32);
+        logo.set_tooltip_text(Some("Megaman"));
+        logo.set_margin_start(4);
+        header.pack_start(&logo);
+    }
     let address_bar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     address_bar.add_css_class("qfind-address");
     header.add_css_class("qfind-shell");
@@ -780,8 +786,7 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     view_box.append(&spacing_scale);
     view_box.append(&zebra_btn);
     view_box.append(&tree_btn);
-    settings_btn.set_label("Preferences…");
-    view_box.append(&settings_btn);
+    header.pack_end(&settings_btn);
     let preview_view_btn = gtk::CheckButton::with_label("Inspector pane");
     preview_view_btn.set_active(true);
     view_box.append(&preview_view_btn);
