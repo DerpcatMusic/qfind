@@ -497,6 +497,11 @@ struct State {
     match_mode: MatchMode,
     seq: u64,
     snap_mtime: Option<SystemTime>,
+    /// Folders whose index children were verified against disk since their
+    /// last change notification. Cleared by the directory monitor.
+    fresh: HashSet<PathBuf>,
+    refreshing: bool,
+    dir_monitor: Option<gio::FileMonitor>,
     last_ids: Vec<u32>,
     visible_folders: usize,
     visible_files: usize,
@@ -1364,6 +1369,9 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
         match_mode: cfg.match_mode,
         seq: 0,
         snap_mtime: None,
+        fresh: HashSet::new(),
+        refreshing: false,
+        dir_monitor: None,
         last_ids: Vec::new(),
         visible_folders: 0,
         visible_files: 0,
@@ -2027,6 +2035,10 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     }
     start_rebuild(&state, &window, false);
     start_watch(&state);
+    if let Some(root) = initial_folder.as_ref() {
+        watch_directory(&state, root);
+        sync_index(&state, root.clone());
+    }
 }
 
 fn action_menu(path: &Path, actions: &mut Vec<PathBuf>) -> Option<gio::Menu> {
@@ -2707,7 +2719,92 @@ fn navigate_to(state: &Rc<RefCell<State>>, path: PathBuf, remember: bool) {
         "non-starred-symbolic"
     });
     state.borrow().storage.set_directory(&path);
+    watch_directory(state, &path);
     search_now(state);
+    sync_index(state, path);
+}
+
+/// Follow the browsed folder on disk: re-list it and re-check the index once
+/// the burst of change events settles.
+fn watch_directory(state: &Rc<RefCell<State>>, path: &Path) {
+    let monitor = gio::File::for_path(path)
+        .monitor_directory(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE)
+        .ok();
+    if let Some(monitor) = &monitor {
+        let state = Rc::clone(state);
+        let pending = Rc::new(Cell::new(false));
+        let dir = path.to_path_buf();
+        monitor.connect_changed(move |_, _, _, _| {
+            if pending.replace(true) {
+                return;
+            }
+            let state = Rc::clone(&state);
+            let pending = Rc::clone(&pending);
+            let dir = dir.clone();
+            glib::timeout_add_local_once(Duration::from_millis(400), move || {
+                pending.set(false);
+                state.borrow_mut().fresh.remove(&dir);
+                if state.borrow().manager.borrow().directory() != Some(dir.as_path()) {
+                    return;
+                }
+                kick_search(&state);
+                sync_index(&state, dir);
+            });
+        });
+    }
+    state.borrow_mut().dir_monitor = monitor;
+}
+
+/// Compare `dir`'s children with the Catalog; rescan just that subtree when
+/// they differ so recursive search and Global scope see new files too.
+fn sync_index(state: &Rc<RefCell<State>>, dir: PathBuf) {
+    let catalog = {
+        let st = state.borrow();
+        if st.refreshing || st.fresh.contains(&dir) {
+            return;
+        }
+        let Some(catalog) = st.catalog.clone() else { return };
+        catalog
+    };
+    let state = Rc::clone(state);
+    glib::MainContext::default().spawn_local(async move {
+        let check = dir.clone();
+        let stale = gio::spawn_blocking(move || catalog.stale(&Config::load().rebuild(), &check))
+            .await
+            .unwrap_or(false);
+        if stale {
+            refresh_subtree(&state, dir);
+        } else {
+            state.borrow_mut().fresh.insert(dir);
+        }
+    });
+}
+
+/// Rescan one folder subtree into the snapshot: milliseconds instead of a
+/// walk of every Mount.
+fn refresh_subtree(state: &Rc<RefCell<State>>, dir: PathBuf) {
+    {
+        let mut st = state.borrow_mut();
+        if st.refreshing {
+            return;
+        }
+        st.refreshing = true;
+        st.status.set_text(&format!("Updating index for {}…", dir.display()));
+    }
+    let state = Rc::clone(state);
+    glib::MainContext::default().spawn_local(async move {
+        let target = dir.clone();
+        let result = gio::spawn_blocking(move || Catalog::refresh(Config::load().rebuild(), &target)).await;
+        state.borrow_mut().refreshing = false;
+        match result {
+            Ok(Ok(catalog)) => {
+                state.borrow_mut().fresh.insert(dir);
+                adopt_catalog(&state, catalog);
+            }
+            Ok(Err(err)) => state.borrow().status.set_text(&format!("index update failed: {err}")),
+            Err(_) => state.borrow().status.set_text("Index update failed"),
+        }
+    });
 }
 
 fn update_archive_save_button(button: &gtk::Button, path: &Path) {
@@ -2795,7 +2892,9 @@ fn spawn_search(state: &Rc<RefCell<State>>, seq: u64) {
     drop(st);
     let state = Rc::clone(state);
     glib::MainContext::default().spawn_local(async move {
-        let result = gio::spawn_blocking(move || match (folder_scope, recursive) {
+        // An empty query lists the folder straight from disk in every mode,
+        // so a fresh download shows up without touching the index.
+        let result = gio::spawn_blocking(move || match (folder_scope, recursive && !q.is_empty()) {
             (true, false) => folder_path
                 .as_deref()
                 .ok_or_else(|| "No folder selected".to_owned())
@@ -3008,11 +3107,15 @@ fn adopt_catalog(state: &Rc<RefCell<State>>, catalog: Catalog) {
 }
 
 fn refresh_current(state: &Rc<RefCell<State>>, window: &gtk::ApplicationWindow) {
-    if state.borrow().manager.borrow().mode() == BrowseMode::Qfind {
-        start_rebuild(state, window, true);
-    } else {
-        state.borrow().status.set_text("Refreshing folder…");
-        kick_search(state);
+    let dir = state.borrow().manager.borrow().directory().map(Path::to_path_buf);
+    match dir {
+        Some(dir) if state.borrow().catalog.is_some() => {
+            state.borrow_mut().fresh.remove(&dir);
+            kick_search(state);
+            refresh_subtree(state, dir);
+        }
+        Some(_) => kick_search(state),
+        None => start_rebuild(state, window, true),
     }
 }
 
@@ -3457,6 +3560,9 @@ mod tests {
             match_mode: MatchMode::Fuzzy,
             seq: 1,
             snap_mtime: None,
+            fresh: HashSet::new(),
+            refreshing: false,
+            dir_monitor: None,
             last_ids: Vec::new(),
             visible_folders: 0,
             visible_files: 0,

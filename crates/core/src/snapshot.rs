@@ -127,6 +127,23 @@ impl Snapshot {
         })
     }
 
+    pub(crate) fn names_bytes(&self) -> &[u8] {
+        &self.bytes[self.names_off..]
+    }
+
+    /// Walk parents up to the Mount root this entry was walked from.
+    pub(crate) fn root_of(&self, mut id: u32) -> u32 {
+        let mut guard = 0u32;
+        while let Some(e) = self.entry(id) {
+            if e.parent == Entry::ROOT_PARENT || guard > 512 {
+                break;
+            }
+            id = e.parent;
+            guard += 1;
+        }
+        id
+    }
+
     pub(crate) fn name(&self, entry: Entry) -> &str {
         let start = self.names_off + entry.name_off as usize;
         let end = start + entry.name_len as usize;
@@ -282,6 +299,50 @@ impl Builder {
             ids: rustc_hash_map::PathMap::new(),
             names: Vec::new(),
         }
+    }
+
+    /// Copy every entry of `snap` except `skip` and its descendants, keeping
+    /// the name blob verbatim so a copy is one Vec push per entry. Returns the
+    /// old-folder-id → new-id table (`u32::MAX` = dropped).
+    pub(crate) fn from_snapshot(snap: &Snapshot, skip: Option<u32>) -> (Self, Vec<u32>) {
+        let n_folders = snap.folder_count();
+        let mut b = Self {
+            folders: Vec::with_capacity(n_folders as usize),
+            files: Vec::with_capacity(snap.file_count() as usize),
+            ids: rustc_hash_map::PathMap::new(),
+            names: snap.names_bytes().to_vec(),
+        };
+        let mut new_ids = vec![u32::MAX; n_folders as usize];
+        for id in 0..n_folders {
+            let Some(e) = snap.entry(id) else { continue };
+            if Some(id) == skip {
+                continue;
+            }
+            let parent = if e.parent == Entry::ROOT_PARENT {
+                Entry::ROOT_PARENT
+            } else {
+                // Parents always precede children, so a dropped parent is already known.
+                match new_ids.get(e.parent as usize) {
+                    Some(&p) if p != u32::MAX => p,
+                    _ => continue,
+                }
+            };
+            new_ids[id as usize] = u32::try_from(b.folders.len()).unwrap_or(u32::MAX);
+            b.folders.push(Entry { parent, ..e });
+        }
+        for id in n_folders..snap.len() {
+            let Some(e) = snap.entry(id) else { continue };
+            match new_ids.get(e.parent as usize) {
+                Some(&parent) if parent != u32::MAX => b.files.push(Entry { parent, ..e }),
+                _ => {}
+            }
+        }
+        (b, new_ids)
+    }
+
+    /// Make a copied folder reachable by path so a later walk can hang under it.
+    pub(crate) fn register_dir(&mut self, path: PathBuf, id: u32) {
+        self.ids.insert(path, id);
     }
 
     pub(crate) fn intern_dir(&mut self, path: &Path, walk_root: &Path) -> u32 {
