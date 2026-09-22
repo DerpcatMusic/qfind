@@ -419,9 +419,7 @@ fn bookmarks_rect(area: Rect, count: usize) -> Rect {
 fn review_rect(area: Rect, count: usize) -> Rect {
     let w = 90.min(area.width.saturating_sub(2)).max(2);
     let h = count.saturating_add(4).min(u16::MAX as usize) as u16;
-    let h = h
-        .min(area.height.saturating_sub(2))
-        .max(4);
+    let h = h.min(area.height.saturating_sub(2)).max(4);
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
     Rect::new(x, y, w, h)

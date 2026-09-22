@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gtk::prelude::*;
-use qfind_core::appearance::{GTK_THEMES, THEMES, accent_for, normalize_gtk_theme, normalize_theme};
+use qfind_core::appearance::{
+    GTK_THEMES, THEMES, accent_for, normalize_gtk_theme, normalize_theme,
+};
 use qfind_core::{Config, MatchMode, OpenMode, PreviewMode};
 
 thread_local! {
@@ -131,10 +133,14 @@ pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
     editor_entry.set_placeholder_text(Some("$EDITOR then $VISUAL"));
     editor_entry.set_text(&cfg.editor);
     let theme_drop = gtk::DropDown::from_strings(THEMES);
-    theme_drop.set_tooltip_text(Some("Accent color. Shared with the TUI and every other frontend."));
+    theme_drop.set_tooltip_text(Some(
+        "Accent color. Shared with the TUI and every other frontend.",
+    ));
     theme_drop.set_selected(index_of(THEMES, normalize_theme(&cfg.theme)));
     let gtk_theme_drop = gtk::DropDown::from_strings(GTK_THEMES);
-    gtk_theme_drop.set_tooltip_text(Some("system follows the desktop. Adwaita-dark forces dark."));
+    gtk_theme_drop.set_tooltip_text(Some(
+        "system follows the desktop. Adwaita-dark forces dark.",
+    ));
     gtk_theme_drop.set_selected(index_of(GTK_THEMES, normalize_gtk_theme(&cfg.gtk_theme)));
 
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 18);
@@ -145,19 +151,49 @@ pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
     vbox.set_margin_bottom(16);
 
     let search = group("Search");
-    row(&search.1, "Query matching", "Fuzzy lets letters skip; Substring must be contiguous.", &match_drop);
-    row(&search.1, "Space preview", "Which Hit the preview follows.", &preview_drop);
+    row(
+        &search.1,
+        "Query matching",
+        "Fuzzy lets letters skip; Substring must be contiguous.",
+        &match_drop,
+    );
+    row(
+        &search.1,
+        "Space preview",
+        "Which Hit the preview follows.",
+        &preview_drop,
+    );
     vbox.append(&search.0);
 
     let opening = group("Opening");
-    row(&opening.1, "Open Hits with", "Auto picks the editor for text and the desktop handler otherwise.", &open_drop);
+    row(
+        &opening.1,
+        "Open Hits with",
+        "Auto picks the editor for text and the desktop handler otherwise.",
+        &open_drop,
+    );
     editor_entry.set_width_chars(18);
-    row(&opening.1, "Editor", "Empty uses $EDITOR, then $VISUAL.", &editor_entry);
+    row(
+        &opening.1,
+        "Editor",
+        "Empty uses $EDITOR, then $VISUAL.",
+        &editor_entry,
+    );
     vbox.append(&opening.0);
 
     let appearance = group("Appearance");
-    row(&appearance.1, "Accent", "Shared with the TUI and every other frontend.", &theme_drop);
-    row(&appearance.1, "GTK theme", "system follows the desktop.", &gtk_theme_drop);
+    row(
+        &appearance.1,
+        "Accent",
+        "Shared with the TUI and every other frontend.",
+        &theme_drop,
+    );
+    row(
+        &appearance.1,
+        "GTK theme",
+        "system follows the desktop.",
+        &gtk_theme_drop,
+    );
     vbox.append(&appearance.0);
 
     let index = group("Index");
@@ -232,7 +268,8 @@ pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
             };
             cfg.editor = editor_entry.text().to_string();
             cfg.theme = THEMES[theme_drop.selected() as usize % THEMES.len()].into();
-            cfg.gtk_theme = GTK_THEMES[gtk_theme_drop.selected() as usize % GTK_THEMES.len()].into();
+            cfg.gtk_theme =
+                GTK_THEMES[gtk_theme_drop.selected() as usize % GTK_THEMES.len()].into();
             let _ = cfg.save();
             apply_appearance(&cfg);
             live.preview.set(cfg.preview);

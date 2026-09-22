@@ -67,7 +67,7 @@ impl Catalog {
     /// Open an existing snapshot.
     ///
     /// # Errors
-    /// Returns [`Error::Snapshot`] or [`Error::Io`] if the file is missing or corrupt.
+    /// Returns [`crate::Error::Snapshot`] or [`crate::Error::Io`] if the file is missing or corrupt.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let snapshot = Snapshot::open_mmap(path)?;
@@ -140,17 +140,29 @@ impl Catalog {
     #[must_use]
     pub fn stale(&self, rebuild: &Rebuild, dir: impl AsRef<Path>) -> bool {
         let dir = dir.as_ref();
-        let Some(folder) = self.folder(dir) else { return true };
-        let opts = crate::SearchOpts { limit: 0, ..Default::default() };
-        let Ok(hits) = folder.search_children_with("", opts) else { return true };
+        let Some(folder) = self.folder(dir) else {
+            return true;
+        };
+        let opts = crate::SearchOpts {
+            limit: 0,
+            ..Default::default()
+        };
+        let Ok(hits) = folder.search_children_with("", opts) else {
+            return true;
+        };
         let indexed: std::collections::HashSet<String> =
             hits.iter().map(|hit| hit.name().to_owned()).collect();
-        let Ok(entries) = std::fs::read_dir(dir) else { return false };
-        let excludes = Excludes::with_paths(&rebuild.extra_excludes, &rebuild.extra_exclude_paths).ok();
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        let excludes =
+            Excludes::with_paths(&rebuild.extra_excludes, &rebuild.extra_exclude_paths).ok();
         let live: std::collections::HashSet<String> = entries
             .flatten()
             .filter(|e| {
-                excludes.as_ref().is_none_or(|ex| !ex.skip_name(&e.file_name()) && !ex.skip(&e.path()))
+                excludes
+                    .as_ref()
+                    .is_none_or(|ex| !ex.skip_name(&e.file_name()) && !ex.skip(&e.path()))
             })
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
@@ -197,7 +209,7 @@ impl Catalog {
     /// Filter the Catalog with a Query string (highlight on, no limit).
     ///
     /// # Errors
-    /// Returns [`Error::Query`] for a malformed glob.
+    /// Returns [`crate::Error::Query`] for a malformed glob.
     pub fn search(&self, query: &str) -> Result<Hits<'_>> {
         self.search_with(
             query,
@@ -211,7 +223,7 @@ impl Catalog {
     /// Filter with scope, class, sort, and limit.
     ///
     /// # Errors
-    /// Returns [`Error::Query`] for a malformed glob.
+    /// Returns [`crate::Error::Query`] for a malformed glob.
     pub fn search_with(&self, query: &str, opts: crate::SearchOpts) -> Result<Hits<'_>> {
         let ranked = search::search(&self.snapshot, query, opts)?;
         Ok(Hits {
@@ -224,7 +236,7 @@ impl Catalog {
     /// Filter while allowing a caller to stop stale Query work.
     ///
     /// # Errors
-    /// Returns [`Error::Cancelled`](crate::Error::Cancelled) when `cancelled` becomes true.
+    /// Returns [`crate::Error::Cancelled`](crate::Error::Cancelled) when `cancelled` becomes true.
     pub fn search_with_cancel(
         &self,
         query: &str,
@@ -243,7 +255,7 @@ impl Catalog {
     /// Filter while optionally hiding dotfiles and allowing stale work to stop.
     ///
     /// # Errors
-    /// Returns [`Error::Cancelled`](crate::Error::Cancelled) when `cancelled` becomes true.
+    /// Returns [`crate::Error::Cancelled`](crate::Error::Cancelled) when `cancelled` becomes true.
     pub fn search_with_hidden_cancel(
         &self,
         query: &str,
@@ -294,7 +306,7 @@ impl CatalogFolder {
     /// Search descendants of this Folder.
     ///
     /// # Errors
-    /// Returns [`Error::Query`] for a malformed glob.
+    /// Returns [`crate::Error::Query`] for a malformed glob.
     pub fn search_with(&self, query: &str, opts: crate::SearchOpts) -> Result<Hits<'_>> {
         self.search_with_hidden_cancel(query, opts, true, || false)
     }
@@ -302,7 +314,7 @@ impl CatalogFolder {
     /// Search descendants while allowing a caller to hide dotfiles and cancel stale work.
     ///
     /// # Errors
-    /// Returns [`Error::Cancelled`](crate::Error::Cancelled) when `cancelled` becomes true.
+    /// Returns [`crate::Error::Cancelled`](crate::Error::Cancelled) when `cancelled` becomes true.
     pub fn search_with_hidden_cancel(
         &self,
         query: &str,
@@ -329,7 +341,7 @@ impl CatalogFolder {
     /// Search only this Folder's immediate children.
     ///
     /// # Errors
-    /// Returns [`Error::Query`] for a malformed glob.
+    /// Returns [`crate::Error::Query`] for a malformed glob.
     pub fn search_children_with(&self, query: &str, opts: crate::SearchOpts) -> Result<Hits<'_>> {
         let ranked = search::search_with_cancel(
             &self.catalog.snapshot,
@@ -490,7 +502,12 @@ mod tests {
 
         let catalog = Catalog::refresh(rebuild(), root.join("a")).expect("refresh a");
         let names = |c: &Catalog, q: &str| -> Vec<String> {
-            let mut v: Vec<String> = c.search(q).expect("search").iter().map(|h| h.name().to_owned()).collect();
+            let mut v: Vec<String> = c
+                .search(q)
+                .expect("search")
+                .iter()
+                .map(|h| h.name().to_owned())
+                .collect();
             v.sort();
             v
         };
@@ -505,9 +522,14 @@ mod tests {
         // A folder that was never indexed hangs under its nearest indexed ancestor.
         let catalog = Catalog::refresh(rebuild(), root.join("c/deep")).expect("refresh deep");
         let folder = catalog.folder(&root).expect("root");
-        let hits = folder.search_with("four", Default::default()).expect("hits");
+        let hits = folder
+            .search_with("four", Default::default())
+            .expect("hits");
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits.get(0).expect("four").path(), root.join("c/deep/four.txt"));
+        assert_eq!(
+            hits.get(0).expect("four").path(),
+            root.join("c/deep/four.txt")
+        );
         assert!(!catalog.stale(&rebuild(), root.join("c/deep")));
     }
 

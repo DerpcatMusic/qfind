@@ -200,11 +200,16 @@ impl Snapshot {
     }
 
     pub(crate) fn folder_id(&self, path: &Path) -> Option<u32> {
-        self.folder_paths.get_or_init(|| {
-            let mut paths = std::collections::HashMap::new();
-            for id in 0..self.folder_count { paths.entry(self.path(id)).or_insert(id); }
-            paths
-        }).get(path).copied()
+        self.folder_paths
+            .get_or_init(|| {
+                let mut paths = std::collections::HashMap::new();
+                for id in 0..self.folder_count {
+                    paths.entry(self.path(id)).or_insert(id);
+                }
+                paths
+            })
+            .get(path)
+            .copied()
     }
 
     pub(crate) fn is_descendant_of(&self, id: u32, folder: u32) -> bool {

@@ -247,13 +247,13 @@ pub fn compress(paths: &[PathBuf], destination: &Path) -> Result<()> {
     let result = (|| {
         #[cfg(unix)]
         {
-        let mut writer = ArchiveWriter::new(file)?;
-        configure_writer(&mut writer, destination)?;
-        writer.open()?;
-        for path in paths {
-            add_path(&mut writer, root, path)?;
-        }
-        drop(writer);
+            let mut writer = ArchiveWriter::new(file)?;
+            configure_writer(&mut writer, destination)?;
+            writer.open()?;
+            for path in paths {
+                add_path(&mut writer, root, path)?;
+            }
+            drop(writer);
         }
         #[cfg(not(unix))]
         write_native_archive(file, root, paths, destination)?;
@@ -269,38 +269,86 @@ pub fn compress(paths: &[PathBuf], destination: &Path) -> Result<()> {
 
 #[cfg(not(unix))]
 fn repack_into(workspace: &Workspace, destination: &Path) -> Result<()> {
-    let file = File::options().write(true).create_new(true).open(destination)?;
-    write_native_archive(file, &workspace.contents, &[workspace.contents.join(".")], &workspace.source)
+    let file = File::options()
+        .write(true)
+        .create_new(true)
+        .open(destination)?;
+    write_native_archive(
+        file,
+        &workspace.contents,
+        &[workspace.contents.join(".")],
+        &workspace.source,
+    )
 }
 
 #[cfg(not(unix))]
-fn write_native_archive(mut destination: File, root: &Path, paths: &[PathBuf], format_path: &Path) -> Result<()> {
+fn write_native_archive(
+    mut destination: File,
+    root: &Path,
+    paths: &[PathBuf],
+    format_path: &Path,
+) -> Result<()> {
     use crate::process::CommandOutputExt;
     fn validate(path: &Path) -> Result<()> {
-        let metadata=fs::symlink_metadata(path)?;
-        if metadata.file_type().is_symlink() || crate::ops::is_reparse_point(&metadata) || (!metadata.is_dir() && !metadata.is_file()) {
-            bail!("Cannot archive special file or symlink: {}",path.display());
+        let metadata = fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink()
+            || crate::ops::is_reparse_point(&metadata)
+            || (!metadata.is_dir() && !metadata.is_file())
+        {
+            bail!("Cannot archive special file or symlink: {}", path.display());
         }
-        if metadata.is_dir() { for item in fs::read_dir(path)? { validate(&item?.path())?; } }
+        if metadata.is_dir() {
+            for item in fs::read_dir(path)? {
+                validate(&item?.path())?;
+            }
+        }
         Ok(())
     }
-    for path in paths { validate(path)?; }
-    let name=format_path.to_string_lossy().to_ascii_lowercase();
-    let (format,filter)=if name.ends_with(".zip") {("zip",None)}
-        else if name.ends_with(".7z") {("7zip",None)}
-        else if name.ends_with(".tar.gz")||name.ends_with(".tgz") {("pax",Some("--gzip"))}
-        else if name.ends_with(".tar.bz2")||name.ends_with(".tbz2") {("pax",Some("--bzip2"))}
-        else if name.ends_with(".tar.xz")||name.ends_with(".txz") {("pax",Some("--xz"))}
-        else if name.ends_with(".tar.zst")||name.ends_with(".tzst") {("pax",Some("--zstd"))}
-        else if name.ends_with(".tar") {("pax",None)} else {bail!("this archive format is read-only")};
-    let temporary=tempfile::NamedTempFile::new()?.into_temp_path();
-    let mut command=std::process::Command::new("tar.exe");
-    command.args(["--create","--format",format,"--file"]).arg(&temporary);
-    if let Some(filter)=filter {command.arg(filter);}
+    for path in paths {
+        validate(path)?;
+    }
+    let name = format_path.to_string_lossy().to_ascii_lowercase();
+    let (format, filter) = if name.ends_with(".zip") {
+        ("zip", None)
+    } else if name.ends_with(".7z") {
+        ("7zip", None)
+    } else if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
+        ("pax", Some("--gzip"))
+    } else if name.ends_with(".tar.bz2") || name.ends_with(".tbz2") {
+        ("pax", Some("--bzip2"))
+    } else if name.ends_with(".tar.xz") || name.ends_with(".txz") {
+        ("pax", Some("--xz"))
+    } else if name.ends_with(".tar.zst") || name.ends_with(".tzst") {
+        ("pax", Some("--zstd"))
+    } else if name.ends_with(".tar") {
+        ("pax", None)
+    } else {
+        bail!("this archive format is read-only")
+    };
+    let temporary = tempfile::NamedTempFile::new()?.into_temp_path();
+    let mut command = std::process::Command::new("tar.exe");
+    command
+        .args(["--create", "--format", format, "--file"])
+        .arg(&temporary);
+    if let Some(filter) = filter {
+        command.arg(filter);
+    }
     command.arg("--directory").arg(root).arg("--");
-    for path in paths { let relative=path.strip_prefix(root)?; command.arg(if relative.as_os_str().is_empty() {Path::new(".")} else {relative});}
-    let output=command.bounded_output(Duration::from_secs(1800))?;
-    if !output.status.success() {bail!("Archive creation failed: {}",String::from_utf8_lossy(&output.stderr));}
+    for path in paths {
+        let relative = path.strip_prefix(root)?;
+        command.arg(if relative.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            relative
+        });
+    }
+    let output = command.bounded_output(Duration::from_secs(1800))?;
+    if !output.status.success() {
+        bail!(
+            "Archive creation failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     compress_tools::list_archive_entries(File::open(&temporary)?)?;
     std::io::copy(&mut File::open(&temporary)?, &mut destination)?;
     destination.sync_all()?;
@@ -364,7 +412,10 @@ fn add_tree(writer: &mut ArchiveWriter<File>, root: &Path, directory: &Path) -> 
 #[cfg(unix)]
 fn add_path(writer: &mut ArchiveWriter<File>, root: &Path, path: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() || crate::ops::is_reparse_point(&metadata) || (!metadata.is_dir() && !metadata.is_file()) {
+    if metadata.file_type().is_symlink()
+        || crate::ops::is_reparse_point(&metadata)
+        || (!metadata.is_dir() && !metadata.is_file())
+    {
         bail!("Cannot archive special file or symlink: {}", path.display());
     }
     let relative = path.strip_prefix(root)?;
@@ -498,15 +549,18 @@ fn safe_member(name: &str) -> Result<PathBuf> {
                 {
                     let name = part.to_string_lossy();
                     let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
-                    if name.contains(':') || name.ends_with(['.', ' '])
+                    if name.contains(':')
+                        || name.ends_with(['.', ' '])
                         || matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-                        || ((stem.starts_with("COM") || stem.starts_with("LPT")) && stem.len() == 4
-                            && matches!(stem.as_bytes()[3], b'1'..=b'9')) {
+                        || ((stem.starts_with("COM") || stem.starts_with("LPT"))
+                            && stem.len() == 4
+                            && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+                    {
                         bail!("archive contains an unsafe Windows filename: {name}");
                     }
                 }
                 path.push(part);
-            },
+            }
             Component::CurDir => {}
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
                 bail!("archive contains an unsafe path: {name}")
@@ -528,7 +582,7 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     #[cfg(unix)]
-use simple_archive::writer::ArchiveWriter;
+    use simple_archive::writer::ArchiveWriter;
     use tempfile::tempdir;
 
     #[test]

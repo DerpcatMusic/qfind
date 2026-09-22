@@ -16,10 +16,10 @@ use std::ffi::OsString;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStringExt;
 
+use gtk::FileChooserAction;
 use gtk::gio;
 use gtk::glib;
 use gtk::prelude::*;
-use gtk::FileChooserAction;
 use zbus::Connection;
 use zbus::connection::Builder;
 use zbus::interface;
@@ -324,7 +324,11 @@ fn show_picker(request: UiRequest, pending: &Rc<RefCell<HashMap<String, Pending>
         _ => "file",
     };
     // Multi-file save is "pick a folder, then join the names".
-    let mode = if spec.save_files.is_empty() { mode } else { "folder" };
+    let mode = if spec.save_files.is_empty() {
+        mode
+    } else {
+        "folder"
+    };
     let mut argv: Vec<std::ffi::OsString> = vec![
         exe.into(),
         format!("--pick={mode}").into(),
@@ -349,17 +353,21 @@ fn show_picker(request: UiRequest, pending: &Rc<RefCell<HashMap<String, Pending>
     if !exts.is_empty() {
         argv.push(format!("--query={}", exts.join(" ")).into());
     }
-    if let Some(name) = spec
-        .current_name
-        .clone()
-        .or_else(|| spec.current_file.as_ref().and_then(|f| f.file_name().map(|n| n.to_string_lossy().into_owned())))
-    {
+    if let Some(name) = spec.current_name.clone().or_else(|| {
+        spec.current_file
+            .as_ref()
+            .and_then(|f| f.file_name().map(|n| n.to_string_lossy().into_owned()))
+    }) {
         argv.push(format!("--name={name}").into());
     }
     let here = spec
         .current_folder
         .clone()
-        .or_else(|| spec.current_file.as_ref().and_then(|f| f.parent().map(PathBuf::from)))
+        .or_else(|| {
+            spec.current_file
+                .as_ref()
+                .and_then(|f| f.parent().map(PathBuf::from))
+        })
         .or_else(|| std::env::var_os("HOME").map(PathBuf::from));
     if let Some(here) = here {
         let mut arg = std::ffi::OsString::from("--here=");
@@ -401,13 +409,13 @@ fn show_picker(request: UiRequest, pending: &Rc<RefCell<HashMap<String, Pending>
         let outcome = if state.cancelled.load(Ordering::Acquire) || paths.is_empty() {
             UiOutcome::Cancelled
         } else {
-            if !save_files.is_empty() {
-                if let Some(folder) = paths.pop() {
-                    paths = save_files
-                        .iter()
-                        .map(|name| folder.join(path_from_bytes(name.clone())))
-                        .collect();
-                }
+            if !save_files.is_empty()
+                && let Some(folder) = paths.pop()
+            {
+                paths = save_files
+                    .iter()
+                    .map(|name| folder.join(path_from_bytes(name.clone())))
+                    .collect();
             }
             UiOutcome::Selected(paths)
         };

@@ -114,28 +114,53 @@ impl HitModel {
 
     /// Supplementary columns sort loaded results without losing catalog identity.
     pub fn set_text_sort(&self, sort: Option<(bool, bool)>) {
-        if self.imp().text_sort.replace(sort) == sort || sort.is_none() { return; }
-        if let Some(rows) = self.imp().live.borrow_mut().as_mut() { self.sort_rows(rows); }
-        else { self.sort_ids(&mut self.imp().ids.borrow_mut()); }
+        if self.imp().text_sort.replace(sort) == sort || sort.is_none() {
+            return;
+        }
+        if let Some(rows) = self.imp().live.borrow_mut().as_mut() {
+            self.sort_rows(rows);
+        } else {
+            self.sort_ids(&mut self.imp().ids.borrow_mut());
+        }
         let count = self.n_items();
         self.items_changed(0, count, count);
     }
 
     fn sort_ids(&self, ids: &mut Vec<u32>) {
-        let Some((location, descending)) = self.imp().text_sort.get() else { return; };
+        let Some((location, descending)) = self.imp().text_sort.get() else {
+            return;
+        };
         let catalog = self.imp().catalog.borrow();
-        let Some(catalog) = catalog.as_ref() else { return; };
-        sort_text(ids, descending, |id| catalog.hit(*id).map(|hit| {
-            let path = hit.path();
-            (crate::FOLDERS_FIRST.load(std::sync::atomic::Ordering::Relaxed) && !hit.is_dir(),
-                crate::columns::text_key(hit.name(), &path, hit.is_dir(), location), path.to_string_lossy().into_owned())
-        }).unwrap_or_default());
+        let Some(catalog) = catalog.as_ref() else {
+            return;
+        };
+        sort_text(ids, descending, |id| {
+            catalog
+                .hit(*id)
+                .map(|hit| {
+                    let path = hit.path();
+                    (
+                        crate::FOLDERS_FIRST.load(std::sync::atomic::Ordering::Relaxed)
+                            && !hit.is_dir(),
+                        crate::columns::text_key(hit.name(), &path, hit.is_dir(), location),
+                        path.to_string_lossy().into_owned(),
+                    )
+                })
+                .unwrap_or_default()
+        });
     }
 
     fn sort_rows(&self, rows: &mut Vec<RowData>) {
-        let Some((location, descending)) = self.imp().text_sort.get() else { return; };
-        sort_text(rows, descending, |row| (crate::FOLDERS_FIRST.load(std::sync::atomic::Ordering::Relaxed) && !row.is_dir(),
-            crate::columns::text_value(row, location), row.path()));
+        let Some((location, descending)) = self.imp().text_sort.get() else {
+            return;
+        };
+        sort_text(rows, descending, |row| {
+            (
+                crate::FOLDERS_FIRST.load(std::sync::atomic::Ordering::Relaxed) && !row.is_dir(),
+                crate::columns::text_value(row, location),
+                row.path(),
+            )
+        });
     }
 
     pub fn id(&self, position: u32) -> Option<u32> {
@@ -181,9 +206,13 @@ impl Default for HitModel {
 
 fn sort_text<T>(items: &mut Vec<T>, descending: bool, key: impl Fn(&T) -> (bool, String, String)) {
     let mut keyed: Vec<_> = items.drain(..).map(|item| (key(&item), item)).collect();
-    keyed.sort_by(|(a, _), (b, _)| a.0.cmp(&b.0).then_with(|| {
-        let order = a.1.cmp(&b.1);
-        if descending { order.reverse() } else { order }
-    }).then_with(|| a.2.cmp(&b.2)));
+    keyed.sort_by(|(a, _), (b, _)| {
+        a.0.cmp(&b.0)
+            .then_with(|| {
+                let order = a.1.cmp(&b.1);
+                if descending { order.reverse() } else { order }
+            })
+            .then_with(|| a.2.cmp(&b.2))
+    });
     items.extend(keyed.into_iter().map(|(_, item)| item));
 }

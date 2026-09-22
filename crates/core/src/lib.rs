@@ -7,8 +7,6 @@ pub mod archive;
 pub mod components;
 pub mod folder_sizes;
 pub use folder_sizes::FolderSizes;
-mod process;
-pub mod projects;
 mod browse;
 mod catalog;
 mod config;
@@ -20,6 +18,8 @@ mod nav;
 mod ops;
 mod plugin;
 mod prefilter;
+mod process;
+pub mod projects;
 mod query;
 mod search;
 mod snapshot;
@@ -37,13 +37,13 @@ pub use manager::{
     ManagerView, Outcome,
 };
 pub use mounts::discover as discover_mounts;
-pub use process::CommandOutputExt;
 pub use nav::{Crumb, Location, TreeState, breadcrumb};
 pub use ops::{
     Mutation, copy, create_dir, create_file, delete, delete_entry, move_path, rename, restore,
     trash, trash_entry, trash_into, trash_root,
 };
 pub use plugin::{Plugin, PluginHost};
+pub use process::CommandOutputExt;
 pub use query::{DateAge, FileClass, MatchMode, Scope, SearchOpts, Sort};
 pub use storage::{StorageEntry, StorageMap};
 pub use view::{

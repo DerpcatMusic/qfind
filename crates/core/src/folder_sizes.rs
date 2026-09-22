@@ -169,9 +169,10 @@ impl FolderSizes {
             *dirty = true;
         }
         if let Ok(mut values) = self.shared.values.lock()
-            && let Some((_, measured)) = values.get_mut(path) {
-                *measured = 0;
-            }
+            && let Some((_, measured)) = values.get_mut(path)
+        {
+            *measured = 0;
+        }
         if let Ok(mut failed) = self.shared.failed.lock() {
             failed.remove(path);
         }

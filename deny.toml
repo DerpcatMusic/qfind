@@ -1,0 +1,12 @@
+[advisories]
+version = 2
+# Only flag unmaintained crates the workspace depends on directly; transitive ones are the upstream's call.
+unmaintained = "workspace"
+[licenses]
+version = 2
+allow = ["MIT", "MIT-0", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib", "Unicode-3.0", "Unicode-DFS-2016", "MPL-2.0", "CC0-1.0", "0BSD", "BSL-1.0", "OpenSSL", "CDLA-Permissive-2.0"]
+[bans]
+multiple-versions = "warn"
+[sources]
+unknown-registry = "deny"
+unknown-git = "warn"

@@ -73,28 +73,53 @@ fn refresh_geometry(state: &ChartState, width: i32, height: i32) {
     }
     let map_ref = state.map.borrow();
     let map = map_ref.as_deref();
-    if map.is_none() && state.live_nodes.borrow().is_none() { return; }
+    if map.is_none() && state.live_nodes.borrow().is_none() {
+        return;
+    }
     let epoch = state.layout_gen.get();
     if state.unit_epoch.get() != epoch {
         let manager = state.manager.borrow();
         let global = manager.chart_scope() == ChartScope::Global;
-        let by_bytes = map.is_some_and(|map| map.total_bytes() > 0) || state.live_nodes.borrow().as_ref().is_some_and(|nodes|nodes.iter().any(|node|node.bytes>0));
+        let by_bytes = map.is_some_and(|map| map.total_bytes() > 0)
+            || state
+                .live_nodes
+                .borrow()
+                .as_ref()
+                .is_some_and(|nodes| nodes.iter().any(|node| node.bytes > 0));
         let nodes = if !global && state.live_nodes.borrow().is_some() {
-            let mut nodes=state.live_nodes.borrow().clone().unwrap_or_default();
+            let mut nodes = state.live_nodes.borrow().clone().unwrap_or_default();
             nodes.sort_by_key(|n| std::cmp::Reverse(n.bytes));
-            let remaining=nodes.iter().skip(63).fold(0u64,|sum,node|sum.saturating_add(node.bytes));
+            let remaining = nodes
+                .iter()
+                .skip(63)
+                .fold(0u64, |sum, node| sum.saturating_add(node.bytes));
             nodes.truncate(63);
-            if remaining>0 { nodes.push(StorageEntry {id:u32::MAX,name:"Other".into(),path:PathBuf::new(),is_dir:false,bytes:remaining,entries:0}); }
+            if remaining > 0 {
+                nodes.push(StorageEntry {
+                    id: u32::MAX,
+                    name: "Other".into(),
+                    path: PathBuf::new(),
+                    is_dir: false,
+                    bytes: remaining,
+                    entries: 0,
+                });
+            }
             nodes
         } else if global || state.current.get().is_some() {
-            map.map(|map| visible_children(map, state.current.get(), by_bytes)).unwrap_or_default()
+            map.map(|map| visible_children(map, state.current.get(), by_bytes))
+                .unwrap_or_default()
         } else {
             Vec::new()
         };
-        *state.weights.borrow_mut() = nodes.iter().map(|node| qfind_core::Weighted {
-            name: node.name.clone(), path: node.path.to_string_lossy().into_owned(),
-            weight: if by_bytes { node.bytes } else { node.entries }, id: Some(node.id),
-        }).collect();
+        *state.weights.borrow_mut() = nodes
+            .iter()
+            .map(|node| qfind_core::Weighted {
+                name: node.name.clone(),
+                path: node.path.to_string_lossy().into_owned(),
+                weight: if by_bytes { node.bytes } else { node.entries },
+                id: Some(node.id),
+            })
+            .collect();
         state.weight_rev.set(epoch);
         state.treemap.queue_draw();
         clear_hover(state);
@@ -110,16 +135,42 @@ fn refresh_geometry(state: &ChartState, width: i32, height: i32) {
             by_bytes,
             &mut unit,
         );
-        if !global
-            && let Some((total, free)) = state.capacity.get().filter(|(total, _)| *total > 0) {
-                let split = -PI / 2.0 + TAU * total.saturating_sub(free) as f64 / total as f64;
-                for (name, bytes, start, end, color) in [
-                    ("Used on volume", total.saturating_sub(free), -PI / 2.0, split, (0.32, 0.49, 0.70)),
-                    ("Free on volume", free, split, -PI / 2.0 + TAU, (0.30, 0.72, 0.59)),
-                ] {
-                    unit.push(Arc { entry: StorageEntry { id: u32::MAX, name: name.into(), path: PathBuf::new(), is_dir: false, bytes, entries: 0 }, start, end, inner: 0.93, outer: 1.0, color });
-                }
+        if !global && let Some((total, free)) = state.capacity.get().filter(|(total, _)| *total > 0)
+        {
+            let split = -PI / 2.0 + TAU * total.saturating_sub(free) as f64 / total as f64;
+            for (name, bytes, start, end, color) in [
+                (
+                    "Used on volume",
+                    total.saturating_sub(free),
+                    -PI / 2.0,
+                    split,
+                    (0.32, 0.49, 0.70),
+                ),
+                (
+                    "Free on volume",
+                    free,
+                    split,
+                    -PI / 2.0 + TAU,
+                    (0.30, 0.72, 0.59),
+                ),
+            ] {
+                unit.push(Arc {
+                    entry: StorageEntry {
+                        id: u32::MAX,
+                        name: name.into(),
+                        path: PathBuf::new(),
+                        is_dir: false,
+                        bytes,
+                        entries: 0,
+                    },
+                    start,
+                    end,
+                    inner: 0.93,
+                    outer: 1.0,
+                    color,
+                });
             }
+        }
         drop(manager);
         let slices: Vec<glpie::SliceGeom> = unit
             .iter()
@@ -168,7 +219,9 @@ fn clear_hover(state: &ChartState) {
         state.hover.borrow()(None);
     }
     state.pie.view.set_cursor_from_name(None);
-    state.hover_label.set_text("Hover to locate · click a folder to explore");
+    state
+        .hover_label
+        .set_text("Hover to locate · click a folder to explore");
     state.hover_label.set_tooltip_text(None);
 }
 
@@ -220,7 +273,7 @@ impl Pane {
         let treemap = crate::surface::make_weight_area(Rc::clone(&weights), Rc::clone(&weight_rev));
         treemap.set_content_height(150);
 
-        let sizes=crate::folder_sizes::Sizes::new();
+        let sizes = crate::folder_sizes::Sizes::new();
         let state = ChartState {
             map: Rc::new(RefCell::new(None::<Rc<StorageMap>>)),
             catalog_map: Rc::new(RefCell::new(None::<Rc<StorageMap>>)),
@@ -232,9 +285,13 @@ impl Pane {
             pixel_key: Rc::new(RefCell::new(None::<LayoutKey>)),
             layout_gen: Rc::new(Cell::new(0)),
             pie,
-            hover_index: Rc::new(Cell::new(None)), hover_layer, hover_label,
+            hover_index: Rc::new(Cell::new(None)),
+            hover_layer,
+            hover_label,
             hover: Rc::new(RefCell::new(Box::new(|_| {}))),
-            weights, weight_rev, treemap,
+            weights,
+            weight_rev,
+            treemap,
             capacity: Rc::new(Cell::new(None)),
             live_nodes: Rc::new(RefCell::new(None)),
             sizes: sizes.clone(),
@@ -268,16 +325,33 @@ impl Pane {
                 );
                 cr.set_font_size((radius * 0.09).clamp(12.0, 18.0));
                 let map = state.map.borrow();
-                let center = if state.manager.borrow().chart_scope()!=ChartScope::Global && state.live_nodes.borrow().is_some() {
-                    human_bytes(state.live_nodes.borrow().as_ref().unwrap().iter().fold(0u64,|sum,node|sum.saturating_add(node.bytes)))
-                } else { map.as_ref().map(|map| {
-                    let node = state.current.get().and_then(|id| map.node(id));
-                    if map.total_bytes() > 0 {
-                        human_bytes(node.map_or(map.total_bytes(), |node| node.bytes))
-                    } else {
-                        format!("{} items", node.map_or(map.total_entries(), |node| node.entries))
-                    }
-                }).unwrap_or_default() };
+                let center = if state.manager.borrow().chart_scope() != ChartScope::Global
+                    && state.live_nodes.borrow().is_some()
+                {
+                    human_bytes(
+                        state
+                            .live_nodes
+                            .borrow()
+                            .as_ref()
+                            .unwrap()
+                            .iter()
+                            .fold(0u64, |sum, node| sum.saturating_add(node.bytes)),
+                    )
+                } else {
+                    map.as_ref()
+                        .map(|map| {
+                            let node = state.current.get().and_then(|id| map.node(id));
+                            if map.total_bytes() > 0 {
+                                human_bytes(node.map_or(map.total_bytes(), |node| node.bytes))
+                            } else {
+                                format!(
+                                    "{} items",
+                                    node.map_or(map.total_entries(), |node| node.entries)
+                                )
+                            }
+                        })
+                        .unwrap_or_default()
+                };
                 let extents = cr.text_extents(&center).ok();
                 let x = extents.as_ref().map_or(cx, |e| cx - e.width() / 2.0);
                 cr.move_to(x, cy + 5.0);
@@ -287,14 +361,21 @@ impl Pane {
 
         {
             let state = state.clone();
-            state.pie.gl.clone().connect_resize(move |_, width, height| {
-                state.pie.set_view(width as f32 / 2.0, height as f32 / 2.0,
-                    width.min(height) as f32 * RADIUS_FRAC as f32);
-                refresh_geometry(&state, state.pie.view.width(), state.pie.view.height());
-                state.pie.gl.queue_render();
-                state.pie.labels.queue_draw();
-                state.hover_layer.queue_draw();
-            });
+            state
+                .pie
+                .gl
+                .clone()
+                .connect_resize(move |_, width, height| {
+                    state.pie.set_view(
+                        width as f32 / 2.0,
+                        height as f32 / 2.0,
+                        width.min(height) as f32 * RADIUS_FRAC as f32,
+                    );
+                    refresh_geometry(&state, state.pie.view.width(), state.pie.view.height());
+                    state.pie.gl.queue_render();
+                    state.pie.labels.queue_draw();
+                    state.hover_layer.queue_draw();
+                });
         }
 
         {
@@ -302,7 +383,9 @@ impl Pane {
             let layer = state.hover_layer.clone();
             layer.set_draw_func(move |_, cr, width, height| {
                 let arcs = state.arcs.borrow();
-                let Some(arc) = state.hover_index.get().and_then(|index| arcs.get(index)) else { return };
+                let Some(arc) = state.hover_index.get().and_then(|index| arcs.get(index)) else {
+                    return;
+                };
                 let (cx, cy) = (f64::from(width) / 2.0, f64::from(height) / 2.0);
                 cr.arc(cx, cy, arc.outer, arc.start, arc.end);
                 cr.arc_negative(cx, cy, arc.inner, arc.end, arc.start);
@@ -321,18 +404,30 @@ impl Pane {
                 let view = &state.pie.view;
                 refresh_geometry(&state, view.width(), view.height());
                 let arcs = state.arcs.borrow();
-                let next = hit(&arcs, view.width(), view.height(), x, y)
-                    .and_then(|arc| arcs.iter().position(|candidate| std::ptr::eq(candidate, arc)));
-                if next == state.hover_index.get() { return; }
+                let next = hit(&arcs, view.width(), view.height(), x, y).and_then(|arc| {
+                    arcs.iter()
+                        .position(|candidate| std::ptr::eq(candidate, arc))
+                });
+                if next == state.hover_index.get() {
+                    return;
+                }
                 state.hover_index.set(next);
                 state.hover_layer.queue_draw();
                 view.set_cursor_from_name(next.map(|_| "pointer"));
                 let entry = next.map(|index| &arcs[index].entry);
                 if let Some(entry) = entry {
-                    state.hover_label.set_text(&format!("{} · {}", entry.name, human_bytes(entry.bytes)));
-                    state.hover_label.set_tooltip_text(Some(&entry.path.to_string_lossy()));
+                    state.hover_label.set_text(&format!(
+                        "{} · {}",
+                        entry.name,
+                        human_bytes(entry.bytes)
+                    ));
+                    state
+                        .hover_label
+                        .set_tooltip_text(Some(&entry.path.to_string_lossy()));
                 } else {
-                    state.hover_label.set_text("Hover to locate · click a folder to explore");
+                    state
+                        .hover_label
+                        .set_text("Hover to locate · click a folder to explore");
                     state.hover_label.set_tooltip_text(None);
                 }
                 state.hover.borrow()(entry.filter(|entry| entry.id != u32::MAX));
@@ -345,7 +440,11 @@ impl Pane {
         state.pie.view.add_controller(motion);
         {
             let state = state.clone();
-            state.pie.view.clone().connect_unmap(move |_| clear_hover(&state));
+            state
+                .pie
+                .view
+                .clone()
+                .connect_unmap(move |_| clear_hover(&state));
         }
 
         let click = gtk::GestureClick::new();
@@ -362,11 +461,20 @@ impl Pane {
                 let cy = f64::from(height) / 2.0;
                 let inner = f64::from(width.min(height)) * RADIUS_FRAC * INNER_FRAC;
                 if (x - cx).hypot(y - cy) < inner {
-                    let parent = if state.manager.borrow().chart_scope()==ChartScope::Directory {
-                        state.manager.borrow().directory().and_then(Path::parent).map(Path::to_path_buf)
+                    let parent = if state.manager.borrow().chart_scope() == ChartScope::Directory {
+                        state
+                            .manager
+                            .borrow()
+                            .directory()
+                            .and_then(Path::parent)
+                            .map(Path::to_path_buf)
                     } else {
-                        state.map.borrow().as_ref().and_then(|map|state.current.get().and_then(|id|map.node(id)))
-                            .and_then(|node|node.path.parent().map(Path::to_path_buf))
+                        state
+                            .map
+                            .borrow()
+                            .as_ref()
+                            .and_then(|map| state.current.get().and_then(|id| map.node(id)))
+                            .and_then(|node| node.path.parent().map(Path::to_path_buf))
                     };
                     if let Some(parent) = parent {
                         navigate.borrow()(parent);
@@ -374,8 +482,11 @@ impl Pane {
                     return;
                 }
                 let next = hit(&state.arcs.borrow(), width, height, x, y)
-                    .filter(|arc| arc.entry.is_dir).map(|arc|arc.entry.path.clone());
-                if let Some(path)=next { navigate.borrow()(path); }
+                    .filter(|arc| arc.entry.is_dir)
+                    .map(|arc| arc.entry.path.clone());
+                if let Some(path) = next {
+                    navigate.borrow()(path);
+                }
             });
         }
         state.pie.view.add_controller(click);
@@ -506,28 +617,41 @@ impl Pane {
             });
         }
         {
-            let root=pane.root.downgrade();
-            let state=pane.state.clone();
-            let detail=pane.detail.downgrade();
-            let revision=Cell::new(0);
+            let root = pane.root.downgrade();
+            let state = pane.state.clone();
+            let detail = pane.detail.downgrade();
+            let revision = Cell::new(0);
             gtk::glib::timeout_add_local(std::time::Duration::from_secs(1), move || {
-                let Some(root)=root.upgrade() else {return gtk::glib::ControlFlow::Break;};
-                if !root.is_mapped() || state.manager.borrow().chart_scope()==ChartScope::Global {return gtk::glib::ControlFlow::Continue;}
-                let current=state.sizes.revision();
-                if revision.replace(current)==current {return gtk::glib::ControlFlow::Continue;}
-                let mut changed=false;
-                if let Some(nodes)=state.live_nodes.borrow_mut().as_mut() {
-                    for node in nodes.iter_mut().filter(|node|node.is_dir) {
+                let Some(root) = root.upgrade() else {
+                    return gtk::glib::ControlFlow::Break;
+                };
+                if !root.is_mapped() || state.manager.borrow().chart_scope() == ChartScope::Global {
+                    return gtk::glib::ControlFlow::Continue;
+                }
+                let current = state.sizes.revision();
+                if revision.replace(current) == current {
+                    return gtk::glib::ControlFlow::Continue;
+                }
+                let mut changed = false;
+                if let Some(nodes) = state.live_nodes.borrow_mut().as_mut() {
+                    for node in nodes.iter_mut().filter(|node| node.is_dir) {
                         state.sizes.request(&node.path);
-                        if let Some(bytes)=state.sizes.get(&node.path)
-                            && bytes!=node.bytes {node.bytes=bytes;changed=true;}
+                        if let Some(bytes) = state.sizes.get(&node.path)
+                            && bytes != node.bytes
+                        {
+                            node.bytes = bytes;
+                            changed = true;
+                        }
                     }
                 }
                 if changed {
                     state.layout_gen.set(state.layout_gen.get().wrapping_add(1));
-                    refresh_geometry(&state,state.pie.view.width(),state.pie.view.height());
-                    state.pie.gl.queue_render();state.pie.labels.queue_draw();
-                    if let Some(detail)=detail.upgrade() { detail.set_text("Measured and indexed sizes · click center to go up"); }
+                    refresh_geometry(&state, state.pie.view.width(), state.pie.view.height());
+                    state.pie.gl.queue_render();
+                    state.pie.labels.queue_draw();
+                    if let Some(detail) = detail.upgrade() {
+                        detail.set_text("Measured and indexed sizes · click center to go up");
+                    }
                 }
                 gtk::glib::ControlFlow::Continue
             });
@@ -536,22 +660,43 @@ impl Pane {
     }
 
     pub fn indexed_size_text(&self, path: &Path) -> String {
-        let pending=self.sizes.text(path);
-        self.known_size(path).map(crate::actions::human_size).unwrap_or(pending)
+        let pending = self.sizes.text(path);
+        self.known_size(path)
+            .map(crate::actions::human_size)
+            .unwrap_or(pending)
     }
 
-    pub fn known_size(&self, path: &Path) -> Option<u64> { self.sizes.get(path).or_else(|| self.indexed_size(path)) }
+    pub fn known_size(&self, path: &Path) -> Option<u64> {
+        self.sizes.get(path).or_else(|| self.indexed_size(path))
+    }
 
     pub fn indexed_size(&self, path: &Path) -> Option<u64> {
-        self.state.catalog_map.borrow().as_ref()?.find_indexed(path).map(|entry| entry.bytes)
+        self.state
+            .catalog_map
+            .borrow()
+            .as_ref()?
+            .find_indexed(path)
+            .map(|entry| entry.bytes)
     }
 
-    pub fn catalog_revision(&self) -> u64 { self.project_revision.get() }
+    pub fn catalog_revision(&self) -> u64 {
+        self.project_revision.get()
+    }
 
-    pub fn project_error(&self) -> Option<String> { self.project_error.borrow().clone() }
+    pub fn project_error(&self) -> Option<String> {
+        self.project_error.borrow().clone()
+    }
 
     pub fn projects(&self, root: &Path) -> Option<Vec<crate::manager_tools::Project>> {
-        Some(self.projects.borrow().as_ref()?.iter().filter(|project| project.path.starts_with(root)).cloned().collect())
+        Some(
+            self.projects
+                .borrow()
+                .as_ref()?
+                .iter()
+                .filter(|project| project.path.starts_with(root))
+                .cloned()
+                .collect(),
+        )
     }
 
     pub fn set_hover(&self, hover: impl Fn(Option<&StorageEntry>) + 'static) {
@@ -588,43 +733,68 @@ impl Pane {
 
     pub fn set_directory(&self, path: &Path) {
         *self.capacity_path.borrow_mut() = path.to_path_buf();
-        *self.state.live_nodes.borrow_mut()=None;
-        let pane=self.clone();
-        let directory=path.to_path_buf();
+        *self.state.live_nodes.borrow_mut() = None;
+        let pane = self.clone();
+        let directory = path.to_path_buf();
         gtk::glib::MainContext::default().spawn_local(async move {
-            let scanned=directory.clone();
-            let result=gtk::gio::spawn_blocking(move || qfind_core::components::storage_children(&scanned)).await;
-            if *pane.capacity_path.borrow()!=directory {return;}
-            if let Ok(Ok(mut nodes))=result {
-                let map=pane.state.catalog_map.borrow();
-                for (index,node) in nodes.iter_mut().enumerate() {
-                    node.id=u32::MAX.saturating_sub(index as u32+1);
+            let scanned = directory.clone();
+            let result = gtk::gio::spawn_blocking(move || {
+                qfind_core::components::storage_children(&scanned)
+            })
+            .await;
+            if *pane.capacity_path.borrow() != directory {
+                return;
+            }
+            if let Ok(Ok(mut nodes)) = result {
+                let map = pane.state.catalog_map.borrow();
+                for (index, node) in nodes.iter_mut().enumerate() {
+                    node.id = u32::MAX.saturating_sub(index as u32 + 1);
                     if node.is_dir {
-                        let indexed=map.as_ref().and_then(|map|map.find_indexed(&node.path));
-                        if let Some(indexed)=indexed {node.id=indexed.id;node.bytes=indexed.bytes;}
-                        let _=pane.sizes.text(&node.path);
-                        if let Some(bytes)=pane.sizes.get(&node.path) {node.bytes=bytes;}
+                        let indexed = map.as_ref().and_then(|map| map.find_indexed(&node.path));
+                        if let Some(indexed) = indexed {
+                            node.id = indexed.id;
+                            node.bytes = indexed.bytes;
+                        }
+                        let _ = pane.sizes.text(&node.path);
+                        if let Some(bytes) = pane.sizes.get(&node.path) {
+                            node.bytes = bytes;
+                        }
                     }
                 }
                 drop(map);
-                *pane.state.live_nodes.borrow_mut()=Some(nodes);
-                pane.bump_layout();pane.redraw();
-                pane.detail.set_text("Measured and indexed sizes · click center to go up");
+                *pane.state.live_nodes.borrow_mut() = Some(nodes);
+                pane.bump_layout();
+                pane.redraw();
+                pane.detail
+                    .set_text("Measured and indexed sizes · click center to go up");
             }
         });
         self.state.capacity.set(None);
         let this = self.clone();
         let capacity_path = path.to_path_buf();
         gtk::glib::MainContext::default().spawn_local(async move {
-            let result = gtk::gio::File::for_path(&capacity_path).query_filesystem_info_future(
-                "filesystem::size,filesystem::free", gtk::glib::Priority::DEFAULT).await;
-            if *this.capacity_path.borrow() != capacity_path { return; }
+            let result = gtk::gio::File::for_path(&capacity_path)
+                .query_filesystem_info_future(
+                    "filesystem::size,filesystem::free",
+                    gtk::glib::Priority::DEFAULT,
+                )
+                .await;
+            if *this.capacity_path.borrow() != capacity_path {
+                return;
+            }
             match result {
-                Ok(info) if info.has_attribute("filesystem::size") && info.has_attribute("filesystem::free") => {
+                Ok(info)
+                    if info.has_attribute("filesystem::size")
+                        && info.has_attribute("filesystem::free") =>
+                {
                     let total = info.attribute_uint64("filesystem::size");
                     let free = info.attribute_uint64("filesystem::free").min(total);
                     this.state.capacity.set(Some((total, free)));
-                    this.capacity_label.set_text(&format!("{} free of {} · volume", human_bytes(free), human_bytes(total)));
+                    this.capacity_label.set_text(&format!(
+                        "{} free of {} · volume",
+                        human_bytes(free),
+                        human_bytes(total)
+                    ));
                 }
                 _ => this.capacity_label.set_text("Volume capacity unavailable"),
             }
@@ -664,26 +834,38 @@ impl Pane {
                 .ok()
                 .and_then(|result| result.ok())
                 .unwrap_or_default();
-            if this.project_generation.get() != generation { return; }
+            if this.project_generation.get() != generation {
+                return;
+            }
             let changed = this.project_account.borrow().as_ref() != Some(&account);
-            if !changed && !force && this.projects.borrow().is_some() { return; }
+            if !changed && !force && this.projects.borrow().is_some() {
+                return;
+            }
             if changed {
                 *this.projects.borrow_mut() = None;
                 *this.project_account.borrow_mut() = Some(account.clone());
-                this.project_revision.set(this.project_revision.get().wrapping_add(1));
+                this.project_revision
+                    .set(this.project_revision.get().wrapping_add(1));
             }
             *this.project_error.borrow_mut() = None;
             let result = gtk::gio::spawn_blocking(move || {
                 let projects = crate::manager_tools::index_projects(&catalog)?;
                 Ok::<_, String>(projects)
-            }).await;
-            if this.project_generation.get() != generation { return; }
+            })
+            .await;
+            if this.project_generation.get() != generation {
+                return;
+            }
             match result {
                 Ok(Ok(projects)) => *this.projects.borrow_mut() = Some(projects),
                 Ok(Err(error)) => *this.project_error.borrow_mut() = Some(error),
-                Err(_) => *this.project_error.borrow_mut() = Some("Project indexing failed. Refresh to retry.".into()),
+                Err(_) => {
+                    *this.project_error.borrow_mut() =
+                        Some("Project indexing failed. Refresh to retry.".into())
+                }
             }
-            this.project_revision.set(this.project_revision.get().wrapping_add(1));
+            this.project_revision
+                .set(this.project_revision.get().wrapping_add(1));
         });
     }
 
@@ -729,7 +911,10 @@ impl Pane {
                 &this.title,
                 &this.detail,
             );
-            if !global && this.state.live_nodes.borrow().is_some() {this.detail.set_text("Measured and indexed sizes · click center to go up");}
+            if !global && this.state.live_nodes.borrow().is_some() {
+                this.detail
+                    .set_text("Measured and indexed sizes · click center to go up");
+            }
             this.bump_layout();
             this.redraw();
         });
@@ -768,15 +953,23 @@ fn layout(
             angle = next;
             continue;
         }
-        let indexed_map = map.filter(|map| node.is_dir && map.node(node.id).is_some_and(|indexed| {
-            indexed.path == node.path && (!by_bytes || indexed.bytes == node.bytes)
-        }) && map.has_children(node.id));
+        let indexed_map = map.filter(|map| {
+            node.is_dir
+                && map.node(node.id).is_some_and(|indexed| {
+                    indexed.path == node.path && (!by_bytes || indexed.bytes == node.bytes)
+                })
+                && map.has_children(node.id)
+        });
         out.push(Arc {
             entry: node.clone(),
             start: angle,
             end: next,
             inner: inner + ring * depth as f64,
-            outer: if indexed_map.is_some() { inner + ring * (depth + 1) as f64 } else { inner + ring * RING_COUNT },
+            outer: if indexed_map.is_some() {
+                inner + ring * (depth + 1) as f64
+            } else {
+                inner + ring * RING_COUNT
+            },
             color: tile_color(index + depth * 67, &path),
         });
         if let Some(indexed_map) = indexed_map {

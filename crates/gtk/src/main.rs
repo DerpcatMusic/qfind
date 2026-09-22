@@ -15,28 +15,27 @@ use gtk::gio;
 use gtk::glib;
 use gtk::prelude::*;
 use qfind_core::{
-    BrowseMode, Catalog, CatalogFolder, ChartScope, Config, DateAge, FileClass,
-    LocationScope, ManagerSession, MatchMode, Scope, SearchOpts, Sort, Surface, Zoom,
-    default_snapshot_path,
+    BrowseMode, Catalog, CatalogFolder, ChartScope, Config, DateAge, FileClass, LocationScope,
+    ManagerSession, MatchMode, Scope, SearchOpts, Sort, Surface, Zoom, default_snapshot_path,
 };
 
 mod actions;
 mod archive;
-mod glpie;
-mod git_panel;
-mod folder_sizes;
-mod project_workspace;
 mod columns;
+mod folder_sizes;
+mod git_panel;
+mod glpie;
 mod icons;
-mod model;
 mod manager_tools;
+mod model;
+mod project_workspace;
 mod row;
 mod settings;
 mod storage;
 mod surface;
 use actions::{
-    copy_name, copy_paths, copy_text, open, open_folder,
-    open_with, preview, preview_widget, reveal, selected_row, selected_rows,
+    copy_name, copy_paths, copy_text, open, open_folder, open_with, preview, preview_widget,
+    reveal, selected_row, selected_rows,
 };
 use model::HitModel;
 use row::RowData;
@@ -95,7 +94,12 @@ fn parse_pick() -> Option<Pick> {
     }
     let mode = pick?;
     if accept.is_empty() {
-        accept = if mode == PickMode::Save { "Save" } else { "Select" }.into();
+        accept = if mode == PickMode::Save {
+            "Save"
+        } else {
+            "Select"
+        }
+        .into();
     }
     Some(Pick {
         mode,
@@ -119,7 +123,6 @@ fn pick_done(window: &gtk::ApplicationWindow, paths: &[PathBuf]) {
         app.quit();
     }
 }
-
 
 enum SearchResult {
     Indexed(Vec<u32>),
@@ -218,9 +221,10 @@ fn parse_here() -> Option<PathBuf> {
             return args.next().filter(|s| !s.is_empty()).map(PathBuf::from);
         }
         if let Some(p) = a.strip_prefix("--here=")
-            && !p.is_empty() {
-                return Some(PathBuf::from(p));
-            }
+            && !p.is_empty()
+        {
+            return Some(PathBuf::from(p));
+        }
         if !a.starts_with('-') {
             return Some(PathBuf::from(a));
         }
@@ -420,20 +424,22 @@ fn refresh_places(container: &gtk::Box, navigate: &Navigator) {
         .filter_map(|volume| volume.get_mount())
     {
         if let Some(root) = mount.root().path()
-            && shown.insert(root.clone()) {
-                let icon = if mount.can_unmount() || mount.can_eject() {
-                    "drive-removable-media-symbolic"
-                } else {
-                    "drive-harddisk-symbolic"
-                };
-                devices.push((mount.name().to_string(), root, icon));
-            }
+            && shown.insert(root.clone())
+        {
+            let icon = if mount.can_unmount() || mount.can_eject() {
+                "drive-removable-media-symbolic"
+            } else {
+                "drive-harddisk-symbolic"
+            };
+            devices.push((mount.name().to_string(), root, icon));
+        }
     }
     for mount in monitor.mounts() {
         if let Some(root) = mount.root().path()
-            && shown.insert(root.clone()) {
-                devices.push((mount.name().to_string(), root, "drive-harddisk-symbolic"));
-            }
+            && shown.insert(root.clone())
+        {
+            devices.push((mount.name().to_string(), root, "drive-harddisk-symbolic"));
+        }
     }
     if !devices.is_empty() {
         let heading = gtk::Label::new(Some("Devices"));
@@ -518,7 +524,16 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     let manager = Rc::new(RefCell::new(ManagerSession::new(initial_folder.clone())));
     let window = gtk::ApplicationWindow::builder()
         .application(app)
-        .title(PICK.get().map(|pick| pick.title.clone()).unwrap_or_else(|| initial_folder.as_ref().map(|path| format!("Megaman · {}", path.display())).unwrap_or_else(|| "Megaman".into())))
+        .title(
+            PICK.get()
+                .map(|pick| pick.title.clone())
+                .unwrap_or_else(|| {
+                    initial_folder
+                        .as_ref()
+                        .map(|path| format!("Megaman · {}", path.display()))
+                        .unwrap_or_else(|| "Megaman".into())
+                }),
+        )
         .default_width(1320)
         .default_height(820)
         .build();
@@ -580,7 +595,9 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     address_bar.append(&bookmark_btn);
 
     let index_btn = gtk::Button::from_icon_name("view-refresh-symbolic");
-    index_btn.set_tooltip_text(Some("Refresh folder · rebuild the index in Indexed mode (F5)"));
+    index_btn.set_tooltip_text(Some(
+        "Refresh folder · rebuild the index in Indexed mode (F5)",
+    ));
     address_bar.append(&index_btn);
 
     let archive_save_btn = gtk::Button::from_icon_name("document-save-symbolic");
@@ -590,7 +607,6 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
 
     let settings_btn = gtk::Button::from_icon_name("emblem-system-symbolic");
     settings_btn.set_tooltip_text(Some("Settings"));
-
 
     let cfg = Config::load();
     let zebra = Rc::new(Cell::new(cfg.zebra));
@@ -649,8 +665,6 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     zoom_label.add_css_class("dim-label");
     zoom_label.set_tooltip_text(Some("Ctrl+scroll zooms list ↔ grid"));
 
-
-
     // Center cluster: breadcrumb route + search. HeaderBar centers the title
     // widget; crumbs are rebuilt by refresh_crumbs on every navigation.
     let crumbs = gtk::Box::new(gtk::Orientation::Horizontal, 2);
@@ -688,7 +702,6 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     mode_box.add_css_class("linked");
     mode_box.append(&classic_btn);
     mode_box.append(&qfind_btn);
-
 
     let filter_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
     filter_box.set_margin_top(10);
@@ -795,13 +808,22 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     view_btn.set_label("View");
     filter_btn.set_label("Filter");
     let tools_menu = gio::Menu::new();
-    tools_menu.append(Some("Select by name, extension or type…"), Some("win.select-matching"));
+    tools_menu.append(
+        Some("Select by name, extension or type…"),
+        Some("win.select-matching"),
+    );
     tools_menu.append(Some("Batch rename…"), Some("win.batch-rename"));
     tools_menu.append(Some("Copy selected to…"), Some("win.batch-copy"));
     tools_menu.append(Some("Move selected to…"), Some("win.batch-move"));
     tools_menu.append(Some("Compress selected…"), Some("win.batch-zip"));
-    tools_menu.append(Some("Extract selected archives…"), Some("win.batch-extract"));
-    let tools_btn = gtk::MenuButton::builder().label("Selection").menu_model(&tools_menu).build();
+    tools_menu.append(
+        Some("Extract selected archives…"),
+        Some("win.batch-extract"),
+    );
+    let tools_btn = gtk::MenuButton::builder()
+        .label("Selection")
+        .menu_model(&tools_menu)
+        .build();
     let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     toolbar.add_css_class("qfind-toolbar");
     toolbar.append(&mode_box);
@@ -862,7 +884,10 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     list.append_column(&size_column);
     list.append_column(&modified_column);
     for (title, location, width) in [("Type", false, 120), ("Location", true, 260)] {
-        let column = gtk::ColumnViewColumn::new(Some(title), Some(columns::text_factory(location, zebra.clone())));
+        let column = gtk::ColumnViewColumn::new(
+            Some(title),
+            Some(columns::text_factory(location, zebra.clone())),
+        );
         column.set_resizable(true);
         column.set_fixed_width(width);
         column.set_visible(false);
@@ -879,22 +904,62 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
         let selection = selection.clone();
         let list_weak = list.downgrade();
         sorter.connect_changed(move |sorter, _| {
-            let Some(column) = sorter.primary_sort_column() else { return; };
+            let Some(column) = sorter.primary_sort_column() else {
+                return;
+            };
             let descending = sorter.primary_sort_order() == gtk::SortType::Descending;
             if matches!(column.title().as_deref(), Some("Type" | "Location")) {
-                let paths: Vec<_> = selected_rows(&selection).into_iter().map(|row| row.path()).collect();
+                let paths: Vec<_> = selected_rows(&selection)
+                    .into_iter()
+                    .map(|row| row.path())
+                    .collect();
                 sort_drop.set_selected(0);
                 if sorter.primary_sort_column().as_ref() != Some(&column)
-                    && let Some(list) = list_weak.upgrade() { list.sort_by_column(Some(&column), if descending { gtk::SortType::Descending } else { gtk::SortType::Ascending }); }
-                model.set_text_sort(Some((column.title().as_deref() == Some("Location"), descending)));
-                for path in paths { if let Some(position) = model.position_path(&path) { selection.select_item(position, false); } }
+                    && let Some(list) = list_weak.upgrade()
+                {
+                    list.sort_by_column(
+                        Some(&column),
+                        if descending {
+                            gtk::SortType::Descending
+                        } else {
+                            gtk::SortType::Ascending
+                        },
+                    );
+                }
+                model.set_text_sort(Some((
+                    column.title().as_deref() == Some("Location"),
+                    descending,
+                )));
+                for path in paths {
+                    if let Some(position) = model.position_path(&path) {
+                        selection.select_item(position, false);
+                    }
+                }
                 return;
             }
             model.set_text_sort(None);
             let choice = match column.title().as_deref() {
-                Some("Name") => if descending { 2 } else { 1 },
-                Some("Size") => if descending { 5 } else { 6 },
-                Some("Modified") => if descending { 3 } else { 4 },
+                Some("Name") => {
+                    if descending {
+                        2
+                    } else {
+                        1
+                    }
+                }
+                Some("Size") => {
+                    if descending {
+                        5
+                    } else {
+                        6
+                    }
+                }
+                Some("Modified") => {
+                    if descending {
+                        3
+                    } else {
+                        4
+                    }
+                }
                 _ => return,
             };
             sort_drop.set_selected(choice);
@@ -1141,7 +1206,9 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     preview_page.append(&preview_content);
     {
         let stack = stack.clone();
-        storage.set_hover(move |entry| surface::highlight_path(stack.upcast_ref(), entry.map(|entry| entry.path.as_path())));
+        storage.set_hover(move |entry| {
+            surface::highlight_path(stack.upcast_ref(), entry.map(|entry| entry.path.as_path()))
+        });
     }
     {
         let model = model.clone();
@@ -1280,8 +1347,16 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     projects_btn.set_label("Development projects");
     projects_btn.add_css_class("flat");
     for (button, icon, text) in [
-        (&storage_shortcut, "drive-harddisk-symbolic", qfind_core::components::title("storage")),
-        (&projects_btn, "utilities-terminal-symbolic", qfind_core::components::title("projects")),
+        (
+            &storage_shortcut,
+            "drive-harddisk-symbolic",
+            qfind_core::components::title("storage"),
+        ),
+        (
+            &projects_btn,
+            "utilities-terminal-symbolic",
+            qfind_core::components::title("projects"),
+        ),
     ] {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         row.append(&gtk::Image::from_icon_name(icon));
@@ -1443,12 +1518,16 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
         if pick.mode == PickMode::Save {
             // Clicking an existing file in Save mode fills the name instead of opening it.
             let name_entry = name_entry.clone();
-            state.borrow().selection.connect_selection_changed(move |sel, _, _| {
-                if let Some(row) = selected_row(sel)
-                    && !row.is_dir() {
+            state
+                .borrow()
+                .selection
+                .connect_selection_changed(move |sel, _, _| {
+                    if let Some(row) = selected_row(sel)
+                        && !row.is_dir()
+                    {
                         name_entry.set_text(&row.name());
                     }
-            });
+                });
         }
     }
 
@@ -1459,22 +1538,35 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     drop.set_propagation_phase(gtk::PropagationPhase::Capture);
     let drop_stack = stack.clone();
     let over_files = move |target: &gtk::DropTarget, x, y| {
-        target.widget().and_then(|widget| widget.pick(x, y, gtk::PickFlags::DEFAULT))
+        target
+            .widget()
+            .and_then(|widget| widget.pick(x, y, gtk::PickFlags::DEFAULT))
             .is_some_and(|hit| hit == drop_stack || hit.is_ancestor(&drop_stack))
     };
     let motion = over_files.clone();
     drop.connect_motion(move |target, x, y| {
-        if motion(target, x, y) { gdk::DragAction::COPY } else { gdk::DragAction::empty() }
+        if motion(target, x, y) {
+            gdk::DragAction::COPY
+        } else {
+            gdk::DragAction::empty()
+        }
     });
     {
         let state = state.clone();
         let window = window.clone();
         drop.connect_drop(move |target, value, x, y| {
-            if !over_files(target, x, y) { return false; }
-            let Ok(files) = value.get::<gdk::FileList>() else { return false; };
+            if !over_files(target, x, y) {
+                return false;
+            }
+            let Ok(files) = value.get::<gdk::FileList>() else {
+                return false;
+            };
             let paths: Option<Vec<_>> = files.files().iter().map(|file| file.path()).collect();
-            let Some(paths) = paths.filter(|paths| !paths.is_empty()) else { return false; };
-            let destination = target.widget()
+            let Some(paths) = paths.filter(|paths| !paths.is_empty()) else {
+                return false;
+            };
+            let destination = target
+                .widget()
                 .and_then(|widget| surface::file_item_at(&widget, x, y))
                 .and_then(|item| item.tooltip_text())
                 .map(|path| PathBuf::from(path.as_str()))
@@ -1495,7 +1587,9 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     {
         let pane_stack = pane_stack.clone();
         git_title.connect_toggled(move |button| {
-            if button.is_active() { pane_stack.set_visible_child_name("git"); }
+            if button.is_active() {
+                pane_stack.set_visible_child_name("git");
+            }
         });
         let preview_btn = preview_btn.clone();
         git_status.connect_clicked(move |_| {
@@ -1727,7 +1821,13 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
                 Sort::Oldest => ("Modified", gtk::SortType::Ascending),
                 _ => ("", gtk::SortType::Ascending),
             };
-            let column = (0..list.columns().n_items()).filter_map(|i| list.columns().item(i).and_downcast::<gtk::ColumnViewColumn>()).find(|column| column.title().as_deref() == Some(title));
+            let column = (0..list.columns().n_items())
+                .filter_map(|i| {
+                    list.columns()
+                        .item(i)
+                        .and_downcast::<gtk::ColumnViewColumn>()
+                })
+                .find(|column| column.title().as_deref() == Some(title));
             list.sort_by_column(column.as_ref(), order);
             kick_search(&state);
         });
@@ -1823,7 +1923,9 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
         let host = Rc::clone(&host);
         zoom_scale.connect_value_changed(move |scale| {
             let next = Zoom::new(scale.value() as u8);
-            if next == host.zoom.get() { return; }
+            if next == host.zoom.get() {
+                return;
+            }
             host.zoom.set(next);
             host.schedule_apply();
         });
@@ -1859,7 +1961,11 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
             sort.set_selected(0);
             list.sort_by_column(None::<&gtk::ColumnViewColumn>, gtk::SortType::Ascending);
             indexed.set_active(true);
-            state.borrow().manager.borrow_mut().set_search_scope(LocationScope::Global);
+            state
+                .borrow()
+                .manager
+                .borrow_mut()
+                .set_search_scope(LocationScope::Global);
             search.set_placeholder_text(Some("Search everywhere…"));
             search.grab_focus();
             search.select_region(0, -1);
@@ -1883,18 +1989,30 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
         });
     }
     {
-        let config = std::env::var_os("GH_CONFIG_DIR").map(PathBuf::from)
+        let config = std::env::var_os("GH_CONFIG_DIR")
+            .map(PathBuf::from)
             .or_else(|| dirs::config_dir().map(|path| path.join("gh")));
-        if let Some(monitor) = config.and_then(|path| gio::File::for_path(path)
-            .monitor_directory(gio::FileMonitorFlags::WATCH_MOVES, None::<&gio::Cancellable>).ok()) {
+        if let Some(monitor) = config.and_then(|path| {
+            gio::File::for_path(path)
+                .monitor_directory(
+                    gio::FileMonitorFlags::WATCH_MOVES,
+                    None::<&gio::Cancellable>,
+                )
+                .ok()
+        }) {
             let state = state.clone();
             monitor.connect_changed(move |_, file, other, _| {
-                if [Some(file), other].into_iter().flatten().any(|file| file.basename().as_deref() == Some(std::path::Path::new("hosts.yml")))
-                    && let Some(catalog) = state.borrow().catalog.clone() {
-                        state.borrow().storage.refresh_projects(catalog, false);
-                    }
+                if [Some(file), other].into_iter().flatten().any(|file| {
+                    file.basename().as_deref() == Some(std::path::Path::new("hosts.yml"))
+                }) && let Some(catalog) = state.borrow().catalog.clone()
+                {
+                    state.borrow().storage.refresh_projects(catalog, false);
+                }
             });
-            window.connect_close_request(move |_| { monitor.cancel(); glib::Propagation::Proceed });
+            window.connect_close_request(move |_| {
+                monitor.cancel();
+                glib::Propagation::Proceed
+            });
         }
     }
     {
@@ -1911,9 +2029,13 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
             }
             if projects_page.first_child().is_none() {
                 let app = window.application().expect("application window");
-                projects_page.append(&project_workspace::new(&window, state.clone(), move |path| {
-                    build_ui_at(&app, Some(path));
-                }));
+                projects_page.append(&project_workspace::new(
+                    &window,
+                    state.clone(),
+                    move |path| {
+                        build_ui_at(&app, Some(path));
+                    },
+                ));
             }
             let selection = state.borrow().selection.clone();
             selection.unselect_all();
@@ -1949,7 +2071,12 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
                 ),
                 count => format!(
                     "  ·  {count} selected ({})",
-                    actions::human_size(rows.iter().filter(|row| !row.is_dir()).map(|row| row.size()).sum())
+                    actions::human_size(
+                        rows.iter()
+                            .filter(|row| !row.is_dir())
+                            .map(|row| row.size())
+                            .sum()
+                    )
                 ),
             };
             if let Some(c) = &st.catalog {
@@ -2110,7 +2237,10 @@ fn hit_menu() -> (gio::Menu, Vec<PathBuf>) {
     edit.append(Some("Copy selected to…"), Some("win.batch-copy"));
     edit.append(Some("Move selected to…"), Some("win.batch-move"));
     edit.append(Some("Compress selected…"), Some("win.batch-zip"));
-    edit.append(Some("Extract selected archives…"), Some("win.batch-extract"));
+    edit.append(
+        Some("Extract selected archives…"),
+        Some("win.batch-extract"),
+    );
     edit.append(Some("New Folder…"), Some("win.mkdir"));
     menu.append_section(None, &edit);
     let remove = gio::Menu::new();
@@ -2196,10 +2326,7 @@ fn install_actions(
         }),
     );
     let st = Rc::clone(&state);
-    add(
-        "cut",
-        Box::new(move |rows| cut_rows(&st, rows)),
-    );
+    add("cut", Box::new(move |rows| cut_rows(&st, rows)));
     add(
         "copy-files",
         Box::new(|rows| copy_paths(&rows.into_iter().map(|row| row.path()).collect::<Vec<_>>())),
@@ -2403,7 +2530,14 @@ fn install_keys(
     let host = window.clone();
     let window = window.clone();
     keys.connect_key_pressed(move |_, key, _, mods| {
-        if state.borrow().host.as_ref().is_some_and(|host| !host.stack.is_mapped()) { return glib::Propagation::Proceed; }
+        if state
+            .borrow()
+            .host
+            .as_ref()
+            .is_some_and(|host| !host.stack.is_mapped())
+        {
+            return glib::Propagation::Proceed;
+        }
         let search_focus = focus_in(&window, &search);
         let ctrl = mods.contains(gdk::ModifierType::CONTROL_MASK);
         let shift = mods.contains(gdk::ModifierType::SHIFT_MASK);
@@ -2809,7 +2943,9 @@ fn sync_index(state: &Rc<RefCell<State>>, dir: PathBuf) {
         if st.refreshing || st.fresh.contains(&dir) {
             return;
         }
-        let Some(catalog) = st.catalog.clone() else { return };
+        let Some(catalog) = st.catalog.clone() else {
+            return;
+        };
         catalog
     };
     let state = Rc::clone(state);
@@ -2835,19 +2971,24 @@ fn refresh_subtree(state: &Rc<RefCell<State>>, dir: PathBuf) {
             return;
         }
         st.refreshing = true;
-        st.status.set_text(&format!("Updating index for {}…", dir.display()));
+        st.status
+            .set_text(&format!("Updating index for {}…", dir.display()));
     }
     let state = Rc::clone(state);
     glib::MainContext::default().spawn_local(async move {
         let target = dir.clone();
-        let result = gio::spawn_blocking(move || Catalog::refresh(Config::load().rebuild(), &target)).await;
+        let result =
+            gio::spawn_blocking(move || Catalog::refresh(Config::load().rebuild(), &target)).await;
         state.borrow_mut().refreshing = false;
         match result {
             Ok(Ok(catalog)) => {
                 state.borrow_mut().fresh.insert(dir);
                 adopt_catalog(&state, catalog);
             }
-            Ok(Err(err)) => state.borrow().status.set_text(&format!("index update failed: {err}")),
+            Ok(Err(err)) => state
+                .borrow()
+                .status
+                .set_text(&format!("index update failed: {err}")),
             Err(_) => state.borrow().status.set_text("Index update failed"),
         }
     });
@@ -2897,7 +3038,8 @@ fn cut_rows(state: &Rc<RefCell<State>>, rows: Vec<RowData>) {
     copy_paths(&paths);
     let mut st = state.borrow_mut();
     st.cut = paths.iter().map(PathBuf::from).collect();
-    st.status.set_text(&format!("{} cut · Ctrl+V to move", paths.len()));
+    st.status
+        .set_text(&format!("{} cut · Ctrl+V to move", paths.len()));
 }
 
 /// Paste the clipboard's file list into the browsed folder. Files that were
@@ -2906,27 +3048,37 @@ fn paste_here(window: &gtk::ApplicationWindow, state: &Rc<RefCell<State>>) {
     let window = window.clone();
     let state = Rc::clone(state);
     let clipboard = window.clipboard();
-    clipboard.read_value_async(gdk::FileList::static_type(), glib::Priority::DEFAULT, None::<&gio::Cancellable>, move |value| {
-        let paths: Vec<PathBuf> = value
-            .ok()
-            .and_then(|value| value.get::<gdk::FileList>().ok())
-            .map(|list| list.files().into_iter().filter_map(|file| file.path()).collect())
-            .unwrap_or_default();
-        if paths.is_empty() {
-            state.borrow().status.set_text("Clipboard holds no files");
-            return;
-        }
-        let dest = current_dir(&state);
-        let cut = {
-            let mut st = state.borrow_mut();
-            let cut = !st.cut.is_empty() && paths.iter().all(|path| st.cut.contains(path));
-            if cut {
-                st.cut.clear();
+    clipboard.read_value_async(
+        gdk::FileList::static_type(),
+        glib::Priority::DEFAULT,
+        None::<&gio::Cancellable>,
+        move |value| {
+            let paths: Vec<PathBuf> = value
+                .ok()
+                .and_then(|value| value.get::<gdk::FileList>().ok())
+                .map(|list| {
+                    list.files()
+                        .into_iter()
+                        .filter_map(|file| file.path())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if paths.is_empty() {
+                state.borrow().status.set_text("Clipboard holds no files");
+                return;
             }
-            cut
-        };
-        manager_tools::paste_paths(&window, &state, paths, dest, cut);
-    });
+            let dest = current_dir(&state);
+            let cut = {
+                let mut st = state.borrow_mut();
+                let cut = !st.cut.is_empty() && paths.iter().all(|path| st.cut.contains(path));
+                if cut {
+                    st.cut.clear();
+                }
+                cut
+            };
+            manager_tools::paste_paths(&window, &state, paths, dest, cut);
+        },
+    );
 }
 
 fn open_terminal(state: &Rc<RefCell<State>>) {
@@ -2935,12 +3087,26 @@ fn open_terminal(state: &Rc<RefCell<State>>) {
 
 fn open_terminal_at(state: &Rc<RefCell<State>>, dir: PathBuf) {
     let mut candidates: Vec<String> = std::env::var("TERMINAL").ok().into_iter().collect();
-    candidates.extend(["xdg-terminal-exec", "x-terminal-emulator", "kitty", "alacritty", "foot", "gnome-terminal", "konsole"].map(String::from));
+    candidates.extend(
+        [
+            "xdg-terminal-exec",
+            "x-terminal-emulator",
+            "kitty",
+            "alacritty",
+            "foot",
+            "gnome-terminal",
+            "konsole",
+        ]
+        .map(String::from),
+    );
     let spawned = candidates
         .iter()
         .any(|term| Command::new(term).current_dir(&dir).spawn().is_ok());
     if !spawned {
-        state.borrow().status.set_text("No terminal found · set $TERMINAL");
+        state
+            .borrow()
+            .status
+            .set_text("No terminal found · set $TERMINAL");
     }
 }
 
@@ -2976,7 +3142,6 @@ fn search_now(state: &Rc<RefCell<State>>) {
     spawn_search(state, seq);
 }
 
-
 fn spawn_search(state: &Rc<RefCell<State>>, seq: u64) {
     let st = state.borrow();
     let catalog = st.catalog.clone();
@@ -2995,34 +3160,38 @@ fn spawn_search(state: &Rc<RefCell<State>>, seq: u64) {
     glib::MainContext::default().spawn_local(async move {
         // An empty query lists the folder straight from disk in every mode,
         // so a fresh download shows up without touching the index.
-        let result = gio::spawn_blocking(move || match (folder_scope, recursive && !q.is_empty()) {
-            (true, false) => folder_path
-                .as_deref()
-                .ok_or_else(|| "No folder selected".to_owned())
-                .and_then(|path| live_children(path, &q, opts, folders_first, measure_size).map_err(|error| error.to_string()))
-                .map(SearchResult::Live),
-            (true, true) => folder
-                .ok_or_else(|| {
-                    "Folder is outside the index; refresh the index to search here".to_owned()
-                })
-                .and_then(|folder| {
-                    folder
-                        .search_with(&q, opts)
-                        .map(|hits| hits.ids().to_vec())
-                        .map_err(|error| error.to_string())
-                })
-                .map(SearchResult::Indexed),
-            (false, _) => catalog
-                .ok_or_else(|| "Catalog is not ready".to_owned())
-                .and_then(|catalog| {
-                    catalog
-                        .search_with(&q, opts)
-                        .map(|hits| hits.ids().to_vec())
-                        .map_err(|error| error.to_string())
-                })
-                .map(SearchResult::Indexed),
-        })
-        .await;
+        let result =
+            gio::spawn_blocking(move || match (folder_scope, recursive && !q.is_empty()) {
+                (true, false) => folder_path
+                    .as_deref()
+                    .ok_or_else(|| "No folder selected".to_owned())
+                    .and_then(|path| {
+                        live_children(path, &q, opts, folders_first, measure_size)
+                            .map_err(|error| error.to_string())
+                    })
+                    .map(SearchResult::Live),
+                (true, true) => folder
+                    .ok_or_else(|| {
+                        "Folder is outside the index; refresh the index to search here".to_owned()
+                    })
+                    .and_then(|folder| {
+                        folder
+                            .search_with(&q, opts)
+                            .map(|hits| hits.ids().to_vec())
+                            .map_err(|error| error.to_string())
+                    })
+                    .map(SearchResult::Indexed),
+                (false, _) => catalog
+                    .ok_or_else(|| "Catalog is not ready".to_owned())
+                    .and_then(|catalog| {
+                        catalog
+                            .search_with(&q, opts)
+                            .map(|hits| hits.ids().to_vec())
+                            .map_err(|error| error.to_string())
+                    })
+                    .map(SearchResult::Indexed),
+            })
+            .await;
         if state.borrow().seq != seq {
             return;
         }
@@ -3047,9 +3216,10 @@ fn spawn_search(state: &Rc<RefCell<State>>, seq: u64) {
                         )
                     };
                     if FOLDERS_FIRST.load(AtomicOrdering::Relaxed)
-                        && let Some(catalog) = &catalog {
-                            ids.sort_by_key(|&id| !catalog.hit(id).is_some_and(|hit| hit.is_dir()));
-                        }
+                        && let Some(catalog) = &catalog
+                    {
+                        ids.sort_by_key(|&id| !catalog.hit(id).is_some_and(|hit| hit.is_dir()));
+                    }
                     let n = ids.len();
                     let (folders, files) = catalog
                         .as_ref()
@@ -3106,8 +3276,21 @@ fn spawn_search(state: &Rc<RefCell<State>>, seq: u64) {
                         let storage = state.borrow().storage.clone();
                         let folders_first = FOLDERS_FIRST.load(AtomicOrdering::Relaxed);
                         rows.sort_by_cached_key(|row| {
-                            let bytes = if row.is_dir { storage.known_size(&row.path) } else { Some(row.size) };
-                            (folders_first && !row.is_dir, bytes.is_none(), if sort == Sort::Largest { u64::MAX - bytes.unwrap_or(0) } else { bytes.unwrap_or(0) }, row.sort_name.clone())
+                            let bytes = if row.is_dir {
+                                storage.known_size(&row.path)
+                            } else {
+                                Some(row.size)
+                            };
+                            (
+                                folders_first && !row.is_dir,
+                                bytes.is_none(),
+                                if sort == Sort::Largest {
+                                    u64::MAX - bytes.unwrap_or(0)
+                                } else {
+                                    bytes.unwrap_or(0)
+                                },
+                                row.sort_name.clone(),
+                            )
                         });
                     }
                     let (folders, files) = rows.iter().fold((0, 0), |(folders, files), row| {
@@ -3207,7 +3390,12 @@ fn adopt_catalog(state: &Rc<RefCell<State>>, catalog: Catalog) {
 }
 
 fn refresh_current(state: &Rc<RefCell<State>>, window: &gtk::ApplicationWindow) {
-    let dir = state.borrow().manager.borrow().directory().map(Path::to_path_buf);
+    let dir = state
+        .borrow()
+        .manager
+        .borrow()
+        .directory()
+        .map(Path::to_path_buf);
     match dir {
         Some(dir) if state.borrow().catalog.is_some() => {
             state.borrow_mut().fresh.remove(&dir);
@@ -3492,11 +3680,13 @@ fn mkdir_here(state: Rc<RefCell<State>>, window: gtk::ApplicationWindow) {
 
 fn start_rebuild(state: &Rc<RefCell<State>>, _window: &gtk::ApplicationWindow, force: bool) {
     let snapshot = default_snapshot_path();
-    if !force && snapshot.exists()
-        && let Ok(catalog) = Catalog::open(&snapshot) {
-            adopt_catalog(state, catalog);
-            return;
-        }
+    if !force
+        && snapshot.exists()
+        && let Ok(catalog) = Catalog::open(&snapshot)
+    {
+        adopt_catalog(state, catalog);
+        return;
+    }
 
     state
         .borrow()
@@ -3662,7 +3852,7 @@ mod tests {
             snap_mtime: None,
             fresh: HashSet::new(),
             refreshing: false,
-        cut: Vec::new(),
+            cut: Vec::new(),
             dir_monitor: None,
             last_ids: Vec::new(),
             visible_folders: 0,

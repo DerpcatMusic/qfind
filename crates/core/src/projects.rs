@@ -182,7 +182,10 @@ fn github_repo_name(path: &std::path::Path, owned: &HashSet<String>) -> String {
         else {
             continue;
         };
-        let repo = repo.trim_end_matches('/').trim_end_matches(".git").to_owned();
+        let repo = repo
+            .trim_end_matches('/')
+            .trim_end_matches(".git")
+            .to_owned();
         if owned.contains(&repo.to_lowercase()) {
             return repo;
         }
@@ -244,7 +247,12 @@ fn describe_project(path: PathBuf, owned: &HashSet<String>) -> Project {
     // One `status` call yields branch, upstream, ahead/behind and health.
     let status = run_git(
         &path,
-        &["status", "--porcelain=v1", "--branch", "--untracked-files=normal"],
+        &[
+            "status",
+            "--porcelain=v1",
+            "--branch",
+            "--untracked-files=normal",
+        ],
     )
     .unwrap_or_default();
     let mut header = "";
@@ -278,11 +286,7 @@ fn describe_project(path: PathBuf, owned: &HashSet<String>) -> Project {
     // spend one call on origin/HEAD. No rev-parse verify loop.
     let target = if upstream.is_empty() {
         run_git(&path, &["symbolic-ref", "refs/remotes/origin/HEAD"])
-            .and_then(|text| {
-                text.trim()
-                    .strip_prefix("refs/remotes/")
-                    .map(str::to_owned)
-            })
+            .and_then(|text| text.trim().strip_prefix("refs/remotes/").map(str::to_owned))
             .unwrap_or_default()
     } else {
         upstream
@@ -291,7 +295,12 @@ fn describe_project(path: PathBuf, owned: &HashSet<String>) -> Project {
         // No upstream tracking this branch: one rev-list vs the base branch.
         if let Some(counts) = run_git(
             &path,
-            &["rev-list", "--left-right", "--count", &format!("{target}...HEAD")],
+            &[
+                "rev-list",
+                "--left-right",
+                "--count",
+                &format!("{target}...HEAD"),
+            ],
         ) {
             let mut parts = counts.split_whitespace();
             // rev-list prints `behind ahead`.
@@ -363,7 +372,11 @@ pub fn index_projects(catalog: &Catalog) -> Result<Vec<Project>, String> {
             .and_then(|meta| meta.modified().ok())
             .and_then(|time| time.elapsed().ok())
             .filter(|age| *age < Duration::from_secs(600))
-            .and_then(|_| repo_list_cache.as_ref().and_then(|path| fs::read_to_string(path).ok()));
+            .and_then(|_| {
+                repo_list_cache
+                    .as_ref()
+                    .and_then(|path| fs::read_to_string(path).ok())
+            });
         let repositories = if let Some(fresh) = fresh {
             fresh
         } else {
@@ -381,21 +394,38 @@ pub fn index_projects(catalog: &Catalog) -> Result<Vec<Project>, String> {
             match output {
                 Ok(output) if output.status.success() => {
                     if !overridden {
-                        let active = Command::new("gh").args(["config", "get", "user", "--host", "github.com"]).bounded_output(Duration::from_secs(15))
-                            .ok().filter(|output| output.status.success()).map(|output| String::from_utf8_lossy(&output.stdout).trim().to_lowercase());
-                        if active.as_deref() != Some(&login) { return Err("GitHub account changed during discovery. Refresh Projects.".into()); }
+                        let active = Command::new("gh")
+                            .args(["config", "get", "user", "--host", "github.com"])
+                            .bounded_output(Duration::from_secs(15))
+                            .ok()
+                            .filter(|output| output.status.success())
+                            .map(|output| {
+                                String::from_utf8_lossy(&output.stdout)
+                                    .trim()
+                                    .to_lowercase()
+                            });
+                        if active.as_deref() != Some(&login) {
+                            return Err(
+                                "GitHub account changed during discovery. Refresh Projects.".into(),
+                            );
+                        }
                     }
                     let text = String::from_utf8_lossy(&output.stdout).into_owned();
                     if let Some(cache) = &repo_list_cache
                         && let Some(parent) = cache.parent()
-                            && fs::create_dir_all(parent).is_ok()
-                                && let Ok(mut file) = tempfile::NamedTempFile::new_in(parent) {
-                                    use std::io::Write;
-                                    if file.write_all(text.as_bytes()).is_ok() { let _ = file.persist(cache); }
-                                }
+                        && fs::create_dir_all(parent).is_ok()
+                        && let Ok(mut file) = tempfile::NamedTempFile::new_in(parent)
+                    {
+                        use std::io::Write;
+                        if file.write_all(text.as_bytes()).is_ok() {
+                            let _ = file.persist(cache);
+                        }
+                    }
                     text
                 }
-                _ => repo_list_cache.as_ref().and_then(|path| fs::read_to_string(path).ok())
+                _ => repo_list_cache
+                    .as_ref()
+                    .and_then(|path| fs::read_to_string(path).ok())
                     .unwrap_or_default(),
             }
         };
@@ -421,28 +451,28 @@ pub fn index_projects(catalog: &Catalog) -> Result<Vec<Project>, String> {
                 .and_then(|time| time.elapsed().ok())
                 .is_some_and(|age| age < Duration::from_secs(600))
         })
-            && let Some(value) = fs::read(path)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-            {
-                // Only the snapshot path gates the cache: the stamp changes on every
-                // subtree refresh, which used to force a full project re-scan.
-                if value["snapshot"] == serde_json::json!(catalog.path())
-                    && let Ok(mut projects) =
-                        serde_json::from_value::<Vec<Project>>(value["projects"].clone())
-                    {
-                        projects.retain(|project| project.path.is_dir());
-                        if !login.is_empty() {
-                            // Owned Hits first; local-only Hits stay visible below them.
-                            projects.sort_by(|a, b| {
-                                owned
-                                    .contains(&b.repository.to_lowercase())
-                                    .cmp(&owned.contains(&a.repository.to_lowercase()))
-                            });
-                        }
-                        return Ok(projects);
-                    }
+        && let Some(value) = fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+    {
+        // Only the snapshot path gates the cache: the stamp changes on every
+        // subtree refresh, which used to force a full project re-scan.
+        if value["snapshot"] == serde_json::json!(catalog.path())
+            && let Ok(mut projects) =
+                serde_json::from_value::<Vec<Project>>(value["projects"].clone())
+        {
+            projects.retain(|project| project.path.is_dir());
+            if !login.is_empty() {
+                // Owned Hits first; local-only Hits stay visible below them.
+                projects.sort_by(|a, b| {
+                    owned
+                        .contains(&b.repository.to_lowercase())
+                        .cmp(&owned.contains(&a.repository.to_lowercase()))
+                });
             }
+            return Ok(projects);
+        }
+    }
     let mut roots = std::collections::BTreeSet::new();
     for id in 0..catalog.len() {
         let Some(hit) = catalog.hit(id) else {
@@ -450,7 +480,14 @@ pub fn index_projects(catalog: &Catalog) -> Result<Vec<Project>, String> {
         };
         if !matches!(
             hit.name(),
-            "Cargo.toml" | "package.json" | ".git" | ".gitignore" | "bun.lockb" | "pnpm-lock.yaml" | "yarn.lock" | "deno.json"
+            "Cargo.toml"
+                | "package.json"
+                | ".git"
+                | ".gitignore"
+                | "bun.lockb"
+                | "pnpm-lock.yaml"
+                | "yarn.lock"
+                | "deno.json"
         ) {
             continue;
         }
@@ -526,12 +563,16 @@ pub fn index_projects(catalog: &Catalog) -> Result<Vec<Project>, String> {
     // Attach sibling worktrees to each row so the dashboard can expand them.
     // Cached commons cover known rows; only new worktree rows pay for one
     // extra rev-parse each.
-    let mut by_common: std::collections::HashMap<String, Vec<PathBuf>> = std::collections::HashMap::new();
+    let mut by_common: std::collections::HashMap<String, Vec<PathBuf>> =
+        std::collections::HashMap::new();
     let mut all_commons: Vec<String> = Vec::with_capacity(projects.len());
     for (index, project) in projects.iter().enumerate() {
         let common = commons.get(index).cloned().unwrap_or_else(|| {
-            run_git(&project.path, &["rev-parse", "--path-format=absolute", "--git-common-dir"])
-                .unwrap_or_else(|| project.path.to_string_lossy().into_owned())
+            run_git(
+                &project.path,
+                &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            )
+            .unwrap_or_else(|| project.path.to_string_lossy().into_owned())
         });
         by_common
             .entry(common.clone())
@@ -560,12 +601,13 @@ pub fn index_projects(catalog: &Catalog) -> Result<Vec<Project>, String> {
     }
     if let Some(path) = workspace_cache
         && let Some(parent) = path.parent()
-            && fs::create_dir_all(parent).is_ok()
-                && let Ok(mut file) = tempfile::NamedTempFile::new_in(parent) {
-                    let value = serde_json::json!({"snapshot":catalog.path(),"stamp":snapshot_stamp,"projects":projects});
-                    if serde_json::to_writer(&mut file, &value).is_ok() {
-                        let _ = file.persist(path);
-                    }
-                }
+        && fs::create_dir_all(parent).is_ok()
+        && let Ok(mut file) = tempfile::NamedTempFile::new_in(parent)
+    {
+        let value = serde_json::json!({"snapshot":catalog.path(),"stamp":snapshot_stamp,"projects":projects});
+        if serde_json::to_writer(&mut file, &value).is_ok() {
+            let _ = file.persist(path);
+        }
+    }
     Ok(projects)
 }

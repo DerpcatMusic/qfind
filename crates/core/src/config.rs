@@ -547,7 +547,10 @@ mod tests {
 
     #[test]
     fn auto_sends_text_to_editor_and_binaries_to_desktop() {
-        let cfg = Config { editor: "nvim -p".into(), ..Config::default() };
+        let cfg = Config {
+            editor: "nvim -p".into(),
+            ..Config::default()
+        };
         let how = cfg.open_how_env(Path::new("/tmp/foo.rs"), false, None, None);
         assert_eq!(
             how,
@@ -568,7 +571,11 @@ mod tests {
 
     #[test]
     fn xdg_ignores_editor_even_for_text() {
-        let cfg = Config { open: OpenMode::Xdg, editor: "nvim".into(), ..Config::default() };
+        let cfg = Config {
+            open: OpenMode::Xdg,
+            editor: "nvim".into(),
+            ..Config::default()
+        };
         assert_eq!(
             cfg.open_how_env(Path::new("main.rs"), false, Some("nvim"), None),
             OpenHow::Desktop

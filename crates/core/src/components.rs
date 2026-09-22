@@ -127,7 +127,12 @@ fn git_head(root: &Path) -> Value {
     // Single status call carries branch, upstream, ahead/behind and health.
     let status = git(
         root,
-        &["status", "--porcelain=v1", "--branch", "--untracked-files=normal"],
+        &[
+            "status",
+            "--porcelain=v1",
+            "--branch",
+            "--untracked-files=normal",
+        ],
         None,
     )
     .unwrap_or_default();
@@ -161,26 +166,31 @@ fn git_head(root: &Path) -> Value {
     let target = if upstream.is_empty() {
         git(root, &["symbolic-ref", "refs/remotes/origin/HEAD"], None)
             .ok()
-            .and_then(|text| {
-                text.trim()
-                    .strip_prefix("refs/remotes/")
-                    .map(str::to_owned)
-            })
+            .and_then(|text| text.trim().strip_prefix("refs/remotes/").map(str::to_owned))
             .unwrap_or_default()
     } else {
         upstream
     };
-    if ahead == 0 && behind == 0 && !target.is_empty() && !header.contains("...")
+    if ahead == 0
+        && behind == 0
+        && !target.is_empty()
+        && !header.contains("...")
         && let Ok(counts) = git(
             root,
-            &["rev-list", "--left-right", "--count", &format!("{target}...HEAD")],
+            &[
+                "rev-list",
+                "--left-right",
+                "--count",
+                &format!("{target}...HEAD"),
+            ],
             None,
-        ) {
-            let mut parts = counts.split_whitespace();
-            // rev-list prints `behind ahead`.
-            behind = parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
-            ahead = parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
-        }
+        )
+    {
+        let mut parts = counts.split_whitespace();
+        // rev-list prints `behind ahead`.
+        behind = parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+        ahead = parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    }
     json!({"branch":branch,"target":target,"ahead":ahead,"behind":behind,"dirty":dirty,"untracked":untracked,"conflicted":conflicted})
 }
 
@@ -203,7 +213,14 @@ fn git_component(directory: &Path, request: &Value) -> Result<Value, String> {
         let destination = request["destination"]
             .as_str()
             .map(PathBuf::from)
-            .unwrap_or_else(|| directory.join(url.rsplit('/').next().unwrap_or("repo").trim_end_matches(".git")));
+            .unwrap_or_else(|| {
+                directory.join(
+                    url.rsplit('/')
+                        .next()
+                        .unwrap_or("repo")
+                        .trim_end_matches(".git"),
+                )
+            });
         let output = Command::new("git")
             .args(["clone", url])
             .arg(&destination)
@@ -216,7 +233,9 @@ fn git_component(directory: &Path, request: &Value) -> Result<Value, String> {
                 String::from_utf8_lossy(&output.stderr)
             ));
         }
-        return Ok(json!({"text":format!("Cloned into {}", destination.display()),"path":destination}));
+        return Ok(
+            json!({"text":format!("Cloned into {}", destination.display()),"path":destination}),
+        );
     }
     if action == "init" {
         git(directory, &["init"], None)?;
@@ -236,7 +255,9 @@ fn git_component(directory: &Path, request: &Value) -> Result<Value, String> {
     let action = string(request, "action");
     let staged = request["staged"].as_bool().unwrap_or(false);
     if matches!(action, "stage" | "unstage" | "discard") {
-        let file = file.as_deref().ok_or("Choose a file to stage, unstage or discard")?;
+        let file = file
+            .as_deref()
+            .ok_or("Choose a file to stage, unstage or discard")?;
         if action == "stage" {
             git(&root, &["add"], Some(file))?;
         } else if action == "unstage" {
@@ -252,7 +273,9 @@ fn git_component(directory: &Path, request: &Value) -> Result<Value, String> {
             git(&root, &["restore"], Some(file))?;
         }
         let head = git_head(&root);
-        return Ok(json!({"text":match action {"stage"=>"File staged","unstage"=>"File unstaged",_=>"Changes discarded"},"head":head}));
+        return Ok(
+            json!({"text":match action {"stage"=>"File staged","unstage"=>"File unstaged",_=>"Changes discarded"},"head":head}),
+        );
     }
     if matches!(action, "commit" | "amend") {
         let message = string(request, "message");
@@ -273,7 +296,9 @@ fn git_component(directory: &Path, request: &Value) -> Result<Value, String> {
             _ => vec!["push"],
         };
         git(&root, &verb, None)?;
-        return Ok(json!({"text":match action {"fetch"=>"Fetched","pull"=>"Pulled",_=>"Pushed"},"head":git_head(&root)}));
+        return Ok(
+            json!({"text":match action {"fetch"=>"Fetched","pull"=>"Pulled",_=>"Pushed"},"head":git_head(&root)}),
+        );
     }
     if matches!(action, "branch" | "checkout" | "create-branch") {
         let name = {
@@ -281,7 +306,10 @@ fn git_component(directory: &Path, request: &Value) -> Result<Value, String> {
             if !named.is_empty() {
                 named.to_owned()
             } else {
-                request["file"].as_str().map(str::to_owned).unwrap_or_default()
+                request["file"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_default()
             }
         };
         if name.is_empty() {
@@ -299,7 +327,14 @@ fn git_component(directory: &Path, request: &Value) -> Result<Value, String> {
     if action == "log" {
         let text = git(
             &root,
-            &["log", "-20", "--oneline", "--decorate", "--date=short", "--format=%h %ad %an %s"],
+            &[
+                "log",
+                "-20",
+                "--oneline",
+                "--decorate",
+                "--date=short",
+                "--format=%h %ad %an %s",
+            ],
             None,
         )?;
         let commits = text
@@ -353,35 +388,35 @@ fn git_component(directory: &Path, request: &Value) -> Result<Value, String> {
         "status" => status.clone(),
         "" | "diff" => {
             let mut patch = git(&root, &args, file.as_deref())?;
-            if patch.is_empty() && !staged
+            if patch.is_empty()
+                && !staged
                 && let Some(file) = file.as_deref().filter(|file| root.join(file).is_file())
-                    && git(&root, &["ls-files", "--error-unmatch"], Some(file)).is_err() {
-                        let mut bytes = Vec::new();
-                        fs::File::open(root.join(file))
-                            .map_err(|error| error.to_string())?
-                            .take(512 * 1024 + 1)
-                            .read_to_end(&mut bytes)
-                            .map_err(|error| error.to_string())?;
-                        if bytes.len() > 512 * 1024 {
-                            return Err(
-                                "Untracked file is larger than the 512 KiB diff limit".into()
-                            );
-                        }
-                        if bytes.contains(&0) {
-                            patch = "Binary untracked file".into();
-                        } else {
-                            let content = String::from_utf8_lossy(&bytes);
-                            patch = format!(
-                                "--- /dev/null\n+++ b/{}\n@@ -0,0 +1,{} @@\n{}",
-                                file.display(),
-                                content.lines().count(),
-                                content
-                                    .lines()
-                                    .map(|line| format!("+{line}\n"))
-                                    .collect::<String>()
-                            );
-                        }
-                    }
+                && git(&root, &["ls-files", "--error-unmatch"], Some(file)).is_err()
+            {
+                let mut bytes = Vec::new();
+                fs::File::open(root.join(file))
+                    .map_err(|error| error.to_string())?
+                    .take(512 * 1024 + 1)
+                    .read_to_end(&mut bytes)
+                    .map_err(|error| error.to_string())?;
+                if bytes.len() > 512 * 1024 {
+                    return Err("Untracked file is larger than the 512 KiB diff limit".into());
+                }
+                if bytes.contains(&0) {
+                    patch = "Binary untracked file".into();
+                } else {
+                    let content = String::from_utf8_lossy(&bytes);
+                    patch = format!(
+                        "--- /dev/null\n+++ b/{}\n@@ -0,0 +1,{} @@\n{}",
+                        file.display(),
+                        content.lines().count(),
+                        content
+                            .lines()
+                            .map(|line| format!("+{line}\n"))
+                            .collect::<String>()
+                    );
+                }
+            }
             if patch.is_empty() {
                 "No changes for this selection.".into()
             } else {
@@ -402,7 +437,9 @@ fn git_component(directory: &Path, request: &Value) -> Result<Value, String> {
                 )
         })
         .collect();
-    Ok(json!({"text":text,"status":status,"files":files,"root":root,"head":head,"hunks":hunks,"conflicted":conflicted}))
+    Ok(
+        json!({"text":text,"status":status,"files":files,"root":root,"head":head,"hunks":hunks,"conflicted":conflicted}),
+    )
 }
 
 pub fn task_commands(path: &Path) -> Vec<(String, String, Vec<String>)> {
@@ -435,9 +472,17 @@ pub fn task_commands(path: &Path) -> Vec<(String, String, Vec<String>)> {
     if path.join("Cargo.toml").is_file() {
         for (id, title, args) in [
             ("cargo-check", "Rust check", vec!["cargo", "check"]),
-            ("cargo-clippy", "Rust lints", vec!["cargo", "clippy", "--all-targets"]),
+            (
+                "cargo-clippy",
+                "Rust lints",
+                vec!["cargo", "clippy", "--all-targets"],
+            ),
             ("cargo-test", "Rust tests", vec!["cargo", "test"]),
-            ("cargo-fmt", "Rust format check", vec!["cargo", "fmt", "--check"]),
+            (
+                "cargo-fmt",
+                "Rust format check",
+                vec!["cargo", "fmt", "--check"],
+            ),
             ("cargo-build", "Rust build", vec!["cargo", "build"]),
             (
                 "cargo-release",
@@ -456,7 +501,11 @@ pub fn task_commands(path: &Path) -> Vec<(String, String, Vec<String>)> {
         let manifest = fs::read_to_string(path.join("package.json")).unwrap_or_default();
         let scripts: Vec<String> = serde_json::from_str::<Value>(&manifest)
             .ok()
-            .and_then(|value| value["scripts"].as_object().map(|map| map.keys().cloned().collect()))
+            .and_then(|value| {
+                value["scripts"]
+                    .as_object()
+                    .map(|map| map.keys().cloned().collect())
+            })
             .unwrap_or_default();
         let tool = if path.join("bun.lockb").exists() || path.join("bun.lock").exists() {
             "bun"
@@ -523,7 +572,11 @@ pub fn run_task(path: &Path, id: &str) -> Result<String, String> {
         .into_iter()
         .find(|(command, _, _)| command == id)
         .ok_or("Unknown project command")?;
-    let executable = if cfg!(windows) && matches!(args.first().map(String::as_str), Some("npm" | "pnpm" | "yarn")) {
+    let executable = if cfg!(windows)
+        && matches!(
+            args.first().map(String::as_str),
+            Some("npm" | "pnpm" | "yarn")
+        ) {
         format!("{}.cmd", args[0])
     } else {
         args[0].clone()
@@ -603,11 +656,11 @@ fn storage_component(manager: &Manager, path: &Path) -> Result<Value, String> {
             && let Some(indexed) = manager
                 .storage()
                 .and_then(|map| map.find_indexed(&entry.path))
-            {
-                entry.bytes = crate::FolderSizes::global()
-                    .get(&entry.path)
-                    .unwrap_or(indexed.bytes);
-            }
+        {
+            entry.bytes = crate::FolderSizes::global()
+                .get(&entry.path)
+                .unwrap_or(indexed.bytes);
+        }
     }
     entries.sort_by_key(|e| std::cmp::Reverse(e.bytes));
     let remaining = entries

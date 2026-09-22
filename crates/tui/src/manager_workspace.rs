@@ -485,9 +485,10 @@ impl Workspace {
             return;
         }
         if self.mode == Mode::Projects
-            && let Some(path) = self.selected_path() {
-                self.path = path;
-            }
+            && let Some(path) = self.selected_path()
+        {
+            self.path = path;
+        }
         self.mode = mode;
         self.selected = 0;
         self.scroll = 0;
@@ -1474,7 +1475,12 @@ fn project_detail(row: &ProjectRow) -> Vec<Line<'static>> {
     if !row.scripts.is_empty() {
         lines.push(Line::from(format!(
             "Scripts: {}",
-            row.scripts.iter().take(6).cloned().collect::<Vec<_>>().join(", ")
+            row.scripts
+                .iter()
+                .take(6)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
         )));
     }
     if !row.worktrees.is_empty() {

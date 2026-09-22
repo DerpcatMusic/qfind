@@ -119,7 +119,6 @@ pub(super) fn install(
         action.connect_activate(move |_, _| {
             if name == "select-matching" {
                 select_matching(&window, &state);
-
             } else {
                 let rows = target.rows();
                 if rows.is_empty() {
@@ -355,15 +354,36 @@ fn transfer(
     });
 }
 
-pub(super) use qfind_core::projects::{Project, active_project_account, index_projects, refresh_project_account};
+pub(super) use qfind_core::projects::{
+    Project, active_project_account, index_projects, refresh_project_account,
+};
 
-pub(super) fn paste_paths(window: &gtk::ApplicationWindow, state: &Rc<RefCell<State>>, paths: Vec<PathBuf>, dest: PathBuf, cut: bool) {
-    let (title, action) = if cut { ("Move files", "batch-move") } else { ("Paste files", "batch-copy") };
-    job(window, state, title, move || transfer_paths(&paths, &dest, action));
+pub(super) fn paste_paths(
+    window: &gtk::ApplicationWindow,
+    state: &Rc<RefCell<State>>,
+    paths: Vec<PathBuf>,
+    dest: PathBuf,
+    cut: bool,
+) {
+    let (title, action) = if cut {
+        ("Move files", "batch-move")
+    } else {
+        ("Paste files", "batch-copy")
+    };
+    job(window, state, title, move || {
+        transfer_paths(&paths, &dest, action)
+    });
 }
 
-pub(super) fn drop_paths(window: &gtk::ApplicationWindow, state: &Rc<RefCell<State>>, paths: Vec<PathBuf>, dest: PathBuf) {
-    job(window, state, "Copy dropped files", move || transfer_paths(&paths, &dest, "batch-copy"));
+pub(super) fn drop_paths(
+    window: &gtk::ApplicationWindow,
+    state: &Rc<RefCell<State>>,
+    paths: Vec<PathBuf>,
+    dest: PathBuf,
+) {
+    job(window, state, "Copy dropped files", move || {
+        transfer_paths(&paths, &dest, "batch-copy")
+    });
 }
 
 fn transfer_paths(paths: &[PathBuf], dest: &Path, action: &str) -> Result<String, String> {
@@ -394,8 +414,7 @@ fn transfer_paths(paths: &[PathBuf], dest: &Path, action: &str) -> Result<String
                     .any(|other| other != path && path.starts_with(other))
             {
                 return Err(
-                    "Destination or selection is nested inside another selected folder"
-                        .into(),
+                    "Destination or selection is nested inside another selected folder".into(),
                 );
             }
             if fs::symlink_metadata(&target).is_ok() || !targets.insert(target.clone()) {
@@ -434,21 +453,58 @@ fn project_details(window: &gtk::ApplicationWindow, state: &Rc<RefCell<State>>, 
     dialog.present();
 }
 
-pub(super) fn project_detail_content(_window: &gtk::ApplicationWindow, _state: &Rc<RefCell<State>>, project: Project) -> gtk::Box {
+pub(super) fn project_detail_content(
+    _window: &gtk::ApplicationWindow,
+    _state: &Rc<RefCell<State>>,
+    project: Project,
+) -> gtk::Box {
     let path = project.path.clone();
     let body = gtk::Box::new(gtk::Orientation::Vertical, 10);
     body.add_css_class("megaman-overview");
     for (caption, value) in [
-        ("BRANCH", if project.branch.is_empty() { "No branch".into() } else { project.branch.clone() }),
-        ("WORKING TREE", if project.conflicted > 0 {
-            format!("{} conflicts · {} modified · {} untracked", project.conflicted, project.dirty, project.untracked)
-        } else if project.dirty > 0 || project.untracked > 0 {
-            format!("{} modified · {} untracked", project.dirty, project.untracked)
-        } else { "All changes committed".into() }),
-        ("SYNC", if project.target.is_empty() { "No upstream configured".into() } else {
-            format!("{} ahead · {} behind  /  {}", project.ahead, project.behind, project.target)
-        }),
-        ("LATEST COMMIT", if project.last_commit.is_empty() { "No commits yet".into() } else { project.last_commit.clone() }),
+        (
+            "BRANCH",
+            if project.branch.is_empty() {
+                "No branch".into()
+            } else {
+                project.branch.clone()
+            },
+        ),
+        (
+            "WORKING TREE",
+            if project.conflicted > 0 {
+                format!(
+                    "{} conflicts · {} modified · {} untracked",
+                    project.conflicted, project.dirty, project.untracked
+                )
+            } else if project.dirty > 0 || project.untracked > 0 {
+                format!(
+                    "{} modified · {} untracked",
+                    project.dirty, project.untracked
+                )
+            } else {
+                "All changes committed".into()
+            },
+        ),
+        (
+            "SYNC",
+            if project.target.is_empty() {
+                "No upstream configured".into()
+            } else {
+                format!(
+                    "{} ahead · {} behind  /  {}",
+                    project.ahead, project.behind, project.target
+                )
+            },
+        ),
+        (
+            "LATEST COMMIT",
+            if project.last_commit.is_empty() {
+                "No commits yet".into()
+            } else {
+                project.last_commit.clone()
+            },
+        ),
     ] {
         let card = gtk::Box::new(gtk::Orientation::Vertical, 5);
         card.add_css_class("megaman-detail-card");
@@ -464,7 +520,16 @@ pub(super) fn project_detail_content(_window: &gtk::ApplicationWindow, _state: &
         body.append(&card);
     }
     if !project.scripts.is_empty() {
-        let scripts = gtk::Label::new(Some(&format!("Scripts: {}", project.scripts.iter().take(8).cloned().collect::<Vec<_>>().join(", "))));
+        let scripts = gtk::Label::new(Some(&format!(
+            "Scripts: {}",
+            project
+                .scripts
+                .iter()
+                .take(8)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
         scripts.set_xalign(0.0);
         scripts.set_wrap(true);
         scripts.set_ellipsize(gtk::pango::EllipsizeMode::End);
@@ -480,7 +545,10 @@ pub(super) fn project_detail_content(_window: &gtk::ApplicationWindow, _state: &
     let has_commands = !commands.is_empty();
     if has_commands {
         let choices = gtk::DropDown::from_strings(
-            &commands.iter().map(|(_, name, _)| name.as_str()).collect::<Vec<_>>(),
+            &commands
+                .iter()
+                .map(|(_, name, _)| name.as_str())
+                .collect::<Vec<_>>(),
         );
         choices.set_hexpand(true);
         actions.append(&choices);
@@ -497,11 +565,16 @@ pub(super) fn project_detail_content(_window: &gtk::ApplicationWindow, _state: &
             output.set_text(&format!("Running {}…", command));
             let output = output.clone();
             glib::MainContext::default().spawn_local(async move {
-            let result = gio::spawn_blocking(move || -> Result<String, String> {
-                qfind_core::components::run_task(&path, &command)
-            }).await;
-            output.set_text(&match result { Ok(Ok(message)) => message, Ok(Err(error)) => error, Err(_) => "Command worker failed".into() });
-            button.set_sensitive(true);
+                let result = gio::spawn_blocking(move || -> Result<String, String> {
+                    qfind_core::components::run_task(&path, &command)
+                })
+                .await;
+                output.set_text(&match result {
+                    Ok(Ok(message)) => message,
+                    Ok(Err(error)) => error,
+                    Err(_) => "Command worker failed".into(),
+                });
+                button.set_sensitive(true);
             });
         });
         let hint = gtk::Label::new(Some(
@@ -546,7 +619,11 @@ pub(super) fn project_detail_content(_window: &gtk::ApplicationWindow, _state: &
                     Err(error) => report.push_str(&format!("\nGit unavailable: {error}\n")),
                 }
                 // Ahead/behind + last commit for the dashboard header.
-                if let Ok(log) = Command::new("git").args(["log", "-3", "--oneline", "--decorate"]).current_dir(&path).output() {
+                if let Ok(log) = Command::new("git")
+                    .args(["log", "-3", "--oneline", "--decorate"])
+                    .current_dir(&path)
+                    .output()
+                {
                     let text = String::from_utf8_lossy(&log.stdout);
                     if !text.trim().is_empty() {
                         report.push_str(&format!("\nRecent commits\n{text}"));
@@ -600,7 +677,11 @@ fn builds_active() -> Result<bool, String> {
     Ok(false)
 }
 
-pub(super) fn project_content_at(window: &gtk::ApplicationWindow, state: &Rc<RefCell<State>>, root: PathBuf) -> gtk::Box {
+pub(super) fn project_content_at(
+    window: &gtk::ApplicationWindow,
+    state: &Rc<RefCell<State>>,
+    root: PathBuf,
+) -> gtk::Box {
     let body = gtk::Box::new(gtk::Orientation::Vertical, 12);
     body.set_margin_start(12);
     body.set_margin_end(12);
@@ -617,7 +698,9 @@ pub(super) fn project_content_at(window: &gtk::ApplicationWindow, state: &Rc<Ref
             .vexpand(true)
             .build(),
     );
-    let scope_hint = gtk::Label::new(Some("Projects come from the file index. Build sizes are saved; missing sizes are measured in the background."));
+    let scope_hint = gtk::Label::new(Some(
+        "Projects come from the file index. Build sizes are saved; missing sizes are measured in the background.",
+    ));
     scope_hint.set_wrap(true);
     scope_hint.add_css_class("dim-label");
     body.append(&scope_hint);
@@ -632,48 +715,103 @@ pub(super) fn project_content_at(window: &gtk::ApplicationWindow, state: &Rc<Ref
     let storage = state.borrow().storage.clone();
     let weak_body = body.downgrade();
     glib::timeout_add_local(Duration::from_millis(50), move || {
-        if weak_body.upgrade().is_none() { return glib::ControlFlow::Break; }
-        let Some(projects) = storage.projects(&root) else { return glib::ControlFlow::Continue; };
+        if weak_body.upgrade().is_none() {
+            return glib::ControlFlow::Break;
+        }
+        let Some(projects) = storage.projects(&root) else {
+            return glib::ControlFlow::Continue;
+        };
         {
-                let bytes: u64 = projects.iter().flat_map(|p| &p.artifacts).filter_map(|(_,n)| *n).sum();
-                let unknown = projects.iter().flat_map(|project| &project.artifacts).any(|(_, bytes)| bytes.is_none());
-                summary.set_text(&format!("{} projects · {}", projects.len(), if unknown { "build sizes below".into() } else { format!("{} in builds & dependencies", actions::human_size(bytes)) }));
-                for project in projects.into_iter().filter(|project| !project.artifacts.is_empty()) {
-                    let row = gtk::Box::new(gtk::Orientation::Vertical, 6);
-                    row.add_css_class("qfind-project");
-                    let title = gtk::Button::with_label(&format!("{}  {}{}{}", project.path.file_name().unwrap_or_default().to_string_lossy(), if project.rust { "Rust " } else { "" }, if project.node { "JS " } else { "" }, if project.git { "Git" } else { "" }));
-                    title.add_css_class("flat");
-                    title.set_halign(gtk::Align::Fill);
-                    title.set_tooltip_text(Some(&project.path.to_string_lossy()));
-                    if let Some(label) = title.child().and_downcast::<gtk::Label>() {
-                        label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
-                        label.set_xalign(0.0);
-                    }
-                    row.append(&title);
-                    let win = win.clone();
-                    let state = state_for_scan.clone();
-                    let snapshot = project.clone();
-                    title.connect_clicked(move |_| project_details(&win, &state, snapshot.clone()));
-                    for (path, bytes) in project.artifacts {
-                        let check = gtk::CheckButton::with_label(&format!("{} · {}", path.file_name().unwrap_or_default().to_string_lossy(), storage.indexed_size_text(&path)));
-                        let weak = check.downgrade();
-                        let size_path = path.clone();
-                        let storage = storage.clone();
-                        glib::timeout_add_local(Duration::from_millis(500), move || {
-                            let Some(check) = weak.upgrade() else { return glib::ControlFlow::Break; };
-                            if !check.is_mapped() { return glib::ControlFlow::Continue; }
-                            let label = format!("{} · {}", size_path.file_name().unwrap_or_default().to_string_lossy(), storage.indexed_size_text(&size_path));
-                            if check.label().as_deref() != Some(&label) { check.set_label(Some(&label)); }
-                            glib::ControlFlow::Continue
-                        });
-                        row.append(&check);
-                        let selected = selected_for_scan.clone();
-                        let cleanup = cleanup_for_scan.clone();
-                        check.connect_toggled(move |_| cleanup.set_sensitive(selected.borrow().iter().any(|(check,_,_)| check.is_active())));
-                        selected_for_scan.borrow_mut().push((check, path, bytes.unwrap_or(0)));
-                    }
-                    list.append(&row);
+            let bytes: u64 = projects
+                .iter()
+                .flat_map(|p| &p.artifacts)
+                .filter_map(|(_, n)| *n)
+                .sum();
+            let unknown = projects
+                .iter()
+                .flat_map(|project| &project.artifacts)
+                .any(|(_, bytes)| bytes.is_none());
+            summary.set_text(&format!(
+                "{} projects · {}",
+                projects.len(),
+                if unknown {
+                    "build sizes below".into()
+                } else {
+                    format!("{} in builds & dependencies", actions::human_size(bytes))
                 }
+            ));
+            for project in projects
+                .into_iter()
+                .filter(|project| !project.artifacts.is_empty())
+            {
+                let row = gtk::Box::new(gtk::Orientation::Vertical, 6);
+                row.add_css_class("qfind-project");
+                let title = gtk::Button::with_label(&format!(
+                    "{}  {}{}{}",
+                    project
+                        .path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy(),
+                    if project.rust { "Rust " } else { "" },
+                    if project.node { "JS " } else { "" },
+                    if project.git { "Git" } else { "" }
+                ));
+                title.add_css_class("flat");
+                title.set_halign(gtk::Align::Fill);
+                title.set_tooltip_text(Some(&project.path.to_string_lossy()));
+                if let Some(label) = title.child().and_downcast::<gtk::Label>() {
+                    label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+                    label.set_xalign(0.0);
+                }
+                row.append(&title);
+                let win = win.clone();
+                let state = state_for_scan.clone();
+                let snapshot = project.clone();
+                title.connect_clicked(move |_| project_details(&win, &state, snapshot.clone()));
+                for (path, bytes) in project.artifacts {
+                    let check = gtk::CheckButton::with_label(&format!(
+                        "{} · {}",
+                        path.file_name().unwrap_or_default().to_string_lossy(),
+                        storage.indexed_size_text(&path)
+                    ));
+                    let weak = check.downgrade();
+                    let size_path = path.clone();
+                    let storage = storage.clone();
+                    glib::timeout_add_local(Duration::from_millis(500), move || {
+                        let Some(check) = weak.upgrade() else {
+                            return glib::ControlFlow::Break;
+                        };
+                        if !check.is_mapped() {
+                            return glib::ControlFlow::Continue;
+                        }
+                        let label = format!(
+                            "{} · {}",
+                            size_path.file_name().unwrap_or_default().to_string_lossy(),
+                            storage.indexed_size_text(&size_path)
+                        );
+                        if check.label().as_deref() != Some(&label) {
+                            check.set_label(Some(&label));
+                        }
+                        glib::ControlFlow::Continue
+                    });
+                    row.append(&check);
+                    let selected = selected_for_scan.clone();
+                    let cleanup = cleanup_for_scan.clone();
+                    check.connect_toggled(move |_| {
+                        cleanup.set_sensitive(
+                            selected
+                                .borrow()
+                                .iter()
+                                .any(|(check, _, _)| check.is_active()),
+                        )
+                    });
+                    selected_for_scan
+                        .borrow_mut()
+                        .push((check, path, bytes.unwrap_or(0)));
+                }
+                list.append(&row);
+            }
         }
         glib::ControlFlow::Break
     });
@@ -733,12 +871,32 @@ mod transfer_tests {
         fs::create_dir_all(source.join("nested")).unwrap();
         fs::create_dir(&dest).unwrap();
         fs::write(source.join("note.txt"), "keep me").unwrap();
-        assert!(transfer_paths(std::slice::from_ref(&source), &source.join("nested"), "batch-copy").is_err());
+        assert!(
+            transfer_paths(
+                std::slice::from_ref(&source),
+                &source.join("nested"),
+                "batch-copy"
+            )
+            .is_err()
+        );
         transfer_paths(std::slice::from_ref(&source), &dest, "batch-copy").unwrap();
-        assert_eq!(fs::read_to_string(dest.join("source/note.txt")).unwrap(), "keep me");
+        assert_eq!(
+            fs::read_to_string(dest.join("source/note.txt")).unwrap(),
+            "keep me"
+        );
         assert!(source.join("note.txt").exists());
         assert!(transfer_paths(std::slice::from_ref(&source), &dest, "batch-copy").is_err());
-        assert_eq!(fs::read_to_string(dest.join("source/note.txt")).unwrap(), "keep me");
-        assert!(transfer_paths(&[source.clone(), source.join("nested")], temp.path(), "batch-copy").is_err());
+        assert_eq!(
+            fs::read_to_string(dest.join("source/note.txt")).unwrap(),
+            "keep me"
+        );
+        assert!(
+            transfer_paths(
+                &[source.clone(), source.join("nested")],
+                temp.path(),
+                "batch-copy"
+            )
+            .is_err()
+        );
     }
 }
