@@ -5,7 +5,47 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gtk::prelude::*;
+use qfind_core::appearance::{GTK_THEMES, THEMES, accent_for, normalize_gtk_theme, normalize_theme};
 use qfind_core::{Config, MatchMode, OpenMode, PreviewMode};
+
+thread_local! {
+    static ACCENT: gtk::CssProvider = gtk::CssProvider::new();
+    static SYSTEM_GTK_THEME: RefCell<Option<Option<String>>> = const { RefCell::new(None) };
+}
+
+/// Push `cfg.theme` accent and `cfg.gtk_theme` onto the live display. Cheap; call on every save.
+pub fn apply_appearance(cfg: &Config) {
+    ACCENT.with(|css| {
+        css.load_from_string(&format!(
+            "@define-color qfind_accent {};",
+            accent_for(&cfg.theme)
+        ));
+        if let Some(display) = gtk::gdk::Display::default() {
+            // Idempotent: GTK ignores re-adding the same provider.
+            gtk::style_context_add_provider_for_display(
+                &display,
+                css,
+                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
+            );
+        }
+    });
+    let Some(settings) = gtk::Settings::default() else {
+        return;
+    };
+    let system = SYSTEM_GTK_THEME.with(|slot| {
+        slot.borrow_mut()
+            .get_or_insert_with(|| settings.gtk_theme_name().map(|n| n.to_string()))
+            .clone()
+    });
+    match normalize_gtk_theme(&cfg.gtk_theme) {
+        "system" => settings.set_gtk_theme_name(system.as_deref()),
+        name => settings.set_gtk_theme_name(Some(name)),
+    }
+}
+
+fn index_of(list: &[&str], wanted: &str) -> u32 {
+    list.iter().position(|t| *t == wanted).unwrap_or(0) as u32
+}
 
 pub struct Live {
     pub preview: Rc<Cell<PreviewMode>>,
@@ -88,6 +128,12 @@ pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
     let editor_entry = gtk::Entry::new();
     editor_entry.set_placeholder_text(Some("$EDITOR then $VISUAL"));
     editor_entry.set_text(&cfg.editor);
+    let theme_drop = gtk::DropDown::from_strings(THEMES);
+    theme_drop.set_tooltip_text(Some("Accent color. Shared with the TUI and every other frontend."));
+    theme_drop.set_selected(index_of(THEMES, normalize_theme(&cfg.theme)));
+    let gtk_theme_drop = gtk::DropDown::from_strings(GTK_THEMES);
+    gtk_theme_drop.set_tooltip_text(Some("system follows the desktop. Adwaita-dark forces dark."));
+    gtk_theme_drop.set_selected(index_of(GTK_THEMES, normalize_gtk_theme(&cfg.gtk_theme)));
 
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 10);
     vbox.set_margin_start(14);
@@ -104,6 +150,10 @@ pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
     vbox.append(&open_drop);
     vbox.append(&label("Editor (empty = EDITOR, then VISUAL)"));
     vbox.append(&editor_entry);
+    vbox.append(&label("Accent theme"));
+    vbox.append(&theme_drop);
+    vbox.append(&label("GTK theme"));
+    vbox.append(&gtk_theme_drop);
 
     let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     buttons.set_halign(gtk::Align::End);
@@ -131,6 +181,8 @@ pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
         let match_drop = match_drop.clone();
         let open_drop = open_drop.clone();
         let editor_entry = editor_entry.clone();
+        let theme_drop = theme_drop.clone();
+        let gtk_theme_drop = gtk_theme_drop.clone();
         let win = win.clone();
         save.connect_clicked(move |_| {
             let mut cfg = Config::load();
@@ -161,7 +213,10 @@ pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
                 _ => OpenMode::Auto,
             };
             cfg.editor = editor_entry.text().to_string();
+            cfg.theme = THEMES[theme_drop.selected() as usize % THEMES.len()].into();
+            cfg.gtk_theme = GTK_THEMES[gtk_theme_drop.selected() as usize % GTK_THEMES.len()].into();
             let _ = cfg.save();
+            apply_appearance(&cfg);
             live.preview.set(cfg.preview);
             live.match_mode.set(cfg.match_mode);
             (live.on_save)(catalog_settings_changed(&old_exclude, &old_include, &cfg));
@@ -175,6 +230,8 @@ pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
         let match_drop = match_drop.clone();
         let open_drop = open_drop.clone();
         let editor_entry = editor_entry.clone();
+        let theme_drop = theme_drop.clone();
+        let gtk_theme_drop = gtk_theme_drop.clone();
         reset.connect_clicked(move |_| {
             let cfg = Config::default();
             exclude.set_items(&cfg.exclude);
@@ -183,6 +240,8 @@ pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
             match_drop.set_selected(0);
             open_drop.set_selected(0);
             editor_entry.set_text("");
+            theme_drop.set_selected(0);
+            gtk_theme_drop.set_selected(0);
         });
     }
 

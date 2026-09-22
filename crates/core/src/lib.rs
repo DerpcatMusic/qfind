@@ -27,6 +27,7 @@ mod storage;
 mod view;
 mod walk;
 
+pub mod appearance;
 pub use browse::{LiveEntry, live_children};
 pub use catalog::{Catalog, CatalogFolder, Hit, Hits, Rebuild, default_snapshot_path};
 pub use config::{Config, IgnoreMatcher, OpenHow, OpenMode, PreviewMode, is_text_path};

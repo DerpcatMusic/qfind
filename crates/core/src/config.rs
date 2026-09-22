@@ -154,6 +154,8 @@ pub struct Config {
     pub match_mode: MatchMode,
     /// TUI theme id: grok, titanium, catppuccin, gruvbox, dracula, nord, aurora.
     pub theme: String,
+    /// GTK theme name: `system` (don't override), `Adwaita`, `Adwaita-dark`.
+    pub gtk_theme: String,
     /// Deprecated compatibility setting. Startup now opens immediately.
     pub splash: bool,
     /// How Enter opens a Hit.
@@ -179,6 +181,7 @@ impl Default for Config {
             weight_map: true,
             match_mode: MatchMode::Fuzzy,
             theme: "grok".into(),
+            gtk_theme: "system".into(),
             splash: false,
             open: OpenMode::Auto,
             editor: String::new(),
@@ -248,6 +251,7 @@ impl Config {
         s.push_str(&format!("weight_map = {}\n", self.weight_map));
         s.push_str(&format!("match = \"{}\"\n", self.match_mode.as_str()));
         s.push_str(&format!("theme = \"{}\"\n", self.theme));
+        s.push_str(&format!("gtk_theme = \"{}\"\n", self.gtk_theme));
         s.push_str(&format!("splash = {}\n", self.splash));
         s.push_str(&format!("open = \"{}\"\n", self.open.as_str()));
         s.push_str(&format!(
@@ -360,6 +364,7 @@ fn parse(src: &str) -> Config {
             "weight_map" => cfg.weight_map = v == "true",
             "match" => cfg.match_mode = MatchMode::parse(v),
             "theme" => cfg.theme = v.trim_matches('"').to_string(),
+            "gtk_theme" => cfg.gtk_theme = v.trim_matches('"').to_string(),
             "splash" => cfg.splash = v != "false",
             "open" => cfg.open = OpenMode::parse(v),
             "editor" => cfg.editor = v.trim_matches('"').to_string(),
