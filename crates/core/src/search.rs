@@ -28,25 +28,11 @@ pub(crate) fn search_with_cancel(
     direct_children: bool,
     cancelled: &(impl Fn() -> bool + Sync),
 ) -> Result<Ranked> {
-    let mut globs = Vec::new();
-    let mut fuzzy_parts = Vec::new();
-    let mut exts = Vec::new();
-    for token in query.split_whitespace() {
-        if let Some(ext) = ext_token(token) {
-            exts.push(ext.to_ascii_lowercase());
-        } else if token.contains(['*', '?']) {
-            let glob = GlobBuilder::new(token)
-                .case_insensitive(true)
-                .literal_separator(false)
-                .build()
-                .map_err(|e| Error::Query(e.to_string()))?;
-            globs.push(glob.compile_matcher());
-        } else if bare_ext_token(token) {
-            exts.push(token.to_ascii_lowercase());
-        } else {
-            fuzzy_parts.push(token);
-        }
-    }
+    let Parsed {
+        fuzzy: fuzzy_parts,
+        globs,
+        exts,
+    } = parse_query(query)?;
     if fuzzy_parts.is_empty() {
         return scan_filtered(
             snapshot,
@@ -55,10 +41,7 @@ pub(crate) fn search_with_cancel(
             folder,
             direct_children,
             cancelled,
-            |name| {
-                (globs.is_empty() || globs.iter().all(|g| g.is_match(name)))
-                    && (exts.is_empty() || name_has_ext(name, &exts))
-            },
+            |name| name_passes(name, &globs, &exts),
         );
     }
 
@@ -89,10 +72,7 @@ pub(crate) fn search_with_cancel(
         if !class_matches(opts.class, name, entry.is_dir()) {
             return None;
         }
-        if !globs.is_empty() && !globs.iter().all(|g| g.is_match(name)) {
-            return None;
-        }
-        if !exts.is_empty() && !name_has_ext(name, &exts) {
+        if !name_passes(name, &globs, &exts) {
             return None;
         }
         Some(name)
@@ -257,6 +237,47 @@ fn scan_filtered(
     Ok(take_ids(scored))
 }
 
+/// A Query split into fuzzy words, globs, and extension filters.
+///
+/// `.png` and `png` are extension filters (OR between them), `*.rs` is a glob,
+/// everything else is a fuzzy word. `something .png` keeps both parts.
+pub(crate) struct Parsed<'a> {
+    pub fuzzy: Vec<&'a str>,
+    pub globs: Vec<globset::GlobMatcher>,
+    pub exts: Vec<String>,
+}
+
+pub(crate) fn parse_query(query: &str) -> Result<Parsed<'_>> {
+    let mut out = Parsed {
+        fuzzy: Vec::new(),
+        globs: Vec::new(),
+        exts: Vec::new(),
+    };
+    for token in query.split_whitespace() {
+        if let Some(ext) = ext_token(token) {
+            out.exts.push(ext.to_ascii_lowercase());
+        } else if token.contains(['*', '?']) {
+            let glob = GlobBuilder::new(token)
+                .case_insensitive(true)
+                .literal_separator(false)
+                .build()
+                .map_err(|e| Error::Query(e.to_string()))?;
+            out.globs.push(glob.compile_matcher());
+        } else if bare_ext_token(token) {
+            out.exts.push(token.to_ascii_lowercase());
+        } else {
+            out.fuzzy.push(token);
+        }
+    }
+    Ok(out)
+}
+
+/// Glob and extension filters from [`parse_query`], applied to one filename.
+pub(crate) fn name_passes(name: &str, globs: &[globset::GlobMatcher], exts: &[String]) -> bool {
+    (globs.is_empty() || globs.iter().all(|g| g.is_match(name)))
+        && (exts.is_empty() || name_has_ext(name, exts))
+}
+
 /// `.wav` / `.exe` — extension filter, not a fuzzy atom. Several of these are OR.
 fn ext_token(token: &str) -> Option<&str> {
     let ext = token.strip_prefix('.')?;
@@ -302,7 +323,7 @@ fn apply_sort(
 ) -> Result<()> {
     match opts.sort {
         // Stable on ties so empty Query can keep files-first insertion order.
-        Sort::Score => scored.sort_by(|a, b| b.0.cmp(&a.0)),
+        Sort::Score => scored.sort_by_key(|a| std::cmp::Reverse(a.0)),
         Sort::Name => {
             scored.sort_unstable_by(|a, b| cmp_name(snapshot, a.1, b.1).then(a.1.cmp(&b.1)))
         }
@@ -361,7 +382,7 @@ fn cmp_name(snapshot: &Snapshot, a: u32, b: u32) -> std::cmp::Ordering {
 #[cfg(unix)]
 fn live_meta(path: &std::path::Path) -> (u64, i64) {
     match rustix::fs::stat(path) {
-        Ok(st) => (st.st_size.max(0) as u64, st.st_mtime as i64),
+        Ok(st) => (st.st_size.max(0) as u64, st.st_mtime),
         Err(_) => (0, 0),
     }
 }
@@ -411,4 +432,22 @@ fn highlight(pattern: &Pattern, name: &str) -> Option<Vec<u32>> {
         let _ = pattern.indices(hay, matcher, idx)?;
         Some(idx.clone())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ext_tokens_survive_spaces_and_dots() {
+        let p = parse_query("something .png psd *.rs").unwrap();
+        assert_eq!(p.fuzzy, vec!["something"]);
+        assert_eq!(p.exts, vec!["png", "psd"]);
+        assert_eq!(p.globs.len(), 1);
+        assert!(name_passes("shot.PNG", &p.globs[..0], &p.exts));
+        assert!(name_passes("art.psd", &[], &p.exts));
+        assert!(!name_passes("art.jpg", &[], &p.exts));
+        assert!(!name_passes("art.psd", &p.globs, &p.exts));
+        assert!(parse_query("something.png").unwrap().exts.is_empty());
+    }
 }

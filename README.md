@@ -1,13 +1,10 @@
 <div align="center">
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/megaman-logo-dark.svg">
-  <img src="assets/megaman-logo.svg" alt="Megaman — Bit, the voxel file keeper" width="640">
-</picture>
+<img src="assets/megaman.svg" alt="Megaman" width="112">
+
+# Megaman
 
 Files, storage, and projects. One native workspace for Linux, macOS, and Windows.
-
-Meet **Bit**, Megaman’s little voxel file keeper.
 
 [![Release](https://img.shields.io/github/v/release/DerpcatMusic/qfind?style=flat-square)](https://github.com/DerpcatMusic/qfind/releases/latest)
 [![License](https://img.shields.io/github/license/DerpcatMusic/qfind?style=flat-square)](LICENSE)
@@ -17,10 +14,10 @@ Meet **Bit**, Megaman’s little voxel file keeper.
 </div>
 
 <p align="center">
-  <img src="docs/images/qfind-grid-preview.png" alt="Qfind grid search with image thumbnails and a large side Preview" width="920">
+  <img src="docs/images/qfind-grid-preview.png" alt="Megaman grid search with image thumbnails and a large side Preview" width="920">
 </p>
 
-Qfind builds one memory-mapped Catalog from your local disks. Queries search filenames without walking the filesystem again. Linux and macOS use the parallel Unix directory path; Windows walks all available drive letters in parallel. Metadata is loaded only when a Sort or Preview needs it.
+Megaman builds one memory-mapped Catalog from your local disks. Queries search filenames without walking the filesystem again. Linux and macOS use the parallel Unix directory path; Windows walks all available drive letters in parallel. Metadata is loaded only when a Sort or Preview needs it.
 
 ## What it does
 
@@ -35,7 +32,7 @@ Qfind builds one memory-mapped Catalog from your local disks. Queries search fil
 - GTK, Nautilus, Vicinae, and optional Qt/Breeze frontends
 - Native SwiftUI/AppKit frontend on macOS and WinUI 3 frontend on Windows
 
-Qfind has no startup splash. Config changes made in the TUI are saved and applied immediately.
+Megaman has no startup splash. Config changes made in the TUI are saved and applied immediately.
 
 ## Install
 
@@ -88,7 +85,7 @@ cd qfind
 
 This installs `qfind` and `qfind-tui` in `~/.local/bin`. If GTK4 is available through `pkg-config`, it also installs `qfind-gtk`, the desktop launcher, and the Nautilus plugin. If Qt6 is available, it builds `qfind-qt` with Breeze styling.
 
-The GTK install also provides `qfind-portal`, a Linux `xdg-desktop-portal` FileChooser backend for open, save, folder, and multi-file requests. Select it in `~/.config/xdg-desktop-portal/portals.conf` with `org.freedesktop.impl.portal.FileChooser=qfind;gtk`.
+The GTK install also provides `qfind-portal`, a Linux `xdg-desktop-portal` FileChooser backend for open, save, folder, and multi-file requests. It launches Megaman itself in pick mode (`qfind-gtk --pick=file|folder|save`), so the picker has the full instant search, and `*.png`-style filters arrive as `.png` extension tokens. Select it in `~/.config/xdg-desktop-portal/portals.conf` with `org.freedesktop.impl.portal.FileChooser=qfind;gtk`.
 
 For CLI and TUI only:
 
@@ -109,7 +106,7 @@ cargo build --release -p qfind -p qfind-tui
 sudo install -m755 target/release/qfind target/release/qfind-tui /usr/local/bin/
 ```
 
-Qfind indexes `/`, including mounted disks under `/Volumes`. Enter opens the macOS default app, `Space` can hand the selection to Quick Look, `Ctrl+O` reveals it in Finder, and `Ctrl+Y` uses `pbcopy`. Build a native Intel or Apple Silicon archive with `./packaging/release-tui.sh`.
+Megaman indexes `/`, including mounted disks under `/Volumes`. Enter opens the macOS default app, `Space` can hand the selection to Quick Look, `Ctrl+O` reveals it in Finder, and `Ctrl+Y` uses `pbcopy`. Build a native Intel or Apple Silicon archive with `./packaging/release-tui.sh`.
 
 ### Windows
 
@@ -123,7 +120,7 @@ cargo build --release -p qfind -p qfind-tui
 .\target\release\qfind.exe
 ```
 
-Qfind indexes available drive letters and skips Windows system stores, the Recycle Bin, and System Volume Information. Enter uses the registered Windows app, `Ctrl+O` reveals the file in Explorer, and `Ctrl+Y` uses the Windows clipboard. Create a ZIP with `.\packaging\release-windows.ps1`.
+Megaman indexes available drive letters and skips Windows system stores, the Recycle Bin, and System Volume Information. Enter uses the registered Windows app, `Ctrl+O` reveals the file in Explorer, and `Ctrl+Y` uses the Windows clipboard. Create a ZIP with `.\packaging\release-windows.ps1`.
 
 ### Arch Linux
 
@@ -162,7 +159,7 @@ qfind files batch-copy ~/Backup a.txt b.txt
 qfind files archive compress backup.zip a.txt b.txt
 qfind places list                         # folders, bookmarks, and mounts
 qfind places pin ~/Projects
-qfind places actions list                 # Qfind and Nautilus scripts
+qfind places actions list                 # Megaman and Nautilus scripts
 qfind --in ~/Projects --json '*.rs'         # scoped indexed search
 qfind projects                            # repositories for your active gh account
 qfind git diff --path ~/Projects/megaman
@@ -215,7 +212,7 @@ The Preview pane can be resized with its divider. Scrolling over it scrolls wrap
 
 ## Preview support
 
-Raster images and text work without helper programs. Qfind uses installed desktop tools for other visual formats:
+Raster images and text work without helper programs. Megaman uses installed desktop tools for other visual formats:
 
 | Content | Helper |
 |---|---|
@@ -242,7 +239,7 @@ The WeightMap follows the current Query or browsed folder. Size mode uses file b
 Press `F8` to edit appearance and Catalog visibility. Theme previews apply while moving through the list; confirmation is not required. Hidden-file and ignore-rule changes rerun the current Query immediately.
 
 <p align="center">
-  <img src="docs/images/qfind-settings.png" alt="Qfind Settings panel" width="640">
+  <img src="docs/images/qfind-settings.png" alt="Megaman Settings panel" width="640">
 </p>
 
 Config and Catalog locations follow each platform:
@@ -273,29 +270,35 @@ Auto opening sends text files to the configured editor and folders or media to t
 
 ### GTK
 
-Run `qfind-gtk` for the desktop frontend. **Classic** shows only the current folder's immediate files and folders; **Qfind** switches to recursive indexed results below that location. The window includes Places and pinned folders on the left, resizable results in the middle, and a right pane that switches between file Preview and an interactive Chart. Chart can follow the current directory or show every indexed local Mount (including NTFS/fuseblk); drilling in either the file surface or Chart keeps the other synchronized. Use the header star to pin or unpin the current folder.
+Run `qfind-gtk` for the desktop frontend. **Browse** shows only the current folder's immediate files and folders; **Indexed** switches to recursive indexed results below that location. The window includes Places and pinned folders on the left, resizable results in the middle, and a right pane that switches between file Preview and an interactive Chart. Chart can follow the current directory or show every indexed local Mount (including NTFS/fuseblk); drilling in either the file surface or Chart keeps the other synchronized. Use the header star to pin or unpin the current folder.
 
-The connected navigation shell keeps Places and the header on one brighter theme surface while files stay on the quieter content surface. The header separates folder navigation, Classic/Qfind scope, location, Search, result filters, View settings, Preview, and app Settings. The funnel holds matching, sort, folders-first grouping, and FileClass filters; the three-dot View menu holds List/Grid, Zoom, spacing, zebra rows, Tree, WeightMap, Preview, hidden files, and ignore rules. `F3` closes or restores the preview pane, `Ctrl+L` selects the location, `Ctrl+F` searches below it, `Ctrl+Shift+F` searches everywhere, `Alt+Left` / `Alt+Right` move through session history, and `Alt+Up` opens the parent. Typing updates Hits immediately, and rows can be dragged into other Wayland or X11 applications.
+The connected navigation shell keeps Places and the header on one brighter theme surface while files stay on the quieter content surface. The header separates folder navigation, Browse/Indexed scope, location, Search, result filters, View settings, Preview, and app Settings. The funnel holds matching, sort, folders-first grouping, and FileClass filters; the three-dot View menu holds List/Grid, Zoom, spacing, zebra rows, Tree, WeightMap, Preview, hidden files, and ignore rules. `F3` closes or restores the preview pane, `Ctrl+L` selects the location, `Ctrl+F` searches below it, `Ctrl+Shift+F` searches everywhere, `Alt+Left` / `Alt+Right` move through session history, and `Alt+Up` opens the parent. Typing updates Hits immediately, and rows can be dragged into other Wayland or X11 applications.
 
-Places are read directly from Qfind pins, GTK/Nautilus bookmarks, and Dolphin's `user-places.xbel`. The context menu provides the built-in file actions and discovers nested executable actions from `$XDG_DATA_HOME/qfind/actions` plus existing Nautilus Scripts from `$XDG_DATA_HOME/nautilus/scripts`; subdirectories become submenus and commands receive the selected path as both an argument and `QFIND_SELECTED_PATHS`.
+Places are read directly from Megaman pins, GTK/Nautilus bookmarks, and Dolphin's `user-places.xbel`. The context menu provides the built-in file actions and discovers nested executable actions from `$XDG_DATA_HOME/qfind/actions` plus existing Nautilus Scripts from `$XDG_DATA_HOME/nautilus/scripts`; subdirectories become submenus and commands receive the selected path as both an argument and `QFIND_SELECTED_PATHS`.
 
 Space previews the hovered or selected Hit through GNOME Sushi when available, with a built-in window as fallback. Ctrl+scroll moves between compact lists, roomier rows, and a visual grid. The GTK settings include Excludes, Mounts, default Zoom, spacing, and reset. The virtual ListView/GridView does not `stat` during bind, keeps its scrollbars visible, and uses GSK composition.
 
+Drag a file or selected group from List, Grid, or Tree into another application. Drop onto a folder to copy there, or onto empty file space to copy into the current folder. Existing destinations are preserved; conflicts are reported. Dragging empty space still selects a rectangle.
+
+Projects includes a searchable repository list, change/conflict/build summaries, and Overview, Changes, and Storage tabs. Additional columns are available through Columns.
+
+Run the GTK checks with `xvfb-run -a cargo test -p qfind-gtk -- --test-threads=1` and the native drag smoke test with `bash tests/gtk-drag.sh /path/to/qfind-gtk`.
+
 ### Nautilus and Vicinae
 
-Install Nautilus and Vicinae support without rebuilding Qfind:
+Install Nautilus and Vicinae support without rebuilding Megaman:
 
 ```bash
 ./packaging/install-plugins.sh
 ```
 
-Nautilus adds **Ctrl+F** search for the current folder and **Search with Qfind** to the context menu. It needs `nautilus-python` on Arch or `python3-nautilus` on Debian-based systems. Vicinae adds a launcher command named **Qfind** and requires Node.js/npm for the TypeScript extension.
+Nautilus adds **Ctrl+F** search for the current folder and a search action to the context menu. It needs `nautilus-python` on Arch or `python3-nautilus` on Debian-based systems. Vicinae adds a file-search launcher command and requires Node.js/npm for the TypeScript extension.
 
 See [docs/plugins.md](docs/plugins.md) for manual installation and the script-only Vicinae fallback.
 
 ### Native macOS and Windows apps
 
-Both native apps use the same memory-mapped Rust manager as the CLI and TUI. They provide platform Places, Classic/Qfind folder scope, list and grid views, native thumbnails, a resizable Preview, and an interactive directory/global Chart with sizes inside useful segments.
+Both native apps use the same memory-mapped Rust manager as the CLI and TUI. They provide platform Places, Browse/Indexed folder scope, list and grid views, native thumbnails, a resizable Preview, and an interactive directory/global Chart with sizes inside useful segments.
 
 On macOS 14 or newer, build the SwiftUI/AppKit app with Xcode command-line tools installed:
 

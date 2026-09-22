@@ -14,9 +14,9 @@ pub struct LiveEntry {
     pub mtime: i64,
 }
 
-fn name_matches(name: &str, query: &str, mode: MatchMode) -> bool {
+fn name_matches(name: &str, words: &[&str], mode: MatchMode) -> bool {
     let name = name.to_lowercase();
-    query.split_whitespace().all(|word| {
+    words.iter().all(|word| {
         let word = word.to_lowercase();
         match mode {
             MatchMode::Exact => name == word,
@@ -38,6 +38,7 @@ pub fn live_children(
     measure_size: bool,
 ) -> crate::Result<Vec<LiveEntry>> {
     let cfg = Config::load();
+    let parsed = crate::search::parse_query(query)?;
     let mut ignored = IgnoreMatcher::new(cfg.respect_gitignore, cfg.respect_ignore);
     let entries = std::fs::read_dir(path).map_err(|error| crate::Error::io(path, error))?;
     let mut rows = Vec::new();
@@ -60,7 +61,9 @@ pub fn live_children(
                 Scope::Folders => is_dir,
             }
             || !opts.class.matches(&name, is_dir)
-            || !name_matches(&name, query, opts.match_mode)
+            || (is_dir && !parsed.exts.is_empty())
+            || !crate::search::name_passes(&name, &parsed.globs, &parsed.exts)
+            || !name_matches(&name, &parsed.fuzzy, opts.match_mode)
         {
             continue;
         }
@@ -100,6 +103,37 @@ pub fn live_children(
             Sort::Score | Sort::Name => name(),
         }
     });
-    rows.truncate(opts.limit);
+    if opts.limit > 0 {
+        rows.truncate(opts.limit);
+    }
     Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_query_keeps_ext_tokens_and_spaces() {
+        let dir = std::env::temp_dir().join(format!("qfind-live-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        for f in ["shot.png", "Art.PNG", "art.psd", "notes.txt"] {
+            std::fs::write(dir.join(f), b"").unwrap();
+        }
+        let names = |q: &str| {
+            let mut v: Vec<String> = live_children(&dir, q, SearchOpts::default(), true, false)
+                .unwrap()
+                .into_iter()
+                .map(|e| e.name)
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(names(".png"), ["Art.PNG", "shot.png"]);
+        assert_eq!(names("art .png"), ["Art.PNG"]);
+        assert_eq!(names("art .png .psd"), ["Art.PNG", "art.psd"]);
+        assert_eq!(names("*.txt"), ["notes.txt"]);
+        assert_eq!(names("").len(), 5);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

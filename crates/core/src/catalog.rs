@@ -67,7 +67,7 @@ impl Catalog {
     /// Open an existing snapshot.
     ///
     /// # Errors
-    /// Returns [`Error::Snapshot`] or [`Error::Io`] if the file is missing or corrupt.
+    /// Returns [`crate::Error::Snapshot`] or [`crate::Error::Io`] if the file is missing or corrupt.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let snapshot = Snapshot::open_mmap(path)?;
@@ -99,6 +99,74 @@ impl Catalog {
         }
         builder.write(&rebuild.snapshot)?;
         Self::open(&rebuild.snapshot)
+    }
+
+    /// Rescan one Folder subtree and splice it into the existing snapshot.
+    ///
+    /// Everything outside `dir` is copied verbatim, so this costs one walk of
+    /// `dir` plus a sequential write instead of a walk of every Mount. Falls
+    /// back to a full [`Catalog::rebuild`] when no snapshot exists yet.
+    ///
+    /// # Errors
+    /// Returns I/O or Exclude errors.
+    pub fn refresh(rebuild: Rebuild, dir: impl AsRef<Path>) -> Result<Self> {
+        let dir = dir.as_ref();
+        let Ok(old) = Snapshot::open_mmap(&rebuild.snapshot) else {
+            return Self::rebuild(rebuild);
+        };
+        let excludes = Excludes::with_paths(&rebuild.extra_excludes, &rebuild.extra_exclude_paths)?;
+        let (mut builder, new_ids) = Builder::from_snapshot(&old, old.folder_id(dir));
+        // The deepest surviving ancestor anchors the rewalk; none means `dir`
+        // becomes a Mount root of its own (it was outside the Catalog).
+        let anchor = std::iter::successors(dir.parent(), |p| p.parent())
+            .find_map(|p| old.folder_id(p).map(|id| (p, id)));
+        let walk_root = match anchor {
+            Some((path, id)) => {
+                builder.register_dir(path.to_path_buf(), new_ids[id as usize]);
+                old.path(old.root_of(id))
+            }
+            None => dir.to_path_buf(),
+        };
+        // Empty folders are never reported by the walk; intern `dir` explicitly.
+        builder.add_dir(dir, &walk_root, 0, 0);
+        walk::collect(dir, &excludes, &mut builder)?;
+        builder.write(&rebuild.snapshot)?;
+        Self::open(&rebuild.snapshot)
+    }
+
+    /// True when `dir`'s immediate children on disk differ from the Catalog,
+    /// ignoring names the Rebuild excludes. One `read_dir` plus one children
+    /// query; cheap enough to run on every folder visit.
+    #[must_use]
+    pub fn stale(&self, rebuild: &Rebuild, dir: impl AsRef<Path>) -> bool {
+        let dir = dir.as_ref();
+        let Some(folder) = self.folder(dir) else {
+            return true;
+        };
+        let opts = crate::SearchOpts {
+            limit: 0,
+            ..Default::default()
+        };
+        let Ok(hits) = folder.search_children_with("", opts) else {
+            return true;
+        };
+        let indexed: std::collections::HashSet<String> =
+            hits.iter().map(|hit| hit.name().to_owned()).collect();
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        let excludes =
+            Excludes::with_paths(&rebuild.extra_excludes, &rebuild.extra_exclude_paths).ok();
+        let live: std::collections::HashSet<String> = entries
+            .flatten()
+            .filter(|e| {
+                excludes
+                    .as_ref()
+                    .is_none_or(|ex| !ex.skip_name(&e.file_name()) && !ex.skip(&e.path()))
+            })
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        live != indexed
     }
 
     #[must_use]
@@ -141,7 +209,7 @@ impl Catalog {
     /// Filter the Catalog with a Query string (highlight on, no limit).
     ///
     /// # Errors
-    /// Returns [`Error::Query`] for a malformed glob.
+    /// Returns [`crate::Error::Query`] for a malformed glob.
     pub fn search(&self, query: &str) -> Result<Hits<'_>> {
         self.search_with(
             query,
@@ -155,7 +223,7 @@ impl Catalog {
     /// Filter with scope, class, sort, and limit.
     ///
     /// # Errors
-    /// Returns [`Error::Query`] for a malformed glob.
+    /// Returns [`crate::Error::Query`] for a malformed glob.
     pub fn search_with(&self, query: &str, opts: crate::SearchOpts) -> Result<Hits<'_>> {
         let ranked = search::search(&self.snapshot, query, opts)?;
         Ok(Hits {
@@ -168,7 +236,7 @@ impl Catalog {
     /// Filter while allowing a caller to stop stale Query work.
     ///
     /// # Errors
-    /// Returns [`Error::Cancelled`](crate::Error::Cancelled) when `cancelled` becomes true.
+    /// Returns [`crate::Error::Cancelled`](crate::Error::Cancelled) when `cancelled` becomes true.
     pub fn search_with_cancel(
         &self,
         query: &str,
@@ -187,7 +255,7 @@ impl Catalog {
     /// Filter while optionally hiding dotfiles and allowing stale work to stop.
     ///
     /// # Errors
-    /// Returns [`Error::Cancelled`](crate::Error::Cancelled) when `cancelled` becomes true.
+    /// Returns [`crate::Error::Cancelled`](crate::Error::Cancelled) when `cancelled` becomes true.
     pub fn search_with_hidden_cancel(
         &self,
         query: &str,
@@ -238,7 +306,7 @@ impl CatalogFolder {
     /// Search descendants of this Folder.
     ///
     /// # Errors
-    /// Returns [`Error::Query`] for a malformed glob.
+    /// Returns [`crate::Error::Query`] for a malformed glob.
     pub fn search_with(&self, query: &str, opts: crate::SearchOpts) -> Result<Hits<'_>> {
         self.search_with_hidden_cancel(query, opts, true, || false)
     }
@@ -246,7 +314,7 @@ impl CatalogFolder {
     /// Search descendants while allowing a caller to hide dotfiles and cancel stale work.
     ///
     /// # Errors
-    /// Returns [`Error::Cancelled`](crate::Error::Cancelled) when `cancelled` becomes true.
+    /// Returns [`crate::Error::Cancelled`](crate::Error::Cancelled) when `cancelled` becomes true.
     pub fn search_with_hidden_cancel(
         &self,
         query: &str,
@@ -273,7 +341,7 @@ impl CatalogFolder {
     /// Search only this Folder's immediate children.
     ///
     /// # Errors
-    /// Returns [`Error::Query`] for a malformed glob.
+    /// Returns [`crate::Error::Query`] for a malformed glob.
     pub fn search_children_with(&self, query: &str, opts: crate::SearchOpts) -> Result<Hits<'_>> {
         let ranked = search::search_with_cancel(
             &self.catalog.snapshot,
@@ -410,6 +478,60 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn refresh_splices_one_subtree_and_keeps_the_rest() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(root.join("a")).expect("a");
+        std::fs::create_dir_all(root.join("b")).expect("b");
+        std::fs::write(root.join("a/one.txt"), "1").expect("one");
+        std::fs::write(root.join("b/two.txt"), "2").expect("two");
+        let snap = tmp.path().join("catalog");
+        let rebuild = || Rebuild::new(&snap).roots([root.clone()]);
+        let catalog = Catalog::rebuild(rebuild()).expect("rebuild");
+        assert!(!catalog.stale(&rebuild(), root.join("a")));
+
+        std::fs::write(root.join("a/three.txt"), "3").expect("three");
+        std::fs::remove_file(root.join("a/one.txt")).expect("rm");
+        std::fs::create_dir_all(root.join("a/empty")).expect("empty");
+        std::fs::create_dir_all(root.join("c/deep")).expect("deep");
+        std::fs::write(root.join("c/deep/four.txt"), "4").expect("four");
+        assert!(catalog.stale(&rebuild(), root.join("a")));
+        assert!(catalog.stale(&rebuild(), root.join("c/deep")));
+
+        let catalog = Catalog::refresh(rebuild(), root.join("a")).expect("refresh a");
+        let names = |c: &Catalog, q: &str| -> Vec<String> {
+            let mut v: Vec<String> = c
+                .search(q)
+                .expect("search")
+                .iter()
+                .map(|h| h.name().to_owned())
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(names(&catalog, "*.txt"), ["three.txt", "two.txt"]);
+        assert!(catalog.folder(root.join("a/empty")).is_some());
+        assert!(!catalog.stale(&rebuild(), root.join("a")));
+        // The untouched sibling still hangs under the same root.
+        let folder = catalog.folder(&root).expect("root");
+        let hits = folder.search_with("two", Default::default()).expect("hits");
+        assert_eq!(hits.len(), 1);
+
+        // A folder that was never indexed hangs under its nearest indexed ancestor.
+        let catalog = Catalog::refresh(rebuild(), root.join("c/deep")).expect("refresh deep");
+        let folder = catalog.folder(&root).expect("root");
+        let hits = folder
+            .search_with("four", Default::default())
+            .expect("hits");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            hits.get(0).expect("four").path(),
+            root.join("c/deep/four.txt")
+        );
+        assert!(!catalog.stale(&rebuild(), root.join("c/deep")));
+    }
 
     #[test]
     fn classic_folder_search_returns_files_and_folders_but_not_grandchildren() {

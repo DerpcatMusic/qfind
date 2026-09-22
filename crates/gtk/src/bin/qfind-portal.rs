@@ -16,10 +16,10 @@ use std::ffi::OsString;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStringExt;
 
+use gtk::FileChooserAction;
 use gtk::gio;
 use gtk::glib;
 use gtk::prelude::*;
-use gtk::{FileChooserAction, FileChooserDialog, FileFilter, ResponseType};
 use zbus::Connection;
 use zbus::connection::Builder;
 use zbus::interface;
@@ -49,7 +49,6 @@ impl PortalRequest {
 
 #[derive(Clone)]
 struct FilterSpec {
-    name: String,
     rules: Vec<(u32, String)>,
 }
 
@@ -78,7 +77,7 @@ enum UiOutcome {
 }
 
 struct Pending {
-    dialog: FileChooserDialog,
+    child: gio::Subprocess,
     state: Arc<RequestState>,
     response: AsyncSender<UiOutcome>,
 }
@@ -253,7 +252,7 @@ fn filters_option(options: &Options) -> Vec<FilterSpec> {
         .and_then(|value| Vec::<(String, Vec<(u32, String)>)>::try_from(value).ok())
         .unwrap_or_default()
         .into_iter()
-        .map(|(name, rules)| FilterSpec { name, rules })
+        .map(|(_name, rules)| FilterSpec { rules })
         .collect()
 }
 
@@ -309,91 +308,128 @@ fn result_options(paths: Vec<PathBuf>) -> Options {
     Options::from([("uris".into(), variant(uris))])
 }
 
-fn add_filters(dialog: &FileChooserDialog, filters: &[FilterSpec]) {
-    for filter_spec in filters {
-        let filter = FileFilter::new();
-        filter.set_name(Some(&filter_spec.name));
-        for (kind, value) in &filter_spec.rules {
-            if *kind == 1 {
-                filter.add_mime_type(value);
-            } else {
-                filter.add_pattern(value);
-            }
-        }
-        dialog.add_filter(&filter);
-    }
-}
-
-fn chooser_paths(dialog: &FileChooserDialog) -> Vec<PathBuf> {
-    let files = dialog.files();
-    (0..files.n_items())
-        .filter_map(|index| files.item(index))
-        .filter_map(|file| file.downcast::<gio::File>().ok())
-        .filter_map(|file| file.path())
-        .collect()
-}
-
+/// Megaman itself is the picker: spawn `qfind-gtk --pick=…` beside this
+/// binary (or from PATH) and read NUL-separated paths from its stdout.
+/// No output means cancelled.
 fn show_picker(request: UiRequest, pending: &Rc<RefCell<HashMap<String, Pending>>>) {
-    let dialog = FileChooserDialog::new(
-        Some(&request.spec.title),
-        None::<&gtk::Window>,
-        request.spec.action,
-        &[
-            ("Cancel", ResponseType::Cancel),
-            (&request.spec.accept_label, ResponseType::Accept),
-        ],
-    );
-    dialog.set_modal(true);
-    dialog.set_select_multiple(request.spec.multiple);
-    if let Some(path) = request
-        .spec
-        .current_file
-        .as_ref()
-        .or(request.spec.current_folder.as_ref())
-    {
-        let file = gio::File::for_path(path);
-        let _ = dialog.set_file(&file);
+    let spec = &request.spec;
+    let exe = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("qfind-gtk")))
+        .filter(|p| p.is_file())
+        .unwrap_or_else(|| PathBuf::from("qfind-gtk"));
+    let mode = match spec.action {
+        FileChooserAction::Save => "save",
+        FileChooserAction::SelectFolder => "folder",
+        _ => "file",
+    };
+    // Multi-file save is "pick a folder, then join the names".
+    let mode = if spec.save_files.is_empty() {
+        mode
+    } else {
+        "folder"
+    };
+    let mut argv: Vec<std::ffi::OsString> = vec![
+        exe.into(),
+        format!("--pick={mode}").into(),
+        format!("--title={}", spec.title).into(),
+        format!("--accept={}", spec.accept_label).into(),
+    ];
+    if spec.multiple {
+        argv.push("--multi".into());
     }
-    if let Some(name) = request.spec.current_name.as_deref() {
-        dialog.set_current_name(name);
+    // `*.png *.jpg` filters become `.png .jpg` — extension tokens OR in Megaman's query.
+    let exts: Vec<String> = spec
+        .filters
+        .first()
+        .map(|f| {
+            f.rules
+                .iter()
+                .filter(|(kind, _)| *kind == 0)
+                .filter_map(|(_, glob)| glob.strip_prefix("*.").map(|e| format!(".{e}")))
+                .collect()
+        })
+        .unwrap_or_default();
+    if !exts.is_empty() {
+        argv.push(format!("--query={}", exts.join(" ")).into());
     }
-    add_filters(&dialog, &request.spec.filters);
+    if let Some(name) = spec.current_name.clone().or_else(|| {
+        spec.current_file
+            .as_ref()
+            .and_then(|f| f.file_name().map(|n| n.to_string_lossy().into_owned()))
+    }) {
+        argv.push(format!("--name={name}").into());
+    }
+    let here = spec
+        .current_folder
+        .clone()
+        .or_else(|| {
+            spec.current_file
+                .as_ref()
+                .and_then(|f| f.parent().map(PathBuf::from))
+        })
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from));
+    if let Some(here) = here {
+        let mut arg = std::ffi::OsString::from("--here=");
+        arg.push(here);
+        argv.push(arg);
+    }
+    let launcher = gio::SubprocessLauncher::new(gio::SubprocessFlags::STDOUT_PIPE);
+    // The child is a real app, not a portal backend.
+    launcher.unsetenv("GIO_USE_PORTALS");
+    launcher.unsetenv("GSETTINGS_BACKEND");
+    let argv_refs: Vec<&std::ffi::OsStr> = argv.iter().map(|a| a.as_os_str()).collect();
+    let child = match launcher.spawn(&argv_refs) {
+        Ok(child) => child,
+        Err(error) => {
+            eprintln!("qfind-portal: cannot start qfind-gtk: {error}");
+            let _ = request.response.try_send(UiOutcome::Cancelled);
+            return;
+        }
+    };
     let handle = request.handle.clone();
     let state = Arc::clone(&request.state);
     let response = request.response.clone();
-    let pending_for_response = Rc::clone(pending);
+    let pending_for_exit = Rc::clone(pending);
     let save_files = request.spec.save_files.clone();
-    dialog.connect_response(move |dialog, response_type| {
-        let outcome = if state.cancelled.load(Ordering::Acquire) {
+    let child_for_wait = child.clone();
+    glib::MainContext::default().spawn_local(async move {
+        let stdout = child_for_wait
+            .communicate_future(None)
+            .await
+            .ok()
+            .and_then(|(out, _)| out)
+            .map(|bytes| bytes.to_vec())
+            .unwrap_or_default();
+        let mut paths: Vec<PathBuf> = stdout
+            .split(|&b| b == 0)
+            .filter(|chunk| !chunk.is_empty())
+            .map(|chunk| path_from_bytes(chunk.to_vec()))
+            .collect();
+        let outcome = if state.cancelled.load(Ordering::Acquire) || paths.is_empty() {
             UiOutcome::Cancelled
-        } else if response_type == ResponseType::Accept {
-            let mut paths = chooser_paths(dialog);
-            if !save_files.is_empty() {
-                if let Some(folder) = paths.pop() {
-                    paths = save_files
-                        .iter()
-                        .map(|name| folder.join(path_from_bytes(name.clone())))
-                        .collect();
-                }
+        } else {
+            if !save_files.is_empty()
+                && let Some(folder) = paths.pop()
+            {
+                paths = save_files
+                    .iter()
+                    .map(|name| folder.join(path_from_bytes(name.clone())))
+                    .collect();
             }
             UiOutcome::Selected(paths)
-        } else {
-            UiOutcome::Cancelled
         };
         let _ = response.try_send(outcome);
-        pending_for_response.borrow_mut().remove(&handle);
-        dialog.destroy();
+        pending_for_exit.borrow_mut().remove(&handle);
     });
-    let handle = request.handle.clone();
     pending.borrow_mut().insert(
-        handle,
+        request.handle,
         Pending {
-            dialog: dialog.clone(),
+            child,
             state: request.state,
             response: request.response,
         },
     );
-    dialog.show();
 }
 
 fn drain_requests(
@@ -416,7 +452,7 @@ fn drain_requests(
         .collect::<Vec<_>>();
     for handle in cancelled {
         if let Some(item) = pending.borrow_mut().remove(&handle) {
-            item.dialog.destroy();
+            item.child.force_exit();
             let _ = item.response.try_send(UiOutcome::Cancelled);
         }
     }

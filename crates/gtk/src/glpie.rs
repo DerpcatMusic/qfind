@@ -279,7 +279,7 @@ impl GlPie {
     }
 
     fn fail(&self, message: String) {
-        eprintln!("qfind: GL pie disabled: {message}");
+        eprintln!("megaman: GL pie disabled: {message}");
         self.root.set_visible_child_name("gl-error");
     }
 
@@ -301,7 +301,7 @@ impl GlPie {
             match unsafe { init_program(&ctx) } {
                 Ok((program, locations)) => {
                     let version = unsafe { ctx.get_parameter_string(glow::VERSION) };
-                    eprintln!("qfind: GL pie on {version}");
+                    eprintln!("megaman: GL pie on {version}");
                     let mut state = pie.state.borrow_mut();
                     state.ctx = Some(Rc::new(ctx));
                     state.program = Some(program);
@@ -476,7 +476,7 @@ unsafe fn init_program(ctx: &glow::Context) -> Result<(glow::Program, PieUniform
                 Err(log) => logs.push(log),
             }
         }
-        eprintln!("qfind: GL version string: {version}");
+        eprintln!("megaman: GL version string: {version}");
         Err(logs.join(" | "))
     }
 }

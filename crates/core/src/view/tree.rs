@@ -62,9 +62,7 @@ pub fn fold_stems(items: &[HitRef]) -> Vec<Stem> {
     fn into_stems(map: BTreeMap<String, Node>, prefix: &str) -> Vec<Stem> {
         map.into_iter()
             .map(|(name, node)| {
-                let path = if prefix.is_empty() {
-                    format!("/{name}")
-                } else if prefix == "/" {
+                let path = if prefix.is_empty() || prefix == "/" {
                     format!("/{name}")
                 } else {
                     format!("{prefix}/{name}")

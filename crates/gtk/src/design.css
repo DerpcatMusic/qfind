@@ -1,15 +1,15 @@
 /* Native theme colors keep the workspace legible in light and dark appearances. */
-@define-color qfind_accent #72aff0;
+@define-color qfind_accent #83bba8;
 @define-color qfind_line alpha(@theme_fg_color, 0.10);
-.qfind-shell { background: shade(@theme_bg_color, 0.84); color: @theme_fg_color; }
+.qfind-shell { background: mix(@theme_bg_color, @theme_base_color, 0.55); color: @theme_fg_color; }
 headerbar.qfind-shell { min-height: 54px; padding: 0 14px; border-bottom: 1px solid @qfind_line; box-shadow: none; }
 .qfind-brand { font-size: 22px; font-weight: 800; letter-spacing: -1px; padding-left: 8px; }
 .qfind-search { min-height: 30px; border-radius: 9px; background: alpha(@theme_fg_color, 0.045); border: 1px solid @qfind_line; box-shadow: none; }
 .qfind-search:focus-within { border-color: @qfind_accent; }
 .qfind-content { background: shade(@theme_base_color, 0.97); color: @theme_fg_color; }
-.qfind-chrome, scrolledwindow.qfind-chrome > viewport, scrolledwindow.qfind-chrome > viewport > box { background: shade(@theme_bg_color, 0.84); color: @theme_fg_color; }
+.qfind-chrome, scrolledwindow.qfind-chrome > viewport, scrolledwindow.qfind-chrome > viewport > box { background: mix(@theme_bg_color, @theme_base_color, 0.55); color: @theme_fg_color; }
 .qfind-chrome entry, .qfind-chrome searchentry { background: shade(@theme_base_color, 0.97); color: @theme_fg_color; }
-.qfind-sidebar { padding: 10px 8px 0; background: shade(@theme_bg_color, 0.84); }
+.qfind-sidebar { padding: 10px 8px 0; background: mix(@theme_bg_color, @theme_base_color, 0.55); }
 .qfind-sidebar button { min-height: 28px; border-radius: 7px; padding: 3px 10px; }
 .qfind-sidebar button label { font-weight: 500; }
 .qfind-sidebar separator { margin: 10px 8px 4px; background: @qfind_line; }
@@ -32,6 +32,8 @@ columnview row:hover { background: alpha(@theme_fg_color, 0.035); }
 columnview row:selected, gridview child:selected { background: alpha(@qfind_accent, 0.20); color: @theme_fg_color; }
 .qfind-odd { background: alpha(@theme_fg_color, 0.022); }
 .qfind-odd:selected { background: alpha(@qfind_accent, 0.20); }
+.qfind-dirty { color: #e9bc72; font-weight: 600; }
+.qfind-dirty:selected { color: @theme_fg_color; }
 .qfind-tile { margin: 3px; padding: 3px; border-radius: 10px; }
 .qfind-tile:hover { background: alpha(@theme_fg_color, 0.035); }
 .qfind-tile .qfind-name { font-size: 13px; font-weight: 500; }
@@ -43,7 +45,7 @@ columnview row:selected, gridview child:selected { background: alpha(@qfind_acce
 .qfind-project { padding: 12px 8px; border-radius: 8px; background: shade(@theme_base_color, 0.97); border: 1px solid @qfind_line; }
 .qfind-project button { font-weight: 600; }
 .qfind-project checkbutton { font-size: 12px; margin: 4px 8px; }
-.qfind-footer { min-height: 32px; padding: 0 12px; background: shade(@theme_bg_color, 0.84); border-top: 1px solid @qfind_line; font-size: 11px; }
+.qfind-footer { min-height: 32px; padding: 0 12px; background: mix(@theme_bg_color, @theme_base_color, 0.55); border-top: 1px solid @qfind_line; font-size: 11px; }
 .qfind-footer button { font-size: 11px; min-height: 24px; padding: 0 8px; }
 button:focus-visible { outline: 2px solid @qfind_accent; outline-offset: -2px; }
 
@@ -61,3 +63,53 @@ button:focus-visible { outline: 2px solid @qfind_accent; outline-offset: -2px; }
 .qfind-dialog entry, .qfind-dialog button { border-radius: 7px; }
 .qfind-footer scale { padding: 0 8px; }
 .qfind-footer scale highlight { background: @qfind_accent; }
+
+/* Megaman: one mint accent, quiet surfaces, and deliberate spacing. */
+.qfind-brand { font-size: 20px; letter-spacing: -0.5px; }
+.qfind-sidebar button { min-height: 34px; }
+.qfind-tile { padding: 10px; margin: 5px; border: 1px solid transparent; }
+.qfind-tile:hover { border-color: @qfind_line; }
+.qfind-search { min-height: 34px; }
+.megaman-projects { background: @theme_base_color; }
+.megaman-project-header { padding: 24px 24px 16px; }
+.megaman-project-header searchentry { min-height: 36px; border-radius: 10px; }
+.megaman-project-header button { min-height: 36px; min-width: 32px; border-radius: 10px; }
+.megaman-page-title { font-size: 28px; font-weight: 800; letter-spacing: -0.8px; }
+.megaman-summary { margin: 0 24px 24px; }
+.megaman-stat { padding: 16px; border: 1px solid @qfind_line; border-radius: 12px; background: alpha(@theme_fg_color, 0.025); }
+.megaman-stat image { color: @qfind_accent; }
+.megaman-eyebrow { font-size: 10px; font-weight: 700; letter-spacing: 1px; color: alpha(@theme_fg_color, 0.65); }
+.megaman-stat-value { font-size: 30px; font-weight: 700; letter-spacing: -1px; }
+.megaman-project-table { margin: 0 12px; }
+.megaman-project-table header button { padding: 12px 8px; }
+.megaman-project-table row { border-bottom: 1px solid alpha(@theme_fg_color, 0.04); }
+.megaman-project-table row:selected { box-shadow: inset 3px 0 @qfind_accent; }
+.megaman-project-inspector { padding: 0 16px 16px; background: alpha(@theme_fg_color, 0.018); }
+.megaman-inspector-title { font-size: 22px; font-weight: 750; letter-spacing: -0.5px; }
+.megaman-project-inspector > button { min-height: 36px; border-radius: 9px; margin: 6px 0; }
+.megaman-project-inspector stackswitcher { margin: 8px 0; }
+.megaman-project-inspector stackswitcher button { min-height: 30px; border-radius: 7px; }
+.megaman-detail-card { padding: 12px 14px; border: 1px solid @qfind_line; border-radius: 9px; background: @theme_base_color; }
+.megaman-overview { padding-top: 8px; }
+.megaman-command-output { border: 1px solid @qfind_line; border-radius: 9px; padding: 10px; background: @theme_base_color; }
+.megaman-command-output textview { font-size: 12px; }
+.megaman-overview dropdown, .megaman-overview button { min-height: 32px; }
+*:drop(active) { box-shadow: inset 0 0 0 2px @qfind_accent; }
+
+.megaman-projects .suggested-action { background: #397c68; color: white; border-color: #397c68; }
+.megaman-projects .suggested-action:hover { background: #306b59; }
+.megaman-project-inspector stackswitcher button:checked { background: alpha(@qfind_accent, 0.20); }
+.megaman-project-table .qfind-dirty { color: mix(@theme_fg_color, #b87927, 0.55); }
+
+.megaman-projects .suggested-action:disabled { background: alpha(@theme_fg_color, 0.06); color: alpha(@theme_fg_color, 0.35); border-color: @qfind_line; }
+.megaman-project-header searchentry:focus-within { border-color: @qfind_accent; outline-color: @qfind_accent; }
+
+/* Settings + project inspector: boxed groups, one accent. */
+.megaman-settings-group { font-size: 13px; font-weight: 700; margin-left: 2px; }
+.megaman-settings list.boxed-list, .megaman-project-inspector list.boxed-list { border: 1px solid @qfind_line; border-radius: 10px; background: @theme_base_color; }
+.megaman-settings list.boxed-list > row, .megaman-project-inspector list.boxed-list > row { border-bottom: 1px solid @qfind_line; padding: 0; }
+.megaman-settings list.boxed-list > row:last-child, .megaman-project-inspector list.boxed-list > row:last-child { border-bottom: none; }
+.megaman-settings dropdown button, .megaman-settings entry { min-height: 32px; border-radius: 8px; }
+.megaman-actions flowboxchild { padding: 0; }
+.megaman-actions button { min-height: 32px; border-radius: 8px; padding: 0 10px; }
+.megaman-project-inspector entry { border-radius: 8px; min-height: 32px; }

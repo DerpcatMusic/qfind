@@ -154,6 +154,8 @@ pub struct Config {
     pub match_mode: MatchMode,
     /// TUI theme id: grok, titanium, catppuccin, gruvbox, dracula, nord, aurora.
     pub theme: String,
+    /// GTK theme name: `system` (don't override), `Adwaita`, `Adwaita-dark`.
+    pub gtk_theme: String,
     /// Deprecated compatibility setting. Startup now opens immediately.
     pub splash: bool,
     /// How Enter opens a Hit.
@@ -179,6 +181,7 @@ impl Default for Config {
             weight_map: true,
             match_mode: MatchMode::Fuzzy,
             theme: "grok".into(),
+            gtk_theme: "system".into(),
             splash: false,
             open: OpenMode::Auto,
             editor: String::new(),
@@ -248,6 +251,7 @@ impl Config {
         s.push_str(&format!("weight_map = {}\n", self.weight_map));
         s.push_str(&format!("match = \"{}\"\n", self.match_mode.as_str()));
         s.push_str(&format!("theme = \"{}\"\n", self.theme));
+        s.push_str(&format!("gtk_theme = \"{}\"\n", self.gtk_theme));
         s.push_str(&format!("splash = {}\n", self.splash));
         s.push_str(&format!("open = \"{}\"\n", self.open.as_str()));
         s.push_str(&format!(
@@ -360,6 +364,7 @@ fn parse(src: &str) -> Config {
             "weight_map" => cfg.weight_map = v == "true",
             "match" => cfg.match_mode = MatchMode::parse(v),
             "theme" => cfg.theme = v.trim_matches('"').to_string(),
+            "gtk_theme" => cfg.gtk_theme = v.trim_matches('"').to_string(),
             "splash" => cfg.splash = v != "false",
             "open" => cfg.open = OpenMode::parse(v),
             "editor" => cfg.editor = v.trim_matches('"').to_string(),
@@ -513,15 +518,17 @@ mod tests {
 
     #[test]
     fn roundtrip_lists_and_preview() {
-        let mut cfg = Config::default();
-        cfg.exclude = vec!["SteamLibrary".into(), "node_modules".into()];
-        cfg.include = vec![PathBuf::from("/home/a")];
-        cfg.spacing = 8;
-        cfg.preview = PreviewMode::Selected;
-        cfg.zebra = false;
-        cfg.match_mode = MatchMode::Substring;
-        cfg.theme = "catppuccin".into();
-        cfg.splash = false;
+        let mut cfg = Config {
+            exclude: vec!["SteamLibrary".into(), "node_modules".into()],
+            include: vec![PathBuf::from("/home/a")],
+            spacing: 8,
+            preview: PreviewMode::Selected,
+            zebra: false,
+            match_mode: MatchMode::Substring,
+            theme: "catppuccin".into(),
+            splash: false,
+            ..Config::default()
+        };
         let again = parse(&cfg.to_toml());
         assert_eq!(again.exclude, cfg.exclude);
         assert_eq!(again.include, cfg.include);
@@ -540,8 +547,10 @@ mod tests {
 
     #[test]
     fn auto_sends_text_to_editor_and_binaries_to_desktop() {
-        let mut cfg = Config::default();
-        cfg.editor = "nvim -p".into();
+        let cfg = Config {
+            editor: "nvim -p".into(),
+            ..Config::default()
+        };
         let how = cfg.open_how_env(Path::new("/tmp/foo.rs"), false, None, None);
         assert_eq!(
             how,
@@ -562,9 +571,11 @@ mod tests {
 
     #[test]
     fn xdg_ignores_editor_even_for_text() {
-        let mut cfg = Config::default();
-        cfg.open = OpenMode::Xdg;
-        cfg.editor = "nvim".into();
+        let cfg = Config {
+            open: OpenMode::Xdg,
+            editor: "nvim".into(),
+            ..Config::default()
+        };
         assert_eq!(
             cfg.open_how_env(Path::new("main.rs"), false, Some("nvim"), None),
             OpenHow::Desktop

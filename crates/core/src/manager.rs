@@ -254,8 +254,12 @@ pub struct Manager {
 }
 
 impl Manager {
-    pub(crate) fn catalog(&self) -> Option<&Catalog> { self.catalog.as_ref() }
-    pub(crate) fn storage(&self) -> Option<&StorageMap> { self.storage.as_deref() }
+    pub(crate) fn catalog(&self) -> Option<&Catalog> {
+        self.catalog.as_ref()
+    }
+    pub(crate) fn storage(&self) -> Option<&StorageMap> {
+        self.storage.as_deref()
+    }
 
     #[must_use]
     pub fn new(catalog: Catalog, directory: Option<PathBuf>) -> Self {
@@ -269,7 +273,11 @@ impl Manager {
 
     /// Browse existing folders before an index has been built.
     pub fn live(directory: Option<PathBuf>) -> Self {
-        Self { catalog: None, storage: None, session: ManagerSession::new(directory) }
+        Self {
+            catalog: None,
+            storage: None,
+            session: ManagerSession::new(directory),
+        }
     }
 
     pub fn set_search_scope(&mut self, scope: LocationScope) {
@@ -302,7 +310,12 @@ impl Manager {
     /// plugins so Places/recent-locations stay in sync without polling.
     pub fn dispatch(&mut self, plugins: &mut PluginHost, action: Action) -> Result<Outcome> {
         if let Action::Navigate(path) = &action
-            && !path.is_dir() && self.catalog.as_ref().and_then(|catalog| catalog.folder(path)).is_none()
+            && !path.is_dir()
+            && self
+                .catalog
+                .as_ref()
+                .and_then(|catalog| catalog.folder(path))
+                .is_none()
         {
             return Err(Error::DirectoryNotIndexed(path.clone()));
         }
@@ -320,7 +333,13 @@ impl Manager {
     }
 
     pub fn navigate(&mut self, path: PathBuf) -> Result<bool> {
-        if !path.is_dir() && self.catalog.as_ref().and_then(|catalog| catalog.folder(&path)).is_none() {
+        if !path.is_dir()
+            && self
+                .catalog
+                .as_ref()
+                .and_then(|catalog| catalog.folder(&path))
+                .is_none()
+        {
             return Err(Error::DirectoryNotIndexed(path));
         }
         Ok(self.session.navigate(path))
@@ -338,30 +357,64 @@ impl Manager {
     pub fn view(&self, query: &str, recursive: bool, mut opts: SearchOpts) -> Result<ManagerView> {
         opts.highlight = false;
         let scoped_directory = (self.session.search_scope() == LocationScope::Directory)
-            .then(|| self.directory()).flatten();
-        let mut rows: Vec<ManagerRow> = if !recursive && scoped_directory.is_some() {
-            crate::live_children(scoped_directory.unwrap(), query, opts, true, true)
-                ?.into_iter().map(|row| ManagerRow {
-                    id: None, name: row.name, is_dir: row.is_dir,
-                    bytes: if row.is_dir {
-                        { let sizes=crate::FolderSizes::global(); sizes.request(&row.path); sizes.get(&row.path).or_else(|| self.storage.as_ref().and_then(|map| map.find_indexed(&row.path)).map(|entry| entry.bytes)).unwrap_or(0) }
-                    } else { row.size }, path: row.path, entries: 1,
-                }).collect()
-        } else {
-            let catalog = self.catalog.as_ref().ok_or_else(|| Error::Query("Global search needs an index. Build the index first.".into()))?;
-            if let Some(directory) = scoped_directory {
-                let folder = catalog.folder(directory)
-                    .ok_or_else(|| Error::DirectoryNotIndexed(directory.to_path_buf()))?;
-                manager_rows(&folder.search_with(query, opts)?)
+            .then(|| self.directory())
+            .flatten();
+        let mut rows: Vec<ManagerRow> =
+            if let Some(scoped) = scoped_directory.filter(|_| !recursive) {
+                crate::live_children(scoped, query, opts, true, true)?
+                    .into_iter()
+                    .map(|row| ManagerRow {
+                        id: None,
+                        name: row.name,
+                        is_dir: row.is_dir,
+                        bytes: if row.is_dir {
+                            {
+                                let sizes = crate::FolderSizes::global();
+                                sizes.request(&row.path);
+                                sizes
+                                    .get(&row.path)
+                                    .or_else(|| {
+                                        self.storage
+                                            .as_ref()
+                                            .and_then(|map| map.find_indexed(&row.path))
+                                            .map(|entry| entry.bytes)
+                                    })
+                                    .unwrap_or(0)
+                            }
+                        } else {
+                            row.size
+                        },
+                        path: row.path,
+                        entries: 1,
+                    })
+                    .collect()
             } else {
-                manager_rows(&catalog.search_with(query, opts)?)
-            }
-        };
+                let catalog = self.catalog.as_ref().ok_or_else(|| {
+                    Error::Query("Global search needs an index. Build the index first.".into())
+                })?;
+                if let Some(directory) = scoped_directory {
+                    let folder = catalog
+                        .folder(directory)
+                        .ok_or_else(|| Error::DirectoryNotIndexed(directory.to_path_buf()))?;
+                    manager_rows(&folder.search_with(query, opts)?)
+                } else {
+                    manager_rows(&catalog.search_with(query, opts)?)
+                }
+            };
         // ponytail: cached folder weights reorder loaded rows; apply weights before limiting for whole-directory ranking.
-        if !recursive && scoped_directory.is_some() && matches!(opts.sort, crate::Sort::Largest | crate::Sort::Smallest) {
-            rows.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| {
-                if opts.sort == crate::Sort::Largest { b.bytes.cmp(&a.bytes) } else { a.bytes.cmp(&b.bytes) }
-            }));
+        if !recursive
+            && scoped_directory.is_some()
+            && matches!(opts.sort, crate::Sort::Largest | crate::Sort::Smallest)
+        {
+            rows.sort_by(|a, b| {
+                b.is_dir.cmp(&a.is_dir).then_with(|| {
+                    if opts.sort == crate::Sort::Largest {
+                        b.bytes.cmp(&a.bytes)
+                    } else {
+                        a.bytes.cmp(&b.bytes)
+                    }
+                })
+            });
         }
         let folders = rows.iter().filter(|row| row.is_dir).count();
         let files = rows.len() - folders;
@@ -375,7 +428,10 @@ impl Manager {
 
     /// Immediate Chart segments for the current directory, or indexed roots globally.
     pub fn chart(&self, global: bool, limit: usize) -> Result<Vec<ManagerRow>> {
-        let storage = self.storage.as_ref().ok_or_else(|| Error::Query("Storage analysis needs an index.".into()))?;
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| Error::Query("Storage analysis needs an index.".into()))?;
         let current = if global {
             None
         } else {

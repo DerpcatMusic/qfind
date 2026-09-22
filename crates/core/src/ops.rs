@@ -31,8 +31,12 @@ pub enum Mutation {
 
 pub(crate) fn refresh_sizes(path: &Path) {
     let sizes = crate::FolderSizes::global();
-    if let Some(parent) = path.parent() { sizes.invalidate(parent); }
-    if path.is_dir() { sizes.invalidate(path); }
+    if let Some(parent) = path.parent() {
+        sizes.invalidate(parent);
+    }
+    if path.is_dir() {
+        sizes.invalidate(path);
+    }
 }
 
 pub(crate) fn is_reparse_point(metadata: &fs::Metadata) -> bool {
@@ -153,11 +157,18 @@ fn copy_file_one(from: &Path, to: &Path) -> Result<()> {
         #[cfg(windows)]
         {
             use std::os::windows::fs::{FileTypeExt, symlink_dir, symlink_file};
-            if metadata.file_type().is_symlink_dir() { symlink_dir(target, to) }
-            else { symlink_file(target, to) }.map_err(|e| Error::io(to, e))?;
+            if metadata.file_type().is_symlink_dir() {
+                symlink_dir(target, to)
+            } else {
+                symlink_file(target, to)
+            }
+            .map_err(|e| Error::io(to, e))?;
         }
         #[cfg(not(any(unix, windows)))]
-        return Err(invalid_input(to, "symlink copying is unsupported on this platform"));
+        return Err(invalid_input(
+            to,
+            "symlink copying is unsupported on this platform",
+        ));
     } else {
         #[cfg(windows)]
         {
@@ -166,8 +177,16 @@ fn copy_file_one(from: &Path, to: &Path) -> Result<()> {
             let destination: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
             // SAFETY: Both paths are terminated UTF-16. Fail-if-exists preserves collision policy.
             // CopyFileW also preserves Windows streams and file attributes.
-            let copied=unsafe { windows_sys::Win32::Storage::FileSystem::CopyFileW(from.as_ptr(),destination.as_ptr(),1) };
-            if copied==0 {return Err(Error::io(to,io::Error::last_os_error()));}
+            let copied = unsafe {
+                windows_sys::Win32::Storage::FileSystem::CopyFileW(
+                    from.as_ptr(),
+                    destination.as_ptr(),
+                    1,
+                )
+            };
+            if copied == 0 {
+                return Err(Error::io(to, io::Error::last_os_error()));
+            }
         }
         #[cfg(not(windows))]
         {
@@ -183,10 +202,16 @@ fn copy_file_one(from: &Path, to: &Path) -> Result<()> {
 fn copy_dir_all(from: &Path, to: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(from).map_err(|e| Error::io(from, e))?;
     if is_reparse_point(&metadata) && !metadata.file_type().is_symlink() {
-        return Err(invalid_input(from, "cannot recursively copy a Windows reparse point"));
+        return Err(invalid_input(
+            from,
+            "cannot recursively copy a Windows reparse point",
+        ));
     }
     let source = fs::canonicalize(from).map_err(|e| Error::io(from, e))?;
-    let parent = to.parent().filter(|path| !path.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let parent = to
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
     let parent = fs::canonicalize(parent).map_err(|e| Error::io(parent, e))?;
     if parent.starts_with(&source) {
         return Err(invalid_input(to, "cannot copy a directory into itself"));
@@ -278,11 +303,37 @@ pub fn delete(path: impl AsRef<Path>) -> Result<Mutation> {
     Ok(Mutation::Deleted(path.to_path_buf()))
 }
 
-/// Trash root: `$XDG_DATA_HOME/qfind/Trash/files` (freedesktop-style).
+/// Trash root: the desktop's `$XDG_DATA_HOME/Trash/files`, so trashed
+/// items show up in every file manager's Trash.
 #[must_use]
 pub fn trash_root() -> PathBuf {
     let base = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
-    base.join("qfind").join("Trash").join("files")
+    base.join("Trash").join("files")
+}
+
+/// `<root>/../info/<name>.trashinfo` (freedesktop trash spec).
+fn info_path(trashed: &Path) -> Option<PathBuf> {
+    let files = trashed.parent()?;
+    let mut name = trashed.file_name()?.to_os_string();
+    name.push(".trashinfo");
+    Some(files.parent()?.join("info").join(name))
+}
+
+fn write_info(trashed: &Path, original: &Path) {
+    let Some(info) = info_path(trashed) else {
+        return;
+    };
+    let Some(dir) = info.parent() else { return };
+    let _ = fs::create_dir_all(dir);
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    // ponytail: epoch seconds instead of ISO 8601; file managers only need Path.
+    let body = format!(
+        "[Trash Info]\nPath={}\nDeletionDate={secs}\n",
+        original.to_string_lossy()
+    );
+    let _ = fs::write(info, body);
 }
 
 fn unique_in(dir: &Path, name: &std::ffi::OsStr) -> PathBuf {
@@ -317,6 +368,7 @@ pub fn trash_into(root: &Path, path: impl AsRef<Path>) -> Result<(PathBuf, Mutat
     };
     let dest = unique_in(root, &name);
     move_tree(path, &dest)?;
+    write_info(&dest, path);
     refresh_sizes(path);
     refresh_sizes(&dest);
     Ok((
@@ -336,6 +388,9 @@ pub fn restore(trashed: impl AsRef<Path>, original: impl AsRef<Path>) -> Result<
     check_dest_free(original)?;
     check_dest_parent(original)?;
     move_tree(trashed, original)?;
+    if let Some(info) = info_path(trashed) {
+        let _ = fs::remove_file(info);
+    }
     refresh_sizes(trashed);
     refresh_sizes(original);
     Ok(Mutation::Restored {

@@ -9,7 +9,7 @@ this file wins — update all three together.
 
 | Keys | Action |
 | --- | --- |
-| `Delete` | Trash focused row, or every marked row. Recoverable: `Ctrl+Z`, or restore from `$XDG_DATA_HOME/qfind/Trash/files`. Triggers a Catalog rebuild. |
+| `Delete` | Trash focused row, or every marked row. Recoverable: `Ctrl+Z`, or restore from the desktop Trash (`$XDG_DATA_HOME/Trash`). Triggers a Catalog rebuild. |
 | `Insert` | Mark / unmark the focused row (`+` glyph, `N marked` chip). Marks live per tab. |
 | `Ctrl+A` | Mark all visible rows, or clear marks when everything is marked. |
 | `F2` | Rename the focused item (prompt; `Enter` applies, `Esc` cancels). |

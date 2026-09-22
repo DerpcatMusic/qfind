@@ -45,7 +45,6 @@ pub fn folder_weights(items: &[HitRef]) -> Vec<Weighted> {
 fn parent_of(path: &str) -> String {
     match path.rsplit_once('/') {
         Some(("", _)) => "/".into(),
-        Some((p, _)) if p.is_empty() => "/".into(),
         Some((p, _)) => p.to_string(),
         None => "/".into(),
     }

@@ -38,6 +38,16 @@
           "mutating": false
         },
         {
+          "id": "head",
+          "title": "Branch head",
+          "mutating": false
+        },
+        {
+          "id": "log",
+          "title": "History",
+          "mutating": false
+        },
+        {
           "id": "stage",
           "title": "Stage file",
           "mutating": true
@@ -45,6 +55,61 @@
         {
           "id": "unstage",
           "title": "Unstage file",
+          "mutating": true
+        },
+        {
+          "id": "discard",
+          "title": "Discard changes",
+          "mutating": true
+        },
+        {
+          "id": "commit",
+          "title": "Commit staged",
+          "mutating": true
+        },
+        {
+          "id": "amend",
+          "title": "Amend commit",
+          "mutating": true
+        },
+        {
+          "id": "fetch",
+          "title": "Fetch",
+          "mutating": false
+        },
+        {
+          "id": "pull",
+          "title": "Pull",
+          "mutating": true
+        },
+        {
+          "id": "push",
+          "title": "Push",
+          "mutating": true
+        },
+        {
+          "id": "branch",
+          "title": "Branches",
+          "mutating": false
+        },
+        {
+          "id": "checkout",
+          "title": "Checkout branch",
+          "mutating": true
+        },
+        {
+          "id": "create-branch",
+          "title": "New branch",
+          "mutating": true
+        },
+        {
+          "id": "clone",
+          "title": "Clone repository",
+          "mutating": true
+        },
+        {
+          "id": "init",
+          "title": "Init repository",
           "mutating": true
         }
       ]

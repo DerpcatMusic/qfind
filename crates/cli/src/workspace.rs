@@ -16,7 +16,7 @@ pub enum WorkspaceCommand {
         #[arg(long)]
         snapshot: Option<PathBuf>,
     },
-    /// Repository status, diffs, and staging (paths are repository-relative)
+    /// Repository status, diffs, staging, branches and sync (paths are repository-relative)
     Git {
         #[arg(value_enum)]
         action: GitAction,
@@ -26,6 +26,11 @@ pub enum WorkspaceCommand {
         file: Option<PathBuf>,
         #[arg(long)]
         staged: bool,
+        /// Commit message for commit/amend, branch name for checkout/create-branch
+        #[arg(long)]
+        message: Option<String>,
+        #[arg(long)]
+        branch: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -73,8 +78,19 @@ pub enum WorkspaceCommand {
 pub enum GitAction {
     Status,
     Diff,
+    Head,
+    Log,
     Stage,
     Unstage,
+    Discard,
+    Commit,
+    Amend,
+    Fetch,
+    Pull,
+    Push,
+    Branch,
+    Checkout,
+    CreateBranch,
 }
 
 fn manager(path: PathBuf, snapshot: Option<PathBuf>, required: bool) -> Result<Manager> {
@@ -117,18 +133,31 @@ pub fn run(command: WorkspaceCommand) -> Result<()> {
             path,
             file,
             staged,
+            message,
+            branch,
             json: raw,
         } => {
             let action = match action {
                 GitAction::Status => "status",
                 GitAction::Diff => "diff",
+                GitAction::Head => "head",
+                GitAction::Log => "log",
                 GitAction::Stage => "stage",
                 GitAction::Unstage => "unstage",
+                GitAction::Discard => "discard",
+                GitAction::Commit => "commit",
+                GitAction::Amend => "amend",
+                GitAction::Fetch => "fetch",
+                GitAction::Pull => "pull",
+                GitAction::Push => "push",
+                GitAction::Branch => "branch",
+                GitAction::Checkout => "checkout",
+                GitAction::CreateBranch => "create-branch",
             };
             dispatch(
                 &Manager::live(Some(path)),
                 "git",
-                json!({"action":action,"file":file,"staged":staged}),
+                json!({"action":action,"file":file,"staged":staged,"message":message,"branch":branch}),
                 raw,
             )
         }

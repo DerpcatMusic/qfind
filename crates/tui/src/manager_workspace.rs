@@ -69,6 +69,16 @@ struct ProjectRow {
     modified: i64,
     bytes: Option<u64>,
     artifacts: Vec<(PathBuf, Option<u64>)>,
+    target: String,
+    ahead: u32,
+    behind: u32,
+    dirty: u32,
+    untracked: u32,
+    conflicted: u32,
+    last_commit: String,
+    worktrees: Vec<PathBuf>,
+    scripts: Vec<String>,
+    web_tool: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -474,10 +484,10 @@ impl Workspace {
             self.status = "wait for the current workspace request".into();
             return;
         }
-        if self.mode == Mode::Projects {
-            if let Some(path) = self.selected_path() {
-                self.path = path;
-            }
+        if self.mode == Mode::Projects
+            && let Some(path) = self.selected_path()
+        {
+            self.path = path;
         }
         self.mode = mode;
         self.selected = 0;
@@ -982,11 +992,25 @@ impl Workspace {
                 } else {
                     "◆"
                 };
-                let repository = row.repository.rsplit('/').next().unwrap_or("local");
+                let repository = if row.repository.is_empty() {
+                    "local"
+                } else {
+                    row.repository.rsplit('/').next().unwrap_or("local")
+                };
+                // Branch pill with ahead/behind + dirty (Files status-bar analogue).
+                let mut pill = row.branch.clone();
+                if row.ahead > 0 || row.behind > 0 {
+                    pill.push_str(&format!(" ⇡{} ⇣{}", row.ahead, row.behind));
+                }
+                if row.dirty > 0 || row.untracked > 0 {
+                    pill.push_str(&format!(" ●{}", row.dirty + row.untracked));
+                }
+                if row.conflicted > 0 {
+                    pill.push_str(&format!(" ✖{}", row.conflicted));
+                }
                 Line::from(format!(
-                    "{marker} {repository}  {}  {}",
+                    "{marker} {repository}  {}  {pill}",
                     path_name(&row.path),
-                    row.branch
                 ))
             })
             .collect::<Vec<_>>();
@@ -1354,6 +1378,27 @@ fn project_row(value: &Value) -> Option<ProjectRow> {
                     .collect()
             })
             .unwrap_or_default(),
+        target: value["target"].as_str().unwrap_or_default().to_owned(),
+        ahead: value["ahead"].as_u64().unwrap_or(0) as u32,
+        behind: value["behind"].as_u64().unwrap_or(0) as u32,
+        dirty: value["dirty"].as_u64().unwrap_or(0) as u32,
+        untracked: value["untracked"].as_u64().unwrap_or(0) as u32,
+        conflicted: value["conflicted"].as_u64().unwrap_or(0) as u32,
+        last_commit: value["last_commit"].as_str().unwrap_or_default().to_owned(),
+        worktrees: value["worktrees"]
+            .as_array()
+            .map(|items| items.iter().filter_map(path_value).collect())
+            .unwrap_or_default(),
+        scripts: value["scripts"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        web_tool: value["web_tool"].as_str().unwrap_or_default().to_owned(),
     })
 }
 
@@ -1388,19 +1433,61 @@ fn path_value(value: &Value) -> Option<PathBuf> {
 fn project_detail(row: &ProjectRow) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(row.path.display().to_string())];
     lines.push(Line::from(if row.repository.is_empty() {
-        "Git: no repository".into()
+        format!("Git: local · {}", row.branch)
     } else {
         format!("Git: {} · {}", row.repository, row.branch)
     }));
+    if !row.target.is_empty() {
+        lines.push(Line::from(format!(
+            "Base: {} ⇡{} ⇣{}",
+            row.target, row.ahead, row.behind
+        )));
+    }
+    if row.dirty > 0 || row.untracked > 0 || row.conflicted > 0 {
+        lines.push(Line::from(format!(
+            "Working tree: {} dirty · {} untracked{}",
+            row.dirty,
+            row.untracked,
+            if row.conflicted > 0 {
+                format!(" · {} conflicted", row.conflicted)
+            } else {
+                String::new()
+            }
+        )));
+    }
+    if !row.last_commit.is_empty() {
+        lines.push(Line::from(format!("Commit: {}", row.last_commit)));
+    }
     let mut tools = Vec::new();
     if row.rust {
-        tools.push("Rust");
+        tools.push("Rust".to_owned());
     }
     if row.node {
-        tools.push("Node");
+        tools.push(if row.web_tool.is_empty() {
+            "Node".into()
+        } else {
+            row.web_tool.clone()
+        });
     }
     if !tools.is_empty() {
         lines.push(Line::from(format!("Tools: {}", tools.join(" · "))));
+    }
+    if !row.scripts.is_empty() {
+        lines.push(Line::from(format!(
+            "Scripts: {}",
+            row.scripts
+                .iter()
+                .take(6)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+    if !row.worktrees.is_empty() {
+        lines.push(Line::from(format!("Worktrees: {}", row.worktrees.len())));
+        for path in row.worktrees.iter().take(4) {
+            lines.push(Line::from(format!("  {}", path.display())));
+        }
     }
     if row.modified > 0 {
         lines.push(Line::from(format!(

@@ -113,11 +113,17 @@ pub(crate) fn content_for_path(path: &str) -> Option<gdk::ContentProvider> {
 }
 
 pub(crate) fn content_for_paths(paths: &[String]) -> Option<gdk::ContentProvider> {
-    if paths.is_empty() { return None; }
+    if paths.is_empty() {
+        return None;
+    }
     let files: Vec<_> = paths.iter().map(gio::File::for_path).collect();
-    let uris = files.iter().map(|file| format!("{}\r\n", file.uri())).collect::<String>();
+    let uris = files
+        .iter()
+        .map(|file| format!("{}\r\n", file.uri()))
+        .collect::<String>();
     let typed = gdk::ContentProvider::for_value(&gdk::FileList::from_array(&files).to_value());
-    let uris = gdk::ContentProvider::for_bytes("text/uri-list", &glib::Bytes::from(uris.as_bytes()));
+    let uris =
+        gdk::ContentProvider::for_bytes("text/uri-list", &glib::Bytes::from(uris.as_bytes()));
     if files.len() == 1 {
         let single = gdk::ContentProvider::for_value(&files[0].to_value());
         Some(gdk::ContentProvider::new_union(&[typed, single, uris]))
@@ -146,10 +152,10 @@ pub fn selected_row(selection: &impl IsA<gtk::SelectionModel>) -> Option<RowData
 pub fn open(window: &impl IsA<gtk::Window>, path: &str) {
     let cfg = Config::load();
     let is_dir = Path::new(path).is_dir();
-    if let OpenHow::Editor { program, args } = cfg.open_how(Path::new(path), is_dir) {
-        if Command::new(&program).args(&args).arg(path).spawn().is_ok() {
-            return;
-        }
+    if let OpenHow::Editor { program, args } = cfg.open_how(Path::new(path), is_dir)
+        && Command::new(&program).args(&args).arg(path).spawn().is_ok()
+    {
+        return;
     }
     let file = gio::File::for_path(path);
     let launcher = gtk::FileLauncher::new(Some(&file));
@@ -172,12 +178,12 @@ pub fn reveal(window: &impl IsA<gtk::Window>, path: &str) {
     let launcher = gtk::FileLauncher::new(Some(&file));
     let win = window.clone().upcast::<gtk::Window>();
     launcher.open_containing_folder(Some(&win), None::<&gio::Cancellable>, move |res| {
-        if res.is_err() {
-            if let Some(parent) = Path::new(&file.path().unwrap_or_default()).parent() {
-                let dir = gio::File::for_path(parent);
-                let open = gtk::FileLauncher::new(Some(&dir));
-                open.launch(None::<&gtk::Window>, None::<&gio::Cancellable>, |_| {});
-            }
+        if res.is_err()
+            && let Some(parent) = Path::new(&file.path().unwrap_or_default()).parent()
+        {
+            let dir = gio::File::for_path(parent);
+            let open = gtk::FileLauncher::new(Some(&dir));
+            open.launch(None::<&gtk::Window>, None::<&gio::Cancellable>, |_| {});
         }
     });
 }
@@ -267,7 +273,9 @@ fn open_megaman(file: &gio::File, directory: bool) -> bool {
     let target = if directory {
         path
     } else {
-        path.parent().unwrap_or_else(|| Path::new("/")).to_path_buf()
+        path.parent()
+            .unwrap_or_else(|| Path::new("/"))
+            .to_path_buf()
     };
     Command::new("qfind-gtk").arg(target).spawn().is_ok()
 }
@@ -374,11 +382,11 @@ pub(crate) fn load_thumbnail(
     let stack = stack.clone();
     let picture = picture.clone();
     glib::MainContext::default().spawn_local(async move {
-        if let Ok(rendered) = ThumbnailWait(result).await {
-            if stack.widget_name() == token {
-                picture.set_filename(Some(rendered));
-                stack.set_visible_child_name("picture");
-            }
+        if let Ok(rendered) = ThumbnailWait(result).await
+            && stack.widget_name() == token
+        {
+            picture.set_filename(Some(rendered));
+            stack.set_visible_child_name("picture");
         }
     });
 }

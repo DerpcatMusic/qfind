@@ -149,14 +149,12 @@ fn read_dir(
             FileType::Unknown => stat_info(&job.fd, name),
             _ => (false, file_size(&job.fd, name)),
         };
-        if is_dir {
-            if let Ok(fd) = openat(&job.fd, name, OPEN_FLAGS, Mode::empty()) {
-                inflight.fetch_add(1, Ordering::SeqCst);
-                let _ = tx.send(Job {
-                    fd,
-                    path: child.clone(),
-                });
-            }
+        if is_dir && let Ok(fd) = openat(&job.fd, name, OPEN_FLAGS, Mode::empty()) {
+            inflight.fetch_add(1, Ordering::SeqCst);
+            let _ = tx.send(Job {
+                fd,
+                path: child.clone(),
+            });
         }
         local.push(Found {
             path: child,

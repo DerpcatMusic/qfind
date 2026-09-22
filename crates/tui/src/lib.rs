@@ -1675,7 +1675,6 @@ impl App {
                     refresh: false,
                 })));
             });
-            return;
         }
         #[cfg(target_os = "macos")]
         {

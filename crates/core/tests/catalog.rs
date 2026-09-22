@@ -230,7 +230,7 @@ fn search_with_scope_class_sort_and_limit() {
         )
         .expect("folders");
     assert!(folders.iter().all(|h| h.is_dir()));
-    assert!(folders.len() >= 1);
+    assert!(!folders.is_empty());
 
     let images = catalog
         .search_with(
