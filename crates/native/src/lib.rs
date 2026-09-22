@@ -1,3 +1,5 @@
+// FFI entry points deref caller-owned pointers after a null check; C ABI callers cannot honour `unsafe fn`.
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;

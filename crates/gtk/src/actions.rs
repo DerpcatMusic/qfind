@@ -146,11 +146,10 @@ pub fn selected_row(selection: &impl IsA<gtk::SelectionModel>) -> Option<RowData
 pub fn open(window: &impl IsA<gtk::Window>, path: &str) {
     let cfg = Config::load();
     let is_dir = Path::new(path).is_dir();
-    if let OpenHow::Editor { program, args } = cfg.open_how(Path::new(path), is_dir) {
-        if Command::new(&program).args(&args).arg(path).spawn().is_ok() {
+    if let OpenHow::Editor { program, args } = cfg.open_how(Path::new(path), is_dir)
+        && Command::new(&program).args(&args).arg(path).spawn().is_ok() {
             return;
         }
-    }
     let file = gio::File::for_path(path);
     let launcher = gtk::FileLauncher::new(Some(&file));
     launcher.launch(Some(window), None::<&gio::Cancellable>, |_| {});
@@ -172,13 +171,12 @@ pub fn reveal(window: &impl IsA<gtk::Window>, path: &str) {
     let launcher = gtk::FileLauncher::new(Some(&file));
     let win = window.clone().upcast::<gtk::Window>();
     launcher.open_containing_folder(Some(&win), None::<&gio::Cancellable>, move |res| {
-        if res.is_err() {
-            if let Some(parent) = Path::new(&file.path().unwrap_or_default()).parent() {
+        if res.is_err()
+            && let Some(parent) = Path::new(&file.path().unwrap_or_default()).parent() {
                 let dir = gio::File::for_path(parent);
                 let open = gtk::FileLauncher::new(Some(&dir));
                 open.launch(None::<&gtk::Window>, None::<&gio::Cancellable>, |_| {});
             }
-        }
     });
 }
 
@@ -374,12 +372,11 @@ pub(crate) fn load_thumbnail(
     let stack = stack.clone();
     let picture = picture.clone();
     glib::MainContext::default().spawn_local(async move {
-        if let Ok(rendered) = ThumbnailWait(result).await {
-            if stack.widget_name() == token {
+        if let Ok(rendered) = ThumbnailWait(result).await
+            && stack.widget_name() == token {
                 picture.set_filename(Some(rendered));
                 stack.set_visible_child_name("picture");
             }
-        }
     });
 }
 

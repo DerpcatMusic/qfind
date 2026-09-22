@@ -339,8 +339,8 @@ impl Manager {
         opts.highlight = false;
         let scoped_directory = (self.session.search_scope() == LocationScope::Directory)
             .then(|| self.directory()).flatten();
-        let mut rows: Vec<ManagerRow> = if !recursive && scoped_directory.is_some() {
-            crate::live_children(scoped_directory.unwrap(), query, opts, true, true)
+        let mut rows: Vec<ManagerRow> = if let Some(scoped) = scoped_directory.filter(|_| !recursive) {
+            crate::live_children(scoped, query, opts, true, true)
                 ?.into_iter().map(|row| ManagerRow {
                     id: None, name: row.name, is_dir: row.is_dir,
                     bytes: if row.is_dir {

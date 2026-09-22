@@ -19,3 +19,6 @@ vendor/crossterm/*
 !vendor/crossterm/LICENSE
 !vendor/crossterm/src/
 !vendor/crossterm/src/**
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/

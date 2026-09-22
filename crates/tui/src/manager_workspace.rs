@@ -484,11 +484,10 @@ impl Workspace {
             self.status = "wait for the current workspace request".into();
             return;
         }
-        if self.mode == Mode::Projects {
-            if let Some(path) = self.selected_path() {
+        if self.mode == Mode::Projects
+            && let Some(path) = self.selected_path() {
                 self.path = path;
             }
-        }
         self.mode = mode;
         self.selected = 0;
         self.scroll = 0;

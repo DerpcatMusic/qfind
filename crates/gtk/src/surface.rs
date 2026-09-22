@@ -324,7 +324,7 @@ pub fn make_weight_area(
             let mut cache = cache.borrow_mut();
             if cache.rev != rev {
                 let mut items = weights_draw.borrow().clone();
-                items.sort_by(|a, b| b.weight.cmp(&a.weight));
+                items.sort_by_key(|a| std::cmp::Reverse(a.weight));
                 items.truncate(MAX_TILES);
                 cache.items = items;
                 cache.rev = rev;
@@ -370,7 +370,7 @@ pub fn make_weight_area(
 }
 
 pub(crate) fn tile_color(i: usize, path: &str) -> (f64, f64, f64) {
-    let mut h = 216_613_6261u32;
+    let mut h = 2_166_136_261u32;
     for b in path.bytes() {
         h ^= u32::from(b);
         h = h.wrapping_mul(16777619);
@@ -785,11 +785,10 @@ pub fn make_grid_factory(
             let popover = popover.clone();
             let col_for_pop = col.clone();
             right.connect_pressed(move |_, _, x, y| {
-                if let Some(li) = list_item.downcast_ref::<gtk::ListItem>() {
-                    if !selection.is_selected(li.position()) {
+                if let Some(li) = list_item.downcast_ref::<gtk::ListItem>()
+                    && !selection.is_selected(li.position()) {
                         selection.select_item(li.position(), true);
                     }
-                }
                 popup_at(&popover, &col_for_pop, x, y);
             });
             col.add_controller(right);

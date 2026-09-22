@@ -482,7 +482,7 @@ fn mask_slice(bytes: &[u8], n: usize) -> Option<&[u64]> {
         return None;
     }
     let data = &bytes[8..];
-    if data.as_ptr() as usize % 8 != 0 {
+    if !(data.as_ptr() as usize).is_multiple_of(8) {
         return None;
     }
     // SAFETY: length is n * 8, pointer 8-aligned, sidecar is immutable for this inode.

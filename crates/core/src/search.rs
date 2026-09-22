@@ -323,7 +323,7 @@ fn apply_sort(
 ) -> Result<()> {
     match opts.sort {
         // Stable on ties so empty Query can keep files-first insertion order.
-        Sort::Score => scored.sort_by(|a, b| b.0.cmp(&a.0)),
+        Sort::Score => scored.sort_by_key(|a| std::cmp::Reverse(a.0)),
         Sort::Name => {
             scored.sort_unstable_by(|a, b| cmp_name(snapshot, a.1, b.1).then(a.1.cmp(&b.1)))
         }
@@ -382,7 +382,7 @@ fn cmp_name(snapshot: &Snapshot, a: u32, b: u32) -> std::cmp::Ordering {
 #[cfg(unix)]
 fn live_meta(path: &std::path::Path) -> (u64, i64) {
     match rustix::fs::stat(path) {
-        Ok(st) => (st.st_size.max(0) as u64, st.st_mtime as i64),
+        Ok(st) => (st.st_size.max(0) as u64, st.st_mtime),
         Err(_) => (0, 0),
     }
 }

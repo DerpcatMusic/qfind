@@ -17,7 +17,7 @@ pub fn install() {
             let Some((names, svg)) = line.split_once('\t') else { continue; };
             for name in names.split_whitespace() {
                 let path = directory.join(format!("{name}.svg"));
-                if std::fs::read_to_string(&path).ok().as_deref() != Some(svg) { std::fs::write(path, &svg)?; }
+                if std::fs::read_to_string(&path).ok().as_deref() != Some(svg) { std::fs::write(path, svg)?; }
             }
         }
         Ok(())

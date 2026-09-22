@@ -386,16 +386,13 @@ pub fn index_projects(catalog: &Catalog) -> Result<Vec<Project>, String> {
                         if active.as_deref() != Some(&login) { return Err("GitHub account changed during discovery. Refresh Projects.".into()); }
                     }
                     let text = String::from_utf8_lossy(&output.stdout).into_owned();
-                    if let Some(cache) = &repo_list_cache {
-                        if let Some(parent) = cache.parent() {
-                            if fs::create_dir_all(parent).is_ok() {
-                                if let Ok(mut file) = tempfile::NamedTempFile::new_in(parent) {
+                    if let Some(cache) = &repo_list_cache
+                        && let Some(parent) = cache.parent()
+                            && fs::create_dir_all(parent).is_ok()
+                                && let Ok(mut file) = tempfile::NamedTempFile::new_in(parent) {
                                     use std::io::Write;
                                     if file.write_all(text.as_bytes()).is_ok() { let _ = file.persist(cache); }
                                 }
-                            }
-                        }
-                    }
                     text
                 }
                 _ => repo_list_cache.as_ref().and_then(|path| fs::read_to_string(path).ok())
@@ -416,22 +413,22 @@ pub fn index_projects(catalog: &Catalog) -> Result<Vec<Project>, String> {
         .ok()
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|time| time.as_nanos().to_string());
-    if !force {
-        if let Some(path) = workspace_cache.as_ref().filter(|path| {
+    if !force
+        && let Some(path) = workspace_cache.as_ref().filter(|path| {
             fs::metadata(path)
                 .and_then(|meta| meta.modified())
                 .ok()
                 .and_then(|time| time.elapsed().ok())
                 .is_some_and(|age| age < Duration::from_secs(600))
-        }) {
-            if let Some(value) = fs::read(path)
+        })
+            && let Some(value) = fs::read(path)
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
             {
                 // Only the snapshot path gates the cache: the stamp changes on every
                 // subtree refresh, which used to force a full project re-scan.
-                if value["snapshot"] == serde_json::json!(catalog.path()) {
-                    if let Ok(mut projects) =
+                if value["snapshot"] == serde_json::json!(catalog.path())
+                    && let Ok(mut projects) =
                         serde_json::from_value::<Vec<Project>>(value["projects"].clone())
                     {
                         projects.retain(|project| project.path.is_dir());
@@ -445,10 +442,7 @@ pub fn index_projects(catalog: &Catalog) -> Result<Vec<Project>, String> {
                         }
                         return Ok(projects);
                     }
-                }
             }
-        }
-    }
     let mut roots = std::collections::BTreeSet::new();
     for id in 0..catalog.len() {
         let Some(hit) = catalog.hit(id) else {
@@ -564,17 +558,14 @@ pub fn index_projects(catalog: &Catalog) -> Result<Vec<Project>, String> {
     } else {
         projects.sort_by(|a, b| a.path.cmp(&b.path));
     }
-    if let Some(path) = workspace_cache {
-        if let Some(parent) = path.parent() {
-            if fs::create_dir_all(parent).is_ok() {
-                if let Ok(mut file) = tempfile::NamedTempFile::new_in(parent) {
+    if let Some(path) = workspace_cache
+        && let Some(parent) = path.parent()
+            && fs::create_dir_all(parent).is_ok()
+                && let Ok(mut file) = tempfile::NamedTempFile::new_in(parent) {
                     let value = serde_json::json!({"snapshot":catalog.path(),"stamp":snapshot_stamp,"projects":projects});
                     if serde_json::to_writer(&mut file, &value).is_ok() {
                         let _ = file.persist(path);
                     }
                 }
-            }
-        }
-    }
     Ok(projects)
 }

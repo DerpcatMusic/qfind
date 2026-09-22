@@ -438,7 +438,7 @@ fn unpack_into(source: &Path, destination: &Path, compressed_size: u64) -> Resul
                     continue;
                 }
                 let relative = safe_member(&name)?;
-                let mode = stat.st_mode as u32;
+                let mode = stat.st_mode;
                 let kind = mode & 0o170000;
                 if kind == 0o120000 || (kind != 0 && kind != 0o040000 && kind != 0o100000) {
                     output = None;

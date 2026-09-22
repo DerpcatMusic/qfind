@@ -81,7 +81,7 @@ fn refresh_geometry(state: &ChartState, width: i32, height: i32) {
         let by_bytes = map.is_some_and(|map| map.total_bytes() > 0) || state.live_nodes.borrow().as_ref().is_some_and(|nodes|nodes.iter().any(|node|node.bytes>0));
         let nodes = if !global && state.live_nodes.borrow().is_some() {
             let mut nodes=state.live_nodes.borrow().clone().unwrap_or_default();
-            nodes.sort_by(|a,b|b.bytes.cmp(&a.bytes));
+            nodes.sort_by_key(|n| std::cmp::Reverse(n.bytes));
             let remaining=nodes.iter().skip(63).fold(0u64,|sum,node|sum.saturating_add(node.bytes));
             nodes.truncate(63);
             if remaining>0 { nodes.push(StorageEntry {id:u32::MAX,name:"Other".into(),path:PathBuf::new(),is_dir:false,bytes:remaining,entries:0}); }
@@ -110,8 +110,8 @@ fn refresh_geometry(state: &ChartState, width: i32, height: i32) {
             by_bytes,
             &mut unit,
         );
-        if !global {
-            if let Some((total, free)) = state.capacity.get().filter(|(total, _)| *total > 0) {
+        if !global
+            && let Some((total, free)) = state.capacity.get().filter(|(total, _)| *total > 0) {
                 let split = -PI / 2.0 + TAU * total.saturating_sub(free) as f64 / total as f64;
                 for (name, bytes, start, end, color) in [
                     ("Used on volume", total.saturating_sub(free), -PI / 2.0, split, (0.32, 0.49, 0.70)),
@@ -120,7 +120,6 @@ fn refresh_geometry(state: &ChartState, width: i32, height: i32) {
                     unit.push(Arc { entry: StorageEntry { id: u32::MAX, name: name.into(), path: PathBuf::new(), is_dir: false, bytes, entries: 0 }, start, end, inner: 0.93, outer: 1.0, color });
                 }
             }
-        }
         drop(manager);
         let slices: Vec<glpie::SliceGeom> = unit
             .iter()
@@ -520,9 +519,8 @@ impl Pane {
                 if let Some(nodes)=state.live_nodes.borrow_mut().as_mut() {
                     for node in nodes.iter_mut().filter(|node|node.is_dir) {
                         state.sizes.request(&node.path);
-                        if let Some(bytes)=state.sizes.get(&node.path) {
-                            if bytes!=node.bytes {node.bytes=bytes;changed=true;}
-                        }
+                        if let Some(bytes)=state.sizes.get(&node.path)
+                            && bytes!=node.bytes {node.bytes=bytes;changed=true;}
                     }
                 }
                 if changed {

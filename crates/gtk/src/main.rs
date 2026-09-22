@@ -1,3 +1,4 @@
+#![allow(clippy::type_complexity)]
 use qfind_core::{LiveEntry, live_children};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -216,11 +217,10 @@ fn parse_here() -> Option<PathBuf> {
         if a == "--here" {
             return args.next().filter(|s| !s.is_empty()).map(PathBuf::from);
         }
-        if let Some(p) = a.strip_prefix("--here=") {
-            if !p.is_empty() {
+        if let Some(p) = a.strip_prefix("--here=")
+            && !p.is_empty() {
                 return Some(PathBuf::from(p));
             }
-        }
         if !a.starts_with('-') {
             return Some(PathBuf::from(a));
         }
@@ -419,8 +419,8 @@ fn refresh_places(container: &gtk::Box, navigate: &Navigator) {
         .flat_map(|drive| drive.volumes())
         .filter_map(|volume| volume.get_mount())
     {
-        if let Some(root) = mount.root().path() {
-            if shown.insert(root.clone()) {
+        if let Some(root) = mount.root().path()
+            && shown.insert(root.clone()) {
                 let icon = if mount.can_unmount() || mount.can_eject() {
                     "drive-removable-media-symbolic"
                 } else {
@@ -428,14 +428,12 @@ fn refresh_places(container: &gtk::Box, navigate: &Navigator) {
                 };
                 devices.push((mount.name().to_string(), root, icon));
             }
-        }
     }
     for mount in monitor.mounts() {
-        if let Some(root) = mount.root().path() {
-            if shown.insert(root.clone()) {
+        if let Some(root) = mount.root().path()
+            && shown.insert(root.clone()) {
                 devices.push((mount.name().to_string(), root, "drive-harddisk-symbolic"));
             }
-        }
     }
     if !devices.is_empty() {
         let heading = gtk::Label::new(Some("Devices"));
@@ -886,9 +884,8 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
             if matches!(column.title().as_deref(), Some("Type" | "Location")) {
                 let paths: Vec<_> = selected_rows(&selection).into_iter().map(|row| row.path()).collect();
                 sort_drop.set_selected(0);
-                if sorter.primary_sort_column().as_ref() != Some(&column) {
-                    if let Some(list) = list_weak.upgrade() { list.sort_by_column(Some(&column), if descending { gtk::SortType::Descending } else { gtk::SortType::Ascending }); }
-                }
+                if sorter.primary_sort_column().as_ref() != Some(&column)
+                    && let Some(list) = list_weak.upgrade() { list.sort_by_column(Some(&column), if descending { gtk::SortType::Descending } else { gtk::SortType::Ascending }); }
                 model.set_text_sort(Some((column.title().as_deref() == Some("Location"), descending)));
                 for path in paths { if let Some(position) = model.position_path(&path) { selection.select_item(position, false); } }
                 return;
@@ -1447,11 +1444,10 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
             // Clicking an existing file in Save mode fills the name instead of opening it.
             let name_entry = name_entry.clone();
             state.borrow().selection.connect_selection_changed(move |sel, _, _| {
-                if let Some(row) = selected_row(sel) {
-                    if !row.is_dir() {
+                if let Some(row) = selected_row(sel)
+                    && !row.is_dir() {
                         name_entry.set_text(&row.name());
                     }
-                }
             });
         }
     }
@@ -1535,7 +1531,7 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     );
     let bind_visibility = |button: &gtk::CheckButton| {
         let state = Rc::clone(&state);
-        let window = window.clone();
+        let _window = window.clone();
         let hidden_btn = hidden_btn.clone();
         let gitignore_btn = gitignore_btn.clone();
         let ignore_btn = ignore_btn.clone();
@@ -1893,11 +1889,10 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
             .monitor_directory(gio::FileMonitorFlags::WATCH_MOVES, None::<&gio::Cancellable>).ok()) {
             let state = state.clone();
             monitor.connect_changed(move |_, file, other, _| {
-                if [Some(file), other].into_iter().flatten().any(|file| file.basename().as_deref() == Some(std::path::Path::new("hosts.yml"))) {
-                    if let Some(catalog) = state.borrow().catalog.clone() {
+                if [Some(file), other].into_iter().flatten().any(|file| file.basename().as_deref() == Some(std::path::Path::new("hosts.yml")))
+                    && let Some(catalog) = state.borrow().catalog.clone() {
                         state.borrow().storage.refresh_projects(catalog, false);
                     }
-                }
             });
             window.connect_close_request(move |_| { monitor.cancel(); glib::Propagation::Proceed });
         }
@@ -2386,6 +2381,7 @@ fn focus_in(window: &gtk::ApplicationWindow, ancestor: &impl IsA<gtk::Widget>) -
     false
 }
 
+#[allow(clippy::too_many_arguments)]
 fn install_keys(
     window: &gtk::ApplicationWindow,
     search: &gtk::SearchEntry,
@@ -3050,11 +3046,10 @@ fn spawn_search(state: &Rc<RefCell<State>>, seq: u64) {
                                 .flatten(),
                         )
                     };
-                    if FOLDERS_FIRST.load(AtomicOrdering::Relaxed) {
-                        if let Some(catalog) = &catalog {
+                    if FOLDERS_FIRST.load(AtomicOrdering::Relaxed)
+                        && let Some(catalog) = &catalog {
                             ids.sort_by_key(|&id| !catalog.hit(id).is_some_and(|hit| hit.is_dir()));
                         }
-                    }
                     let n = ids.len();
                     let (folders, files) = catalog
                         .as_ref()
@@ -3497,12 +3492,11 @@ fn mkdir_here(state: Rc<RefCell<State>>, window: gtk::ApplicationWindow) {
 
 fn start_rebuild(state: &Rc<RefCell<State>>, _window: &gtk::ApplicationWindow, force: bool) {
     let snapshot = default_snapshot_path();
-    if !force && snapshot.exists() {
-        if let Ok(catalog) = Catalog::open(&snapshot) {
+    if !force && snapshot.exists()
+        && let Ok(catalog) = Catalog::open(&snapshot) {
             adopt_catalog(state, catalog);
             return;
         }
-    }
 
     state
         .borrow()

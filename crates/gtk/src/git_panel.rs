@@ -268,13 +268,11 @@ pub fn new(state: Rc<RefCell<State>>, project: Option<Rc<RefCell<Option<PathBuf>
                     let mut args = vec!["diff", "--no-ext-diff", "--no-textconv", "--no-color"];
                     if task.staged { args.push("--cached"); }
                     diff = git(&root, &args, path)?;
-                    if diff.is_empty() && !task.staged {
-                        if let Some(path) = path.filter(|path| root.join(path).is_file()) {
-                            if git(&root, &["ls-files", "--error-unmatch"], Some(path)).is_err() {
+                    if diff.is_empty() && !task.staged
+                        && let Some(path) = path.filter(|path| root.join(path).is_file())
+                            && git(&root, &["ls-files", "--error-unmatch"], Some(path)).is_err() {
                                 diff = git(&root, &["diff", "--no-index", "--no-ext-diff", "--no-textconv", "--no-color", "--", "/dev/null", &path.to_string_lossy()], None).unwrap_or_else(|diff| diff);
                             }
-                        }
-                    }
                     if diff.is_empty() {
                         diff = if task.staged { "No staged changes for this selection.".into() }
                             else { format!("No unstaged diff for this selection.\nChoose an untracked file above to preview its additions.\n\n{status}") };

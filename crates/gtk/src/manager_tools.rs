@@ -368,7 +368,7 @@ pub(super) fn drop_paths(window: &gtk::ApplicationWindow, state: &Rc<RefCell<Sta
 
 fn transfer_paths(paths: &[PathBuf], dest: &Path, action: &str) -> Result<String, String> {
     if action == "batch-zip" {
-        archive::compress(&paths, &dest).map_err(|e| e.to_string())?;
+        archive::compress(paths, dest).map_err(|e| e.to_string())?;
         return Ok(format!("Created {}", dest.display()));
     }
     if !dest.is_dir() {
@@ -733,11 +733,11 @@ mod transfer_tests {
         fs::create_dir_all(source.join("nested")).unwrap();
         fs::create_dir(&dest).unwrap();
         fs::write(source.join("note.txt"), "keep me").unwrap();
-        assert!(transfer_paths(&[source.clone()], &source.join("nested"), "batch-copy").is_err());
-        transfer_paths(&[source.clone()], &dest, "batch-copy").unwrap();
+        assert!(transfer_paths(std::slice::from_ref(&source), &source.join("nested"), "batch-copy").is_err());
+        transfer_paths(std::slice::from_ref(&source), &dest, "batch-copy").unwrap();
         assert_eq!(fs::read_to_string(dest.join("source/note.txt")).unwrap(), "keep me");
         assert!(source.join("note.txt").exists());
-        assert!(transfer_paths(&[source.clone()], &dest, "batch-copy").is_err());
+        assert!(transfer_paths(std::slice::from_ref(&source), &dest, "batch-copy").is_err());
         assert_eq!(fs::read_to_string(dest.join("source/note.txt")).unwrap(), "keep me");
         assert!(transfer_paths(&[source.clone(), source.join("nested")], temp.path(), "batch-copy").is_err());
     }

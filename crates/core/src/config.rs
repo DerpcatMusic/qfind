@@ -518,15 +518,17 @@ mod tests {
 
     #[test]
     fn roundtrip_lists_and_preview() {
-        let mut cfg = Config::default();
-        cfg.exclude = vec!["SteamLibrary".into(), "node_modules".into()];
-        cfg.include = vec![PathBuf::from("/home/a")];
-        cfg.spacing = 8;
-        cfg.preview = PreviewMode::Selected;
-        cfg.zebra = false;
-        cfg.match_mode = MatchMode::Substring;
-        cfg.theme = "catppuccin".into();
-        cfg.splash = false;
+        let mut cfg = Config {
+            exclude: vec!["SteamLibrary".into(), "node_modules".into()],
+            include: vec![PathBuf::from("/home/a")],
+            spacing: 8,
+            preview: PreviewMode::Selected,
+            zebra: false,
+            match_mode: MatchMode::Substring,
+            theme: "catppuccin".into(),
+            splash: false,
+            ..Config::default()
+        };
         let again = parse(&cfg.to_toml());
         assert_eq!(again.exclude, cfg.exclude);
         assert_eq!(again.include, cfg.include);
@@ -545,8 +547,7 @@ mod tests {
 
     #[test]
     fn auto_sends_text_to_editor_and_binaries_to_desktop() {
-        let mut cfg = Config::default();
-        cfg.editor = "nvim -p".into();
+        let cfg = Config { editor: "nvim -p".into(), ..Config::default() };
         let how = cfg.open_how_env(Path::new("/tmp/foo.rs"), false, None, None);
         assert_eq!(
             how,
@@ -567,9 +568,7 @@ mod tests {
 
     #[test]
     fn xdg_ignores_editor_even_for_text() {
-        let mut cfg = Config::default();
-        cfg.open = OpenMode::Xdg;
-        cfg.editor = "nvim".into();
+        let cfg = Config { open: OpenMode::Xdg, editor: "nvim".into(), ..Config::default() };
         assert_eq!(
             cfg.open_how_env(Path::new("main.rs"), false, Some("nvim"), None),
             OpenHow::Desktop

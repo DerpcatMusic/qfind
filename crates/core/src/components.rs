@@ -170,8 +170,8 @@ fn git_head(root: &Path) -> Value {
     } else {
         upstream
     };
-    if ahead == 0 && behind == 0 && !target.is_empty() && !header.contains("...") {
-        if let Ok(counts) = git(
+    if ahead == 0 && behind == 0 && !target.is_empty() && !header.contains("...")
+        && let Ok(counts) = git(
             root,
             &["rev-list", "--left-right", "--count", &format!("{target}...HEAD")],
             None,
@@ -181,7 +181,6 @@ fn git_head(root: &Path) -> Value {
             behind = parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
             ahead = parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
         }
-    }
     json!({"branch":branch,"target":target,"ahead":ahead,"behind":behind,"dirty":dirty,"untracked":untracked,"conflicted":conflicted})
 }
 
@@ -354,9 +353,9 @@ fn git_component(directory: &Path, request: &Value) -> Result<Value, String> {
         "status" => status.clone(),
         "" | "diff" => {
             let mut patch = git(&root, &args, file.as_deref())?;
-            if patch.is_empty() && !staged {
-                if let Some(file) = file.as_deref().filter(|file| root.join(file).is_file()) {
-                    if git(&root, &["ls-files", "--error-unmatch"], Some(file)).is_err() {
+            if patch.is_empty() && !staged
+                && let Some(file) = file.as_deref().filter(|file| root.join(file).is_file())
+                    && git(&root, &["ls-files", "--error-unmatch"], Some(file)).is_err() {
                         let mut bytes = Vec::new();
                         fs::File::open(root.join(file))
                             .map_err(|error| error.to_string())?
@@ -383,8 +382,6 @@ fn git_component(directory: &Path, request: &Value) -> Result<Value, String> {
                             );
                         }
                     }
-                }
-            }
             if patch.is_empty() {
                 "No changes for this selection.".into()
             } else {
@@ -602,8 +599,8 @@ fn storage_component(manager: &Manager, path: &Path) -> Result<Value, String> {
     let (free, total) = capacity(path)?;
     let mut entries = storage_children(path)?;
     for entry in &mut entries {
-        if entry.is_dir {
-            if let Some(indexed) = manager
+        if entry.is_dir
+            && let Some(indexed) = manager
                 .storage()
                 .and_then(|map| map.find_indexed(&entry.path))
             {
@@ -611,9 +608,8 @@ fn storage_component(manager: &Manager, path: &Path) -> Result<Value, String> {
                     .get(&entry.path)
                     .unwrap_or(indexed.bytes);
             }
-        }
     }
-    entries.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+    entries.sort_by_key(|e| std::cmp::Reverse(e.bytes));
     let remaining = entries
         .iter()
         .skip(256)
