@@ -15,12 +15,12 @@ publish = false
 qfind-core = { path = "crates/core" }
 anyhow = "1"
 async-channel = "2.5"
-base64 = "0.22"
+base64 = "0.23"
 clap = { version = "4", features = ["derive"] }
 crossbeam-channel = "0.5"
 compress-tools = "0.16.1"
 crossterm = "0.29"
-dirs = "6"
+dirs = "7"
 globset = "0.4"
 ignore = "0.4"
 gtk = { version = "0.11", package = "gtk4", features = ["v4_12"] }
