@@ -46,6 +46,78 @@ const MAX_ROWS: usize = 5_000;
 static QFIND_ROOT: OnceLock<PathBuf> = OnceLock::new();
 static FOLDERS_FIRST: AtomicBool = AtomicBool::new(true);
 type Navigator = Rc<RefCell<Box<dyn Fn(PathBuf)>>>;
+static PICK: OnceLock<Pick> = OnceLock::new();
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PickMode {
+    File,
+    Folder,
+    Save,
+}
+
+/// `--pick=file|folder|save` turns the manager into a file picker: chosen
+/// paths go to stdout NUL-separated, cancel exits non-zero. Used by qfind-portal.
+struct Pick {
+    mode: PickMode,
+    multiple: bool,
+    title: String,
+    accept: String,
+    name: String,
+    query: String,
+}
+
+fn parse_pick() -> Option<Pick> {
+    let mut pick = None;
+    let mut multiple = false;
+    let mut title = String::from("Megaman");
+    let mut accept = String::new();
+    let mut name = String::new();
+    let mut query = String::new();
+    for a in std::env::args().skip(1) {
+        if let Some(v) = a.strip_prefix("--pick=") {
+            pick = Some(match v {
+                "folder" => PickMode::Folder,
+                "save" => PickMode::Save,
+                _ => PickMode::File,
+            });
+        } else if a == "--multi" {
+            multiple = true;
+        } else if let Some(v) = a.strip_prefix("--title=") {
+            title = v.to_string();
+        } else if let Some(v) = a.strip_prefix("--accept=") {
+            accept = v.to_string();
+        } else if let Some(v) = a.strip_prefix("--name=") {
+            name = v.to_string();
+        } else if let Some(v) = a.strip_prefix("--query=") {
+            query = v.to_string();
+        }
+    }
+    let mode = pick?;
+    if accept.is_empty() {
+        accept = if mode == PickMode::Save { "Save" } else { "Select" }.into();
+    }
+    Some(Pick {
+        mode,
+        multiple,
+        title,
+        accept,
+        name,
+        query,
+    })
+}
+
+fn pick_done(window: &gtk::ApplicationWindow, paths: &[PathBuf]) {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    for p in paths {
+        let _ = out.write_all(p.as_os_str().as_encoded_bytes());
+        let _ = out.write_all(b"\0");
+    }
+    let _ = out.flush();
+    if let Some(app) = window.application() {
+        app.quit();
+    }
+}
 
 
 enum SearchResult {
@@ -82,6 +154,9 @@ const MAX_UNDO: usize = 32;
 
 fn main() -> glib::ExitCode {
     glib::set_application_name("Megaman");
+    if let Some(pick) = parse_pick() {
+        let _ = PICK.set(pick);
+    }
     if let Some(root) = initial_root() {
         let _ = QFIND_ROOT.set(root.canonicalize().unwrap_or(root));
     }
@@ -108,6 +183,10 @@ fn initial_root() -> Option<PathBuf> {
 }
 
 fn activate_path(window: &gtk::ApplicationWindow, navigate: &Navigator, path: String) {
+    if PICK.get().is_some_and(|pick| pick.mode != PickMode::Folder) {
+        pick_done(window, &[PathBuf::from(path)]);
+        return;
+    }
     if !archive::is_archive(Path::new(&path)) {
         open(window, &path);
         return;
@@ -434,7 +513,7 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     let manager = Rc::new(RefCell::new(ManagerSession::new(initial_folder.clone())));
     let window = gtk::ApplicationWindow::builder()
         .application(app)
-        .title(initial_folder.as_ref().map(|path| format!("Megaman · {}", path.display())).unwrap_or_else(|| "Megaman".into()))
+        .title(PICK.get().map(|pick| pick.title.clone()).unwrap_or_else(|| initial_folder.as_ref().map(|path| format!("Megaman · {}", path.display())).unwrap_or_else(|| "Megaman".into())))
         .default_width(1320)
         .default_height(820)
         .build();
@@ -450,13 +529,19 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
     }
+    settings::apply_appearance(&Config::load());
 
     let header = gtk::HeaderBar::new();
     let brand = gtk::Label::new(Some("Megaman"));
     brand.add_css_class("qfind-brand");
-    brand.set_width_chars(17);
+    brand.set_width_chars(12);
     brand.set_xalign(0.0);
-    header.pack_start(&brand);
+    let identity = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    let logo = gtk::Image::from_icon_name("megaman");
+    logo.set_pixel_size(36);
+    identity.append(&logo);
+    identity.append(&brand);
+    header.pack_start(&identity);
     let address_bar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     address_bar.add_css_class("qfind-address");
     header.add_css_class("qfind-shell");
@@ -1287,6 +1372,117 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
         undo: Vec::new(),
     }));
 
+    if let Some(pick) = PICK.get() {
+        let name_entry = gtk::Entry::new();
+        name_entry.set_text(&pick.name);
+        name_entry.set_placeholder_text(Some("File name"));
+        name_entry.set_visible(pick.mode == PickMode::Save);
+        let cancel = gtk::Button::with_label("Cancel");
+        let accept = gtk::Button::with_label(&pick.accept);
+        accept.add_css_class("suggested-action");
+        footer.append(&name_entry);
+        footer.append(&cancel);
+        footer.append(&accept);
+        if !pick.query.is_empty() {
+            search.set_text(&pick.query);
+        }
+        let choose = {
+            let state = Rc::clone(&state);
+            let window = window.clone();
+            let name_entry = name_entry.clone();
+            move || {
+                let paths = match pick.mode {
+                    PickMode::Folder => vec![current_dir(&state)],
+                    PickMode::Save => {
+                        let name = name_entry.text();
+                        if name.trim().is_empty() {
+                            return;
+                        }
+                        vec![current_dir(&state).join(name.trim())]
+                    }
+                    PickMode::File => {
+                        let rows = selected_rows(&state.borrow().selection);
+                        let mut paths: Vec<PathBuf> = rows
+                            .iter()
+                            .filter(|row| !row.is_dir())
+                            .map(|row| PathBuf::from(row.path()))
+                            .collect();
+                        if !pick.multiple {
+                            paths.truncate(1);
+                        }
+                        if paths.is_empty() {
+                            return;
+                        }
+                        paths
+                    }
+                };
+                pick_done(&window, &paths);
+            }
+        };
+        let choose = Rc::new(choose);
+        {
+            let choose = Rc::clone(&choose);
+            accept.connect_clicked(move |_| choose());
+        }
+        {
+            let choose = Rc::clone(&choose);
+            name_entry.connect_activate(move |_| choose());
+        }
+        {
+            let window = window.clone();
+            cancel.connect_clicked(move |_| {
+                if let Some(app) = window.application() {
+                    app.quit();
+                }
+            });
+        }
+        if pick.mode == PickMode::Save {
+            // Clicking an existing file in Save mode fills the name instead of opening it.
+            let name_entry = name_entry.clone();
+            state.borrow().selection.connect_selection_changed(move |sel, _, _| {
+                if let Some(row) = selected_row(sel) {
+                    if !row.is_dir() {
+                        name_entry.set_text(&row.name());
+                    }
+                }
+            });
+        }
+    }
+
+    surface::attach_file_drag(&list_scroll, selection.clone());
+    surface::attach_file_drag(&grid_scroll, selection.clone());
+    surface::attach_file_drag(&tree_scroll, tree_sel.clone());
+    let drop = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
+    drop.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let drop_stack = stack.clone();
+    let over_files = move |target: &gtk::DropTarget, x, y| {
+        target.widget().and_then(|widget| widget.pick(x, y, gtk::PickFlags::DEFAULT))
+            .is_some_and(|hit| hit == drop_stack || hit.is_ancestor(&drop_stack))
+    };
+    let motion = over_files.clone();
+    drop.connect_motion(move |target, x, y| {
+        if motion(target, x, y) { gdk::DragAction::COPY } else { gdk::DragAction::empty() }
+    });
+    {
+        let state = state.clone();
+        let window = window.clone();
+        drop.connect_drop(move |target, value, x, y| {
+            if !over_files(target, x, y) { return false; }
+            let Ok(files) = value.get::<gdk::FileList>() else { return false; };
+            let paths: Option<Vec<_>> = files.files().iter().map(|file| file.path()).collect();
+            let Some(paths) = paths.filter(|paths| !paths.is_empty()) else { return false; };
+            let destination = target.widget()
+                .and_then(|widget| surface::file_item_at(&widget, x, y))
+                .and_then(|item| item.tooltip_text())
+                .map(|path| PathBuf::from(path.as_str()))
+                .filter(|path| path.is_dir())
+                .unwrap_or_else(|| current_dir(&state));
+            manager_tools::drop_paths(&window, &state, paths, destination);
+            true
+        });
+    }
+    window.add_controller(drop);
+
     if let Some(root) = initial_folder.as_ref() {
         update_archive_save_button(&archive_save_btn, root);
     }
@@ -1900,6 +2096,7 @@ fn hit_menu() -> (gio::Menu, Vec<PathBuf>) {
     menu.append_section(None, &edit);
     let remove = gio::Menu::new();
     remove.append(Some("Move to Trash"), Some("win.trash"));
+    remove.append(Some("Delete permanently…"), Some("win.delete"));
     menu.append_section(None, &remove);
     let mut actions = Vec::new();
     let data_home = std::env::var_os("XDG_DATA_HOME")
@@ -2031,6 +2228,16 @@ fn install_actions(
             "trash",
             Box::new(move |rows| {
                 trash_rows(&state, &window, rows);
+            }),
+        );
+    }
+    {
+        let state = Rc::clone(&state);
+        let window = window.clone();
+        add(
+            "delete",
+            Box::new(move |rows| {
+                delete_rows(&state, &window, rows);
             }),
         );
     }
@@ -2320,7 +2527,12 @@ fn install_keys(
         }
 
         if key == gdk::Key::Delete && !search_focus {
-            trash_rows(&state, &window, selected_rows(&selection));
+            let rows = selected_rows(&selection);
+            if shift {
+                delete_rows(&state, &window, rows);
+            } else {
+                trash_rows(&state, &window, rows);
+            }
             return glib::Propagation::Stop;
         }
 
@@ -2591,7 +2803,7 @@ fn spawn_search(state: &Rc<RefCell<State>>, seq: u64) {
                 .map(SearchResult::Live),
             (true, true) => folder
                 .ok_or_else(|| {
-                    "Folder is outside the Catalog; refresh the Catalog for Qfind mode".to_owned()
+                    "Folder is outside the index; refresh the index to search here".to_owned()
                 })
                 .and_then(|folder| {
                     folder
@@ -2840,6 +3052,60 @@ fn trash_rows(state: &Rc<RefCell<State>>, window: &gtk::ApplicationWindow, rows:
         });
     }
     refresh_current(state, window);
+}
+
+/// Delete rows outright after confirmation. Unlike [`trash_rows`] this frees
+/// space immediately and cannot be undone, so the dialog is not optional.
+fn delete_rows(state: &Rc<RefCell<State>>, window: &gtk::ApplicationWindow, rows: Vec<RowData>) {
+    if rows.is_empty() {
+        return;
+    }
+    let paths: Vec<PathBuf> = rows.iter().map(|row| PathBuf::from(row.path())).collect();
+    let mut listed = paths
+        .iter()
+        .take(10)
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if paths.len() > 10 {
+        listed.push_str(&format!("\n… and {} more", paths.len() - 10));
+    }
+    let confirm = gtk::AlertDialog::builder()
+        .modal(true)
+        .message(format!("Permanently delete {} item(s)?", paths.len()))
+        .detail(format!(
+            "{listed}\n\nThis frees the space now. It cannot be undone and does not go to Trash."
+        ))
+        .buttons(["Cancel", "Delete permanently"])
+        .cancel_button(0)
+        .default_button(0)
+        .build();
+    let state = Rc::clone(state);
+    let window = window.clone();
+    glib::MainContext::default().spawn_local(async move {
+        if confirm.choose_future(Some(&window)).await != Ok(1) {
+            return;
+        }
+        let mut deleted = 0usize;
+        let mut failed: Option<String> = None;
+        for path in paths {
+            match qfind_core::delete(&path) {
+                Ok(_) => deleted += 1,
+                Err(error) => {
+                    failed = Some(error.to_string());
+                    break;
+                }
+            }
+        }
+        {
+            let st = state.borrow();
+            st.status.set_text(&match failed {
+                Some(error) => format!("Deleted {deleted}, stopped: {error}"),
+                None => format!("Deleted {deleted} permanently"),
+            });
+        }
+        refresh_current(&state, &window);
+    });
 }
 
 fn undo_last(state: &Rc<RefCell<State>>, window: &gtk::ApplicationWindow) {
