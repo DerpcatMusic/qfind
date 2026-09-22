@@ -502,6 +502,8 @@ struct State {
     fresh: HashSet<PathBuf>,
     refreshing: bool,
     dir_monitor: Option<gio::FileMonitor>,
+    /// Paths marked with Ctrl+X; the next paste moves instead of copies.
+    cut: Vec<PathBuf>,
     last_ids: Vec<u32>,
     visible_folders: usize,
     visible_files: usize,
@@ -1371,6 +1373,7 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
         snap_mtime: None,
         fresh: HashSet::new(),
         refreshing: false,
+        cut: Vec::new(),
         dir_monitor: None,
         last_ids: Vec::new(),
         visible_folders: 0,
@@ -1546,10 +1549,16 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
             cfg.respect_gitignore = gitignore_btn.is_active();
             cfg.respect_ignore = ignore_btn.is_active();
             let _ = cfg.save();
-            start_rebuild(&state, &window, true);
+            kick_search(&state);
         });
     };
     bind_visibility(&hidden_btn);
+    let toggle_hidden = gio::SimpleAction::new("toggle-hidden", None);
+    {
+        let hidden_btn = hidden_btn.clone();
+        toggle_hidden.connect_activate(move |_, _| hidden_btn.set_active(!hidden_btn.is_active()));
+    }
+    window.add_action(&toggle_hidden);
     bind_visibility(&gitignore_btn);
     bind_visibility(&ignore_btn);
 
@@ -1947,7 +1956,10 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
                     "  ·  {}",
                     selected.as_ref().map(|row| row.path()).unwrap_or_default()
                 ),
-                count => format!("  ·  {count} selected"),
+                count => format!(
+                    "  ·  {count} selected ({})",
+                    actions::human_size(rows.iter().filter(|row| !row.is_dir()).map(|row| row.size()).sum())
+                ),
             };
             if let Some(c) = &st.catalog {
                 let manager = st.manager.borrow();
@@ -2091,8 +2103,12 @@ fn hit_menu() -> (gio::Menu, Vec<PathBuf>) {
     let place = gio::Menu::new();
     place.append(Some("Show in Files"), Some("win.reveal"));
     place.append(Some("Open Folder"), Some("win.open-folder"));
+    place.append(Some("Open in Terminal"), Some("win.open-terminal"));
     menu.append_section(None, &place);
     let clip = gio::Menu::new();
+    clip.append(Some("Cut"), Some("win.cut"));
+    clip.append(Some("Copy"), Some("win.copy-files"));
+    clip.append(Some("Paste"), Some("win.paste"));
     clip.append(Some("Copy Path"), Some("win.copy-path"));
     clip.append(Some("Copy Name"), Some("win.copy-name"));
     clip.append(Some("Copy URI"), Some("win.copy-uri"));
@@ -2188,6 +2204,24 @@ fn install_actions(
             }
         }),
     );
+    let st = Rc::clone(&state);
+    add(
+        "cut",
+        Box::new(move |rows| cut_rows(&st, rows)),
+    );
+    add(
+        "copy-files",
+        Box::new(|rows| copy_paths(&rows.into_iter().map(|row| row.path()).collect::<Vec<_>>())),
+    );
+    let win = window.clone();
+    let st = Rc::clone(&state);
+    let paste = gio::SimpleAction::new("paste", None);
+    paste.connect_activate(move |_, _| paste_here(&win, &st));
+    window.add_action(&paste);
+    let st = Rc::clone(&state);
+    let term = gio::SimpleAction::new("open-terminal", None);
+    term.connect_activate(move |_, _| open_terminal(&st));
+    window.add_action(&term);
     let win = window.clone();
     add(
         "open-folder",
@@ -2538,6 +2572,26 @@ fn install_keys(
             return glib::Propagation::Stop;
         }
 
+        if (key == gdk::Key::x || key == gdk::Key::X) && ctrl && !search_focus {
+            cut_rows(&state, selected_rows(&selection));
+            return glib::Propagation::Stop;
+        }
+
+        if (key == gdk::Key::v || key == gdk::Key::V) && ctrl && !search_focus {
+            paste_here(&window, &state);
+            return glib::Propagation::Stop;
+        }
+
+        if key == gdk::Key::BackSpace && !search_focus && !ctrl {
+            navigate_parent(&state);
+            return glib::Propagation::Stop;
+        }
+
+        if key == gdk::Key::h && ctrl {
+            ActionGroupExt::activate_action(&window, "toggle-hidden", None);
+            return glib::Propagation::Stop;
+        }
+
         if key == gdk::Key::Delete && !search_focus {
             let rows = selected_rows(&selection);
             if shift {
@@ -2841,6 +2895,58 @@ fn navigate_history(state: &Rc<RefCell<State>>, backwards: bool) {
         return;
     };
     navigate_to(state, target, false);
+}
+
+fn cut_rows(state: &Rc<RefCell<State>>, rows: Vec<RowData>) {
+    if rows.is_empty() {
+        return;
+    }
+    let paths: Vec<String> = rows.iter().map(|row| row.path()).collect();
+    copy_paths(&paths);
+    let mut st = state.borrow_mut();
+    st.cut = paths.iter().map(PathBuf::from).collect();
+    st.status.set_text(&format!("{} cut · Ctrl+V to move", paths.len()));
+}
+
+/// Paste the clipboard's file list into the browsed folder. Files that were
+/// marked with Cut in this window are moved; anything else is copied.
+fn paste_here(window: &gtk::ApplicationWindow, state: &Rc<RefCell<State>>) {
+    let window = window.clone();
+    let state = Rc::clone(state);
+    let clipboard = window.clipboard();
+    clipboard.read_value_async(gdk::FileList::static_type(), glib::Priority::DEFAULT, None::<&gio::Cancellable>, move |value| {
+        let paths: Vec<PathBuf> = value
+            .ok()
+            .and_then(|value| value.get::<gdk::FileList>().ok())
+            .map(|list| list.files().into_iter().filter_map(|file| file.path()).collect())
+            .unwrap_or_default();
+        if paths.is_empty() {
+            state.borrow().status.set_text("Clipboard holds no files");
+            return;
+        }
+        let dest = current_dir(&state);
+        let cut = {
+            let mut st = state.borrow_mut();
+            let cut = !st.cut.is_empty() && paths.iter().all(|path| st.cut.contains(path));
+            if cut {
+                st.cut.clear();
+            }
+            cut
+        };
+        manager_tools::paste_paths(&window, &state, paths, dest, cut);
+    });
+}
+
+fn open_terminal(state: &Rc<RefCell<State>>) {
+    let dir = current_dir(state);
+    let mut candidates: Vec<String> = std::env::var("TERMINAL").ok().into_iter().collect();
+    candidates.extend(["xdg-terminal-exec", "x-terminal-emulator", "kitty", "alacritty", "foot", "gnome-terminal", "konsole"].map(String::from));
+    let spawned = candidates
+        .iter()
+        .any(|term| Command::new(term).current_dir(&dir).spawn().is_ok());
+    if !spawned {
+        state.borrow().status.set_text("No terminal found · set $TERMINAL");
+    }
 }
 
 fn navigate_parent(state: &Rc<RefCell<State>>) {
@@ -3562,6 +3668,7 @@ mod tests {
             snap_mtime: None,
             fresh: HashSet::new(),
             refreshing: false,
+        cut: Vec::new(),
             dir_monitor: None,
             last_ids: Vec::new(),
             visible_folders: 0,

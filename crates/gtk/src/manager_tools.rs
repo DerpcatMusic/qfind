@@ -350,69 +350,82 @@ fn transfer(
             return;
         }
         job(&win, &state, title, move || {
-            if action == "batch-zip" {
-                archive::compress(&paths, &dest).map_err(|e| e.to_string())?;
-                return Ok(format!("Created {}", dest.display()));
-            }
-            if !dest.is_dir() {
-                return Err("Destination must be an existing folder".into());
-            }
-            let dest = dest.canonicalize().map_err(|e| e.to_string())?;
-            let mut targets = HashSet::new();
-            let pairs: Vec<_> = paths
-                .iter()
-                .map(|path| {
-                    let name = path
-                        .file_name()
-                        .ok_or("Cannot operate on a filesystem root")?;
-                    let target = if action == "batch-extract" {
-                        dest.join(format!("{}.extracted", name.to_string_lossy()))
-                    } else {
-                        dest.join(name)
-                    };
-                    let source = path.canonicalize().map_err(|e| e.to_string())?;
-                    if target.starts_with(&source)
-                        || paths
-                            .iter()
-                            .any(|other| other != path && path.starts_with(other))
-                    {
-                        return Err(
-                            "Destination or selection is nested inside another selected folder"
-                                .into(),
-                        );
-                    }
-                    if fs::symlink_metadata(&target).is_ok() || !targets.insert(target.clone()) {
-                        return Err(format!(
-                            "Destination already exists or repeats: {}",
-                            target.display()
-                        ));
-                    }
-                    if action == "batch-extract" && !archive::is_archive(path) {
-                        return Err(format!("Not a supported archive: {}", path.display()));
-                    }
-                    Ok((path.clone(), target))
-                })
-                .collect::<Result<_, String>>()?;
-            let mut done = 0;
-            for (source, target) in pairs {
-                let result = match action {
-                    "batch-copy" => qfind_core::copy(&source, &target)
-                        .map(|_| ())
-                        .map_err(|e| e.to_string()),
-                    "batch-move" => qfind_core::move_path(&source, &target)
-                        .map(|_| ())
-                        .map_err(|e| e.to_string()),
-                    _ => archive::extract(&source, &target).map_err(|e| e.to_string()),
-                };
-                result.map_err(|e| format!("Completed {done}; stopped at {}: {e}\nCheck the destination for partial output before retrying.", source.display()))?;
-                done += 1;
-            }
-            Ok(format!("Completed {done} items in {}", dest.display()))
+            transfer_paths(&paths, &dest, action)
         });
     });
 }
 
 pub(super) use qfind_core::projects::{Project, active_project_account, index_projects, refresh_project_account};
+
+pub(super) fn paste_paths(window: &gtk::ApplicationWindow, state: &Rc<RefCell<State>>, paths: Vec<PathBuf>, dest: PathBuf, cut: bool) {
+    let (title, action) = if cut { ("Move files", "batch-move") } else { ("Paste files", "batch-copy") };
+    job(window, state, title, move || transfer_paths(&paths, &dest, action));
+}
+
+pub(super) fn drop_paths(window: &gtk::ApplicationWindow, state: &Rc<RefCell<State>>, paths: Vec<PathBuf>, dest: PathBuf) {
+    job(window, state, "Copy dropped files", move || transfer_paths(&paths, &dest, "batch-copy"));
+}
+
+fn transfer_paths(paths: &[PathBuf], dest: &Path, action: &str) -> Result<String, String> {
+    if action == "batch-zip" {
+        archive::compress(&paths, &dest).map_err(|e| e.to_string())?;
+        return Ok(format!("Created {}", dest.display()));
+    }
+    if !dest.is_dir() {
+        return Err("Destination must be an existing folder".into());
+    }
+    let dest = dest.canonicalize().map_err(|e| e.to_string())?;
+    let mut targets = HashSet::new();
+    let pairs: Vec<_> = paths
+        .iter()
+        .map(|path| {
+            let name = path
+                .file_name()
+                .ok_or("Cannot operate on a filesystem root")?;
+            let target = if action == "batch-extract" {
+                dest.join(format!("{}.extracted", name.to_string_lossy()))
+            } else {
+                dest.join(name)
+            };
+            let source = path.canonicalize().map_err(|e| e.to_string())?;
+            if target.starts_with(&source)
+                || paths
+                    .iter()
+                    .any(|other| other != path && path.starts_with(other))
+            {
+                return Err(
+                    "Destination or selection is nested inside another selected folder"
+                        .into(),
+                );
+            }
+            if fs::symlink_metadata(&target).is_ok() || !targets.insert(target.clone()) {
+                return Err(format!(
+                    "Destination already exists or repeats: {}",
+                    target.display()
+                ));
+            }
+            if action == "batch-extract" && !archive::is_archive(path) {
+                return Err(format!("Not a supported archive: {}", path.display()));
+            }
+            Ok((path.clone(), target))
+        })
+        .collect::<Result<_, String>>()?;
+    let mut done = 0;
+    for (source, target) in pairs {
+        let result = match action {
+            "batch-copy" => qfind_core::copy(&source, &target)
+                .map(|_| ())
+                .map_err(|e| e.to_string()),
+            "batch-move" => qfind_core::move_path(&source, &target)
+                .map(|_| ())
+                .map_err(|e| e.to_string()),
+            _ => archive::extract(&source, &target).map_err(|e| e.to_string()),
+        };
+        result.map_err(|e| format!("Completed {done}; stopped at {}: {e}\nCheck the destination for partial output before retrying.", source.display()))?;
+        done += 1;
+    }
+    Ok(format!("Completed {done} items in {}", dest.display()))
+}
 
 fn project_details(window: &gtk::ApplicationWindow, state: &Rc<RefCell<State>>, project: Project) {
     let (dialog, body) = dialog(window, "Project");
@@ -424,47 +437,32 @@ fn project_details(window: &gtk::ApplicationWindow, state: &Rc<RefCell<State>>, 
 pub(super) fn project_detail_content(_window: &gtk::ApplicationWindow, _state: &Rc<RefCell<State>>, project: Project) -> gtk::Box {
     let path = project.path.clone();
     let body = gtk::Box::new(gtk::Orientation::Vertical, 10);
-    // Dashboard header: branch pill, health, last commit, toolchain.
-    let mut header_lines = Vec::new();
-    let mut pill = project.branch.clone();
-    if !project.target.is_empty() {
-        pill.push_str(&format!(" → {}", project.target));
+    body.add_css_class("megaman-overview");
+    for (caption, value) in [
+        ("BRANCH", if project.branch.is_empty() { "No branch".into() } else { project.branch.clone() }),
+        ("WORKING TREE", if project.conflicted > 0 {
+            format!("{} conflicts · {} modified · {} untracked", project.conflicted, project.dirty, project.untracked)
+        } else if project.dirty > 0 || project.untracked > 0 {
+            format!("{} modified · {} untracked", project.dirty, project.untracked)
+        } else { "All changes committed".into() }),
+        ("SYNC", if project.target.is_empty() { "No upstream configured".into() } else {
+            format!("{} ahead · {} behind  /  {}", project.ahead, project.behind, project.target)
+        }),
+        ("LATEST COMMIT", if project.last_commit.is_empty() { "No commits yet".into() } else { project.last_commit.clone() }),
+    ] {
+        let card = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        card.add_css_class("megaman-detail-card");
+        let label = gtk::Label::new(Some(caption));
+        label.set_xalign(0.0);
+        label.add_css_class("megaman-eyebrow");
+        card.append(&label);
+        let text = gtk::Label::new(Some(&value));
+        text.set_xalign(0.0);
+        text.set_wrap(true);
+        text.set_selectable(true);
+        card.append(&text);
+        body.append(&card);
     }
-    if project.ahead > 0 || project.behind > 0 {
-        pill.push_str(&format!(" ⇡{} ⇣{}", project.ahead, project.behind));
-    }
-    header_lines.push(format!("⎇ {pill}"));
-    if project.conflicted > 0 {
-        header_lines.push(format!("✖ {} conflicted · {} dirty · {} untracked", project.conflicted, project.dirty, project.untracked));
-    } else if project.dirty > 0 || project.untracked > 0 {
-        header_lines.push(format!("●{} dirty · {} untracked", project.dirty, project.untracked));
-    } else {
-        header_lines.push("clean".into());
-    }
-    if !project.last_commit.is_empty() {
-        header_lines.push(project.last_commit.clone());
-    }
-    let mut tools = Vec::new();
-    if project.rust {
-        tools.push("Rust".to_owned());
-    }
-    if project.node {
-        tools.push(if project.web_tool.is_empty() { "JS".into() } else { project.web_tool.clone() });
-    }
-    if !project.scripts.is_empty() {
-        tools.push(format!("{} scripts", project.scripts.len()));
-    }
-    if !tools.is_empty() {
-        header_lines.push(tools.join(" · "));
-    }
-    if !project.worktrees.is_empty() {
-        header_lines.push(format!("{} linked worktrees", project.worktrees.len()));
-    }
-    let header = gtk::Label::new(Some(&header_lines.join("\n")));
-    header.set_xalign(0.0);
-    header.set_wrap(true);
-    header.add_css_class("dim-label");
-    body.append(&header);
     if !project.scripts.is_empty() {
         let scripts = gtk::Label::new(Some(&format!("Scripts: {}", project.scripts.iter().take(8).cloned().collect::<Vec<_>>().join(", "))));
         scripts.set_xalign(0.0);
@@ -472,16 +470,22 @@ pub(super) fn project_detail_content(_window: &gtk::ApplicationWindow, _state: &
         scripts.set_ellipsize(gtk::pango::EllipsizeMode::End);
         body.append(&scripts);
     }
-    let output = text_view(&body);
+    let output_area = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    output_area.add_css_class("megaman-command-output");
+    output_area.set_size_request(-1, 180);
+    let output = text_view(&output_area);
     output.set_text("Reading project…");
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let commands = qfind_core::components::task_commands(&path);
-    if !commands.is_empty() {
+    let has_commands = !commands.is_empty();
+    if has_commands {
         let choices = gtk::DropDown::from_strings(
             &commands.iter().map(|(_, name, _)| name.as_str()).collect::<Vec<_>>(),
         );
+        choices.set_hexpand(true);
         actions.append(&choices);
-        let run = gtk::Button::with_label("Run command");
+        let run = gtk::Button::with_label("Run");
+        run.add_css_class("suggested-action");
         actions.append(&run);
         let output = output.clone();
         let path = path.clone();
@@ -507,7 +511,18 @@ pub(super) fn project_detail_content(_window: &gtk::ApplicationWindow, _state: &
         hint.set_xalign(0.0);
         body.append(&hint);
     }
-    body.prepend(&actions);
+    if !has_commands {
+        let empty = gtk::Label::new(Some("No build commands detected for this project."));
+        empty.set_wrap(true);
+        empty.add_css_class("dim-label");
+        body.append(&empty);
+    }
+    body.append(&actions);
+    let output_heading = gtk::Label::new(Some("ACTIVITY & OUTPUT"));
+    output_heading.set_xalign(0.0);
+    output_heading.add_css_class("megaman-eyebrow");
+    body.append(&output_heading);
+    body.append(&output_area);
     glib::MainContext::default().spawn_local(async move {
         let result = gio::spawn_blocking(move || {
             let mut report = format!("{}\n", path.display());
@@ -535,15 +550,6 @@ pub(super) fn project_detail_content(_window: &gtk::ApplicationWindow, _state: &
                     let text = String::from_utf8_lossy(&log.stdout);
                     if !text.trim().is_empty() {
                         report.push_str(&format!("\nRecent commits\n{text}"));
-                    }
-                }
-            }
-            for name in ["Cargo.toml", "package.json"] {
-                if let Ok(file) = fs::File::open(path.join(name)) {
-                    use std::io::Read;
-                    let mut content = String::new();
-                    if file.take(65_536).read_to_string(&mut content).is_ok() {
-                        report.push_str(&format!("\n{name} (up to 64 KiB)\n{content}\n"));
                     }
                 }
             }
@@ -713,4 +719,26 @@ pub(super) fn project_content_at(window: &gtk::ApplicationWindow, state: &Rc<Ref
         review.present();
     });
     body
+}
+
+#[cfg(test)]
+mod transfer_tests {
+    use super::*;
+
+    #[test]
+    fn dropped_files_copy_and_reject_unsafe_destinations() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let dest = temp.path().join("destination");
+        fs::create_dir_all(source.join("nested")).unwrap();
+        fs::create_dir(&dest).unwrap();
+        fs::write(source.join("note.txt"), "keep me").unwrap();
+        assert!(transfer_paths(&[source.clone()], &source.join("nested"), "batch-copy").is_err());
+        transfer_paths(&[source.clone()], &dest, "batch-copy").unwrap();
+        assert_eq!(fs::read_to_string(dest.join("source/note.txt")).unwrap(), "keep me");
+        assert!(source.join("note.txt").exists());
+        assert!(transfer_paths(&[source.clone()], &dest, "batch-copy").is_err());
+        assert_eq!(fs::read_to_string(dest.join("source/note.txt")).unwrap(), "keep me");
+        assert!(transfer_paths(&[source.clone(), source.join("nested")], temp.path(), "batch-copy").is_err());
+    }
 }
