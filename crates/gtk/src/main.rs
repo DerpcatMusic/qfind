@@ -539,16 +539,12 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     settings::apply_appearance(&Config::load());
 
     let header = gtk::HeaderBar::new();
-    let brand = gtk::Label::new(Some("Megaman"));
-    brand.add_css_class("qfind-brand");
-    brand.set_width_chars(12);
-    brand.set_xalign(0.0);
-    let identity = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    // One mark only: the icon. The window title and app name already say "Megaman".
     let logo = gtk::Image::from_icon_name("megaman");
-    logo.set_pixel_size(36);
-    identity.append(&logo);
-    identity.append(&brand);
-    header.pack_start(&identity);
+    logo.set_pixel_size(32);
+    logo.set_tooltip_text(Some("Megaman"));
+    logo.set_margin_start(4);
+    header.pack_start(&logo);
     let address_bar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     address_bar.add_css_class("qfind-address");
     header.add_css_class("qfind-shell");
@@ -2041,8 +2037,8 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     // (lists, scrolling, thumbnails, chrome) through this backend.
     if let Some(native) = window.native() {
         match native.renderer().map(|renderer| renderer.type_().name()) {
-            Some(name) => eprintln!("qfind: GSK renderer: {name}"),
-            None => eprintln!("qfind: GSK renderer: unavailable (software fallback)"),
+            Some(name) => eprintln!("megaman: GSK renderer: {name}"),
+            None => eprintln!("megaman: GSK renderer: unavailable (software fallback)"),
         }
     }
     start_rebuild(&state, &window, false);
@@ -2938,7 +2934,10 @@ fn paste_here(window: &gtk::ApplicationWindow, state: &Rc<RefCell<State>>) {
 }
 
 fn open_terminal(state: &Rc<RefCell<State>>) {
-    let dir = current_dir(state);
+    open_terminal_at(state, current_dir(state));
+}
+
+fn open_terminal_at(state: &Rc<RefCell<State>>, dir: PathBuf) {
     let mut candidates: Vec<String> = std::env::var("TERMINAL").ok().into_iter().collect();
     candidates.extend(["xdg-terminal-exec", "x-terminal-emulator", "kitty", "alacritty", "foot", "gnome-terminal", "konsole"].map(String::from));
     let spawned = candidates
@@ -3703,7 +3702,8 @@ mod tests {
 
         {
             let mut state = state.borrow_mut();
-            state.search.set_text("");
+            // Empty queries list the folder live in every mode; a query makes Qfind recurse.
+            state.search.set_text("e");
             state.model.set_catalog(catalog.clone());
             state.folder = catalog.folder(&root);
             state.catalog = Some(catalog);

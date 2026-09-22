@@ -60,8 +60,8 @@ pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
     let win = gtk::Window::builder()
         .transient_for(parent)
         .title("Megaman Settings")
-        .default_width(520)
-        .default_height(560)
+        .default_width(560)
+        .default_height(640)
         .modal(true)
         .build();
     let header = gtk::HeaderBar::new();
@@ -82,11 +82,13 @@ pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
     win.add_controller(keys);
 
     let exclude = list_editor(
-        "Exclude (names or globs, extra junk skipped on Rebuild)",
+        "Exclude",
+        "Names or globs skipped on the next Rebuild.",
         &cfg.exclude,
     );
     let include = list_editor(
-        "Include Mounts (empty = discover all local disks)",
+        "Mounts",
+        "Roots to index. Empty discovers every local disk.",
         &cfg.include
             .iter()
             .map(|p| p.display().to_string())
@@ -135,25 +137,41 @@ pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
     gtk_theme_drop.set_tooltip_text(Some("system follows the desktop. Adwaita-dark forces dark."));
     gtk_theme_drop.set_selected(index_of(GTK_THEMES, normalize_gtk_theme(&cfg.gtk_theme)));
 
-    let vbox = gtk::Box::new(gtk::Orientation::Vertical, 10);
-    vbox.set_margin_start(14);
-    vbox.set_margin_end(14);
-    vbox.set_margin_top(12);
-    vbox.set_margin_bottom(12);
-    vbox.append(&exclude.root);
-    vbox.append(&include.root);
-    vbox.append(&label("Space preview"));
-    vbox.append(&preview_drop);
-    vbox.append(&label("Query matching"));
-    vbox.append(&match_drop);
-    vbox.append(&label("Open Hits"));
-    vbox.append(&open_drop);
-    vbox.append(&label("Editor (empty = EDITOR, then VISUAL)"));
-    vbox.append(&editor_entry);
-    vbox.append(&label("Accent theme"));
-    vbox.append(&theme_drop);
-    vbox.append(&label("GTK theme"));
-    vbox.append(&gtk_theme_drop);
+    let vbox = gtk::Box::new(gtk::Orientation::Vertical, 18);
+    vbox.add_css_class("megaman-settings");
+    vbox.set_margin_start(20);
+    vbox.set_margin_end(20);
+    vbox.set_margin_top(16);
+    vbox.set_margin_bottom(16);
+
+    let search = group("Search");
+    row(&search.1, "Query matching", "Fuzzy lets letters skip; Substring must be contiguous.", &match_drop);
+    row(&search.1, "Space preview", "Which Hit the preview follows.", &preview_drop);
+    vbox.append(&search.0);
+
+    let opening = group("Opening");
+    row(&opening.1, "Open Hits with", "Auto picks the editor for text and the desktop handler otherwise.", &open_drop);
+    editor_entry.set_width_chars(18);
+    row(&opening.1, "Editor", "Empty uses $EDITOR, then $VISUAL.", &editor_entry);
+    vbox.append(&opening.0);
+
+    let appearance = group("Appearance");
+    row(&appearance.1, "Accent", "Shared with the TUI and every other frontend.", &theme_drop);
+    row(&appearance.1, "GTK theme", "system follows the desktop.", &gtk_theme_drop);
+    vbox.append(&appearance.0);
+
+    let index = group("Index");
+    exclude.root.set_margin_start(12);
+    exclude.root.set_margin_end(12);
+    exclude.root.set_margin_top(8);
+    exclude.root.set_margin_bottom(8);
+    index.1.append(&exclude.root);
+    include.root.set_margin_start(12);
+    include.root.set_margin_end(12);
+    include.root.set_margin_top(8);
+    include.root.set_margin_bottom(8);
+    index.1.append(&include.root);
+    vbox.append(&index.0);
 
     let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     buttons.set_halign(gtk::Align::End);
@@ -263,6 +281,48 @@ fn label(text: &str) -> gtk::Label {
     l
 }
 
+fn hint(text: &str) -> gtk::Label {
+    let l = gtk::Label::new(Some(text));
+    l.set_xalign(0.0);
+    l.set_wrap(true);
+    l.add_css_class("dim-label");
+    l.add_css_class("caption");
+    l
+}
+
+/// A titled card of rows, the GNOME preferences-group shape without libadwaita.
+fn group(title: &str) -> (gtk::Box, gtk::ListBox) {
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    let heading = label(title);
+    heading.add_css_class("megaman-settings-group");
+    root.append(&heading);
+    let list = gtk::ListBox::new();
+    list.add_css_class("boxed-list");
+    list.set_selection_mode(gtk::SelectionMode::None);
+    root.append(&list);
+    (root, list)
+}
+
+/// Title + subtitle on the left, the control on the right.
+fn row(list: &gtk::ListBox, title: &str, subtitle: &str, control: &impl IsA<gtk::Widget>) {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 16);
+    row.set_margin_start(12);
+    row.set_margin_end(12);
+    row.set_margin_top(10);
+    row.set_margin_bottom(10);
+    let text = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    text.set_hexpand(true);
+    text.set_valign(gtk::Align::Center);
+    let name = gtk::Label::new(Some(title));
+    name.set_xalign(0.0);
+    text.append(&name);
+    text.append(&hint(subtitle));
+    row.append(&text);
+    control.set_valign(gtk::Align::Center);
+    row.append(control);
+    list.append(&row);
+}
+
 #[derive(Clone)]
 struct ListEdit {
     root: gtk::Box,
@@ -299,9 +359,12 @@ impl ListEdit {
     }
 }
 
-fn list_editor(title: &str, items: &[String]) -> ListEdit {
-    let root = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    root.append(&label(title));
+fn list_editor(title: &str, subtitle: &str, items: &[String]) -> ListEdit {
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    let name = gtk::Label::new(Some(title));
+    name.set_xalign(0.0);
+    root.append(&name);
+    root.append(&hint(subtitle));
     let rows = gtk::Box::new(gtk::Orientation::Vertical, 4);
     if items.is_empty() {
         rows.append(&entry_row(""));
@@ -313,6 +376,8 @@ fn list_editor(title: &str, items: &[String]) -> ListEdit {
     let rows = Rc::new(RefCell::new(rows));
     root.append(&*rows.borrow());
     let add = gtk::Button::with_label("Add");
+    add.set_halign(gtk::Align::Start);
+    add.add_css_class("flat");
     {
         let rows = Rc::clone(&rows);
         add.connect_clicked(move |_| {
@@ -329,6 +394,7 @@ fn entry_row(text: &str) -> gtk::Box {
     entry.set_text(text);
     entry.set_hexpand(true);
     let rm = gtk::Button::from_icon_name("list-remove-symbolic");
+    rm.add_css_class("flat");
     {
         let row = row.clone();
         rm.connect_clicked(move |_| {

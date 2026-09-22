@@ -428,9 +428,9 @@ pub fn index_projects(catalog: &Catalog) -> Result<Vec<Project>, String> {
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
             {
-                if value["snapshot"] == serde_json::json!(catalog.path())
-                    && value["stamp"] == serde_json::json!(snapshot_stamp)
-                {
+                // Only the snapshot path gates the cache: the stamp changes on every
+                // subtree refresh, which used to force a full project re-scan.
+                if value["snapshot"] == serde_json::json!(catalog.path()) {
                     if let Ok(mut projects) =
                         serde_json::from_value::<Vec<Project>>(value["projects"].clone())
                     {

@@ -14,7 +14,7 @@ use qfind_core::{
     squarify, walk_visible,
 };
 
-use crate::actions::{content_for_path, content_for_paths, preview, selected_row, selected_rows};
+use crate::actions::{content_for_paths, preview, selected_row, selected_rows};
 use crate::row::RowData;
 
 pub struct Host {
@@ -496,27 +496,7 @@ pub fn make_name_factory(
             }
             row.append(&icon);
             row.append(&name);
-            let drag = gtk::DragSource::new();
-            drag.set_actions(gdk::DragAction::COPY);
-            drag.set_propagation_phase(gtk::PropagationPhase::Capture);
-            let list_item = item.clone();
-            let selection_for_drag = selection_for_row.clone();
-            drag.connect_prepare(move |source, _, _| {
-                if let Some(widget) = source.widget() {
-                    source.set_icon(Some(&gtk::WidgetPaintable::new(Some(&widget))), 8, 8);
-                }
-                source.set_state(gtk::EventSequenceState::Claimed);
-                let item = list_item.downcast_ref::<gtk::ListItem>()?;
-                let data = item.item().and_downcast::<RowData>()?;
-                let rows = selected_rows(&selection_for_drag);
-                if selection_for_drag.is_selected(item.position()) && rows.len() > 1 {
-                    let paths = rows.into_iter().map(|row| row.path()).collect::<Vec<_>>();
-                    content_for_paths(&paths)
-                } else {
-                    content_for_path(&data.path())
-                }
-            });
-            row.add_controller(drag);
+
             attach_hover(&row, item.clone(), Rc::clone(&hovered_setup));
             let right = gtk::GestureClick::new();
             right.set_button(gdk::BUTTON_SECONDARY);
@@ -797,27 +777,7 @@ pub fn make_grid_factory(
             captions.append(&size);
             col.append(&captions);
             attach_hover(&col, item.clone(), Rc::clone(&hovered));
-            let drag = gtk::DragSource::new();
-            drag.set_actions(gdk::DragAction::COPY);
-            drag.set_propagation_phase(gtk::PropagationPhase::Capture);
-            let list_item = item.clone();
-            let selection_for_drag = selection.clone();
-            drag.connect_prepare(move |source, _, _| {
-                if let Some(widget) = source.widget() {
-                    source.set_icon(Some(&gtk::WidgetPaintable::new(Some(&widget))), 8, 8);
-                }
-                source.set_state(gtk::EventSequenceState::Claimed);
-                let item = list_item.downcast_ref::<gtk::ListItem>()?;
-                let data = item.item().and_downcast::<RowData>()?;
-                let rows = selected_rows(&selection_for_drag);
-                if selection_for_drag.is_selected(item.position()) && rows.len() > 1 {
-                    let paths = rows.into_iter().map(|row| row.path()).collect::<Vec<_>>();
-                    content_for_paths(&paths)
-                } else {
-                    content_for_path(&data.path())
-                }
-            });
-            col.add_controller(drag);
+
             let right = gtk::GestureClick::new();
             right.set_button(gdk::BUTTON_SECONDARY);
             let list_item = item.clone();
@@ -1016,4 +976,58 @@ pub fn make_tree_factory(
         paint_zebra(row.upcast_ref(), zebra.get(), item.position());
     });
     factory
+}
+
+// Capture before the child view's rubber-band gesture. Empty space still selects.
+pub fn attach_file_drag(widget: &impl IsA<gtk::Widget>, selection: impl IsA<gtk::SelectionModel>) {
+    let selection = selection.upcast::<gtk::SelectionModel>();
+    let press = gtk::GestureClick::new();
+    press.set_button(gdk::BUTTON_PRIMARY);
+    press.set_propagation_phase(gtk::PropagationPhase::Capture);
+    press.connect_pressed(|gesture, _, x, y| {
+        let Some(widget) = gesture.widget() else { return; };
+        let rubberband = file_item_at(&widget, x, y).is_none();
+        let Some(view) = widget.downcast_ref::<gtk::ScrolledWindow>().and_then(|scroll| scroll.child()) else { return; };
+        if let Some(list) = view.downcast_ref::<gtk::ColumnView>() { list.set_enable_rubberband(rubberband); }
+        if let Some(grid) = view.downcast_ref::<gtk::GridView>() { grid.set_enable_rubberband(rubberband); }
+        if let Some(tree) = view.downcast_ref::<gtk::ListView>() { tree.set_enable_rubberband(rubberband); }
+    });
+    widget.add_controller(press);
+    let drag = gtk::DragSource::new();
+    drag.set_actions(gdk::DragAction::COPY);
+    drag.set_propagation_phase(gtk::PropagationPhase::Capture);
+    drag.connect_prepare(move |source, x, y| {
+        let widget = source.widget()?;
+        let item = file_item_at(&widget, x, y)?;
+        let path = item.tooltip_text()?.to_string();
+        let rows = selected_rows(&selection);
+        let paths = if rows.iter().any(|row| row.path() == path) {
+            rows.into_iter().map(|row| row.path()).collect::<Vec<_>>()
+        } else {
+            vec![path]
+        };
+        let icon = gtk::IconTheme::for_display(&widget.display()).lookup_icon(
+            "text-x-generic", &[], 48, 1, gtk::TextDirection::None, gtk::IconLookupFlags::empty(),
+        );
+        source.set_icon(Some(&icon), 8, 8);
+        content_for_paths(&paths)
+    });
+    widget.add_controller(drag);
+}
+
+pub fn file_item_at(widget: &gtk::Widget, x: f64, y: f64) -> Option<gtk::Widget> {
+    let mut hit = widget.pick(x, y, gtk::PickFlags::DEFAULT)?;
+    loop {
+        if hit.has_css_class("qfind-item") { return Some(hit); }
+        if hit == *widget { return None; }
+        // Metadata cells are siblings of the filename cell in ColumnView.
+        if hit.css_name() == "row" {
+            let item = RefCell::new(None);
+            walk_apply(&hit, &|child: &gtk::Widget| {
+                if child.has_css_class("qfind-item") { *item.borrow_mut() = Some(child.clone()); }
+            });
+            return item.into_inner();
+        }
+        hit = hit.parent()?;
+    }
 }

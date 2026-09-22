@@ -42,7 +42,7 @@ fn dialog(window: &gtk::ApplicationWindow, title: &str) -> (gtk::Window, gtk::Bo
     (dialog, body)
 }
 
-fn text_view(body: &gtk::Box) -> gtk::TextBuffer {
+pub(super) fn text_view(body: &gtk::Box) -> gtk::TextBuffer {
     let view = gtk::TextView::builder()
         .editable(false)
         .cursor_visible(false)

@@ -691,7 +691,8 @@ impl Pane {
 
     pub fn set_catalog(&self, catalog: Catalog) {
         self.detail.set_text("Building chart…");
-        self.refresh_projects(catalog.clone(), true);
+        // A subtree refresh rewrites the snapshot; that must not re-scan every repository.
+        self.refresh_projects(catalog.clone(), false);
         let generation = self.catalog_generation.get().wrapping_add(1);
         self.catalog_generation.set(generation);
         let this = self.clone();
