@@ -14,9 +14,9 @@ portal = ["dep:async-channel", "dep:zbus"]
 anyhow.workspace = true
 async-channel = { workspace = true, optional = true }
 dirs.workspace = true
-glow = "0.16"
+glow = "0.18"
 gtk.workspace = true
-libloading = "0.8"
+libloading = "0.9"
 image.workspace = true
 qfind-core = { workspace = true, features = ["archives"] }
 
