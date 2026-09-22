@@ -12,7 +12,7 @@ jobs:
   linux:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7.0.1
       - run: sudo apt-get update && sudo apt-get install -y libarchive-dev pkg-config
       - run: ./packaging/release-tui.sh
       - uses: actions/upload-artifact@v4
@@ -23,7 +23,7 @@ jobs:
   macos:
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7.0.1
       - name: Build universal app, sign, notarize, and package
         env:
           APPLE_APPLICATION_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_APPLICATION_CERTIFICATE_P12_BASE64 }}
@@ -46,7 +46,7 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7.0.1
       - shell: pwsh
         run: .\packaging\release-windows.ps1
       - uses: actions/upload-artifact@v4
