@@ -15,6 +15,20 @@ pub const THEMES: &[&str] = &[
     "aurora",
 ];
 
+/// Appearance modes: `custom` = Megaman palette, icon overlay and `custom.css`;
+/// `native` = the desktop's GTK/Qt theme untouched (accent from the toolkit).
+pub const APPEARANCES: &[&str] = &["custom", "native"];
+
+/// Lowercase known appearance mode, falling back to `custom`.
+#[must_use]
+pub fn normalize_appearance(name: &str) -> &str {
+    if name.trim().eq_ignore_ascii_case("native") {
+        "native"
+    } else {
+        "custom"
+    }
+}
+
 /// Icon packs: `qfind` (bundled overlay), `system` (desktop theme), `ascii` (text fallback).
 pub const ICON_PACKS: &[&str] = &["qfind", "system", "ascii"];
 
