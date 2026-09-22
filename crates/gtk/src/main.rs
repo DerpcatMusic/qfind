@@ -538,18 +538,44 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
         .default_height(820)
         .build();
 
-    icons::install();
+    let cfg = Config::load();
+    let native = settings::is_native(&cfg);
+    if !native {
+        icons::install();
+    }
     gtk::Window::set_default_icon_name("megaman");
     let css = gtk::CssProvider::new();
-    css.load_from_string(include_str!("design.css"));
+    let design = include_str!("design.css");
+    let sheet = if native {
+        design
+            .split("/* --- custom palette ---")
+            .next()
+            .unwrap_or(design)
+    } else {
+        design
+    };
+    css.load_from_string(sheet);
     if let Some(display) = gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
             &display,
             &css,
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
+        // User overrides: ~/.config/qfind/custom.css, loaded last so it wins.
+        if !native
+            && let Some(user) = Config::path().parent().map(|d| d.join("custom.css"))
+            && user.is_file()
+        {
+            let extra = gtk::CssProvider::new();
+            extra.load_from_path(&user);
+            gtk::style_context_add_provider_for_display(
+                &display,
+                &extra,
+                gtk::STYLE_PROVIDER_PRIORITY_USER,
+            );
+        }
     }
-    settings::apply_appearance(&Config::load());
+    settings::apply_appearance(&cfg);
 
     let header = gtk::HeaderBar::new();
     // One mark only. Desktops whose button layout already shows the window
