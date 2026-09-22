@@ -3291,7 +3291,8 @@ fn delete_rows(state: &Rc<RefCell<State>>, window: &gtk::ApplicationWindow, rows
     let state = Rc::clone(state);
     let window = window.clone();
     glib::MainContext::default().spawn_local(async move {
-        if confirm.choose_future(Some(&window)).await != Ok(1) {
+        let choice = confirm.choose_future(Some(&window)).await;
+        if choice != Ok(1) {
             return;
         }
         let mut deleted = 0usize;

@@ -278,11 +278,35 @@ pub fn delete(path: impl AsRef<Path>) -> Result<Mutation> {
     Ok(Mutation::Deleted(path.to_path_buf()))
 }
 
-/// Trash root: `$XDG_DATA_HOME/qfind/Trash/files` (freedesktop-style).
+/// Trash root: the desktop's `$XDG_DATA_HOME/Trash/files`, so trashed
+/// items show up in every file manager's Trash.
 #[must_use]
 pub fn trash_root() -> PathBuf {
     let base = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
-    base.join("qfind").join("Trash").join("files")
+    base.join("Trash").join("files")
+}
+
+/// `<root>/../info/<name>.trashinfo` (freedesktop trash spec).
+fn info_path(trashed: &Path) -> Option<PathBuf> {
+    let files = trashed.parent()?;
+    let mut name = trashed.file_name()?.to_os_string();
+    name.push(".trashinfo");
+    Some(files.parent()?.join("info").join(name))
+}
+
+fn write_info(trashed: &Path, original: &Path) {
+    let Some(info) = info_path(trashed) else { return };
+    let Some(dir) = info.parent() else { return };
+    let _ = fs::create_dir_all(dir);
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    // ponytail: epoch seconds instead of ISO 8601; file managers only need Path.
+    let body = format!(
+        "[Trash Info]\nPath={}\nDeletionDate={secs}\n",
+        original.to_string_lossy()
+    );
+    let _ = fs::write(info, body);
 }
 
 fn unique_in(dir: &Path, name: &std::ffi::OsStr) -> PathBuf {
@@ -317,6 +341,7 @@ pub fn trash_into(root: &Path, path: impl AsRef<Path>) -> Result<(PathBuf, Mutat
     };
     let dest = unique_in(root, &name);
     move_tree(path, &dest)?;
+    write_info(&dest, path);
     refresh_sizes(path);
     refresh_sizes(&dest);
     Ok((
@@ -336,6 +361,9 @@ pub fn restore(trashed: impl AsRef<Path>, original: impl AsRef<Path>) -> Result<
     check_dest_free(original)?;
     check_dest_parent(original)?;
     move_tree(trashed, original)?;
+    if let Some(info) = info_path(trashed) {
+        let _ = fs::remove_file(info);
+    }
     refresh_sizes(trashed);
     refresh_sizes(original);
     Ok(Mutation::Restored {

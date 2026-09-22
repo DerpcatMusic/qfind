@@ -567,7 +567,7 @@ pub fn new(window: &gtk::ApplicationWindow, state: Rc<RefCell<State>>, open: imp
                 text.set_xalign(0.0); text.set_hexpand(true); text.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
                 text.set_tooltip_text(Some(&tree.to_string_lossy()));
                 if tree == &project.path { text.add_css_class("heading"); }
-                if let Some(sibling) = sibling { if sibling.dirty + sibling.untracked > 0 { text.set_text(&format!("{}  ·  {}", text.text(), health_text(sibling))); } }
+                if let Some(sibling) = sibling.filter(|s| s.dirty + s.untracked > 0) { text.set_text(&format!("{}  ·  {}", text.text(), health_text(sibling))); }
                 row.append(&text);
                 let open_button = gtk::Button::from_icon_name("folder-open-symbolic");
                 open_button.add_css_class("flat");
@@ -628,14 +628,14 @@ pub fn new(window: &gtk::ApplicationWindow, state: Rc<RefCell<State>>, open: imp
                 }
             }).unwrap_or_default();
             // Prefer the backend's sibling list when available.
-            if let Some(active) = &selected {
-                if !active.worktrees.is_empty() {
+            if let Some(active) = selected.as_ref().filter(|active| !active.worktrees.is_empty()) {
+                {
                     let known: HashSet<PathBuf> = items.iter().map(|project| project.path.clone()).collect();
                     for sibling in &active.worktrees {
-                        if !known.contains(sibling) {
-                            if let Some(extra) = projects.borrow().iter().find(|project| &project.path == sibling).cloned() {
-                                items.push(extra);
-                            }
+                        if !known.contains(sibling)
+                            && let Some(extra) = projects.borrow().iter().find(|project| &project.path == sibling).cloned()
+                        {
+                            items.push(extra);
                         }
                     }
                 }

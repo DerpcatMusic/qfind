@@ -398,10 +398,8 @@ fn entry_row(text: &str) -> gtk::Box {
     {
         let row = row.clone();
         rm.connect_clicked(move |_| {
-            if let Some(parent) = row.parent() {
-                if let Ok(box_) = parent.downcast::<gtk::Box>() {
-                    box_.remove(&row);
-                }
+            if let Some(Ok(box_)) = row.parent().map(|p| p.downcast::<gtk::Box>()) {
+                box_.remove(&row);
             }
         });
     }
