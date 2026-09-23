@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@v6
       - run: sudo apt-get update && sudo apt-get install -y libarchive-dev pkg-config
       - run: ./packaging/release-tui.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: qfind-linux
           path: target/dist/*.tar.gz
@@ -35,7 +35,7 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: ./packaging/release-macos.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: qfind-macos-universal-gui-notarized
           path: |
@@ -49,7 +49,7 @@ jobs:
       - uses: actions/checkout@v6
       - shell: pwsh
         run: .\packaging\release-windows.ps1
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: qfind-windows-winui
           path: target/dist/*.zip
