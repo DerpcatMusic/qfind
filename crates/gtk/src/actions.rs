@@ -421,6 +421,13 @@ pub(crate) fn preview_widget(p: &Path, play: bool) -> gtk::Widget {
     if p.is_dir() {
         return fallback_preview(p, "inode/directory").upcast();
     }
+    // Every surface below this line opens the file: symphonia, playbin, the
+    // text reader, the thumbnailer. A fifo, a socket, or a symlink to
+    // /dev/zero would block or read forever in at least one of them, so a
+    // Preview is only ever built for something a reader can finish.
+    if !std::fs::metadata(p).is_ok_and(|meta| meta.is_file()) {
+        return fallback_preview(p, "application/octet-stream").upcast();
+    }
     let (ctype, _) = gio::content_type_guess(Some(p), None::<&[u8]>);
     // Audio and video get a real surface: decoded waveform with a transport and
     // scrubbing, and in-place playback. Both are checked before the thumbnailer,
