@@ -401,7 +401,13 @@ pub fn audio_preview(path: &Path, play: bool) -> gtk::Widget {
         let decoded = gio::spawn_blocking(move || audio::decode(&path)).await;
         match decoded {
             Ok(Ok(track)) => {
-                let length = track.length.clone();
+                // A long file is capped in memory, and saying so beats a
+                // waveform that stops for no visible reason.
+                let length = if track.clipped {
+                    format!("first {}", track.length)
+                } else {
+                    track.length.clone()
+                };
                 let summary = track.detail.clone();
                 status.set_text(&format!("{length} · click or drag to seek"));
                 detail.set_text(&summary);

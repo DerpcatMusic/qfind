@@ -35,6 +35,9 @@ pub struct Track {
     pub length: String,
     /// Bitrate or channel summary, e.g. `48 kHz · stereo`.
     pub detail: String,
+    /// The file was longer than [`MAX_SAMPLES`], so this is only its head. The
+    /// Preview says so rather than quietly showing half an album.
+    pub clipped: bool,
 }
 
 impl Clone for Track {
@@ -48,6 +51,7 @@ impl Clone for Track {
             peaks: Vec::new(),
             length: self.length.clone(),
             detail: self.detail.clone(),
+            clipped: self.clipped,
         }
     }
 }
@@ -155,8 +159,24 @@ pub fn is_audio(path: &Path, content_type: &str) -> bool {
     false
 }
 
+/// The most PCM the Preview is willing to hold, as f32 samples.
+///
+/// Ten minutes of 48 kHz stereo is 115 million samples, about 230 MB. Playback
+/// needs the signal in memory to make seeking a buffer offset, so this is a
+/// real limit rather than a formality: without it a header claiming four
+/// gigabytes is a request for sixteen gigabytes and an OOM kill.
+const MAX_SAMPLES: usize = 48_000 * 2 * 600;
+
 /// Decode `path` into memory, failing with a reason the UI can show.
 pub fn decode(path: &Path) -> Result<Track, String> {
+    // Opening a fifo for reading waits for a writer that may never arrive, and
+    // a symlink to /dev/zero or /dev/urandom never ends. Both look like audio
+    // to a user, so both are turned away before anything blocks.
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() => {}
+        Ok(_) => return Err("not a regular file".into()),
+        Err(error) => return Err(format!("{error}")),
+    }
     let file = std::fs::File::open(path).map_err(|error| format!("{error}"))?;
     let stream = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
@@ -184,6 +204,7 @@ pub fn decode(path: &Path) -> Result<Track, String> {
     let mut sample_rate = 0u32;
     let mut channels = 0u16;
     let mut samples: Vec<f32> = Vec::new();
+    let mut clipped = false;
     loop {
         let packet = match format.next_packet() {
             Ok(packet) => packet,
@@ -214,6 +235,15 @@ pub fn decode(path: &Path) -> Result<Track, String> {
                 // public `SignalSpec` does not expose.
                 let mut buffer = SampleBuffer::<f32>::new(frames as u64, spec);
                 buffer.copy_interleaved_ref(decoded);
+                // Stop rather than grow: a file that claims more than the cap
+                // gives the user what fits and says nothing, which beats an
+                // allocation the machine cannot satisfy.
+                let room = MAX_SAMPLES.saturating_sub(samples.len());
+                if buffer.samples().len() >= room {
+                    samples.extend_from_slice(&buffer.samples()[..room]);
+                    clipped = true;
+                    break;
+                }
                 samples.extend_from_slice(buffer.samples());
             }
             // One undecodable frame is not worth failing the whole Preview.
@@ -239,6 +269,7 @@ pub fn decode(path: &Path) -> Result<Track, String> {
         peaks,
         length: clock(duration),
         detail,
+        clipped,
     })
 }
 
@@ -765,5 +796,134 @@ mod tests {
         assert!(decode(&path).is_err(), "must fail cleanly");
         let missing = dir.path().join("gone.wav");
         assert!(decode(&missing).is_err());
+    }
+}
+
+#[cfg(test)]
+pub fn envelope_for_test(samples: &[f32], channels: usize) -> Vec<(f32, f32)> {
+    envelope(samples, channels as u16, WAVEFORM_BUCKETS)
+}
+
+#[cfg(test)]
+mod hostile {
+    use super::*;
+    use std::io::Write;
+    use std::os::unix::fs::FileTypeExt;
+
+    /// A Preview must not be able to hang the process. `open()` on a fifo waits
+    /// for a writer that never arrives, so a `song.wav` that happens to be a
+    /// fifo left the window on "Decoding…" forever and leaked a thread.
+    #[test]
+    fn a_fifo_never_hangs_the_decoder() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("frozen.wav");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .is_ok_and(|status| status.success());
+        if !made {
+            return; // no mkfifo here; nothing to prove
+        }
+        assert!(std::fs::metadata(&path).unwrap().file_type().is_fifo());
+
+        let start = Instant::now();
+        let outcome = decode(&path);
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "decoding a fifo took {:?}",
+            start.elapsed()
+        );
+        assert!(outcome.is_err(), "a fifo is not audio and must not decode");
+    }
+
+    /// A symlink to a character device is the same trap wearing another hat.
+    #[test]
+    fn a_device_is_not_audio() {
+        assert!(decode(Path::new("/dev/zero")).is_err(), "reads never end");
+        assert!(decode(Path::new("/dev/null")).is_err(), "no audio there");
+    }
+
+    /// A WAV header claiming four gigabytes must not turn into sixteen gigabytes
+    /// of `f32`. The Preview takes what fits and says it was cut.
+    #[test]
+    fn a_header_that_lies_about_its_size_is_capped_not_trusted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("huge.wav");
+        let mut header: Vec<u8> = Vec::new();
+        header.extend_from_slice(b"RIFF");
+        header.extend_from_slice(&u32::MAX.to_le_bytes());
+        header.extend_from_slice(b"WAVEfmt ");
+        header.extend_from_slice(&16u32.to_le_bytes());
+        header.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        header.extend_from_slice(&2u16.to_le_bytes()); // stereo
+        header.extend_from_slice(&44_100u32.to_le_bytes());
+        header.extend_from_slice(&176_400u32.to_le_bytes());
+        header.extend_from_slice(&4u16.to_le_bytes());
+        header.extend_from_slice(&16u16.to_le_bytes());
+        header.extend_from_slice(b"data");
+        header.extend_from_slice(&u32::MAX.to_le_bytes());
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(&header).unwrap();
+        file.set_len(u64::from(u32::MAX)).unwrap();
+        drop(file);
+
+        let track = decode(&path).expect("the head of the file is real audio");
+        assert!(track.clipped, "the user has to be told it was cut short");
+        assert!(
+            track.samples.len() <= MAX_SAMPLES,
+            "held {} samples, over the cap of {MAX_SAMPLES}",
+            track.samples.len()
+        );
+        // And what it does hold is still a usable waveform.
+        assert!(!track.peaks.is_empty());
+    }
+}
+// Throw absurd values at the pure helpers. A panic here is a crash the user
+// reaches by accident, not by malice.
+#[cfg(test)]
+mod edge {
+    use super::*;
+
+    #[test]
+    fn clock_survives_nonsense() {
+        for bad in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            -0.0,
+            1e300,
+            -1e300,
+        ] {
+            let out = clock(bad);
+            assert!(!out.is_empty());
+            assert!(
+                !out.contains("NaN") && !out.contains("inf"),
+                "{bad} -> {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn envelope_survives_odd_shapes() {
+        for (len, channels) in [(0usize, 1usize), (1, 1), (3, 2), (7, 3), (1, 64), (1024, 0)] {
+            let samples = vec![0.5f32; len * channels.max(1)];
+            let peaks = envelope_for_test(&samples, channels);
+            for (lo, hi) in &peaks {
+                assert!(
+                    lo.is_finite() && hi.is_finite(),
+                    "{len}x{channels}: {lo} {hi}"
+                );
+                assert!(lo <= hi);
+            }
+        }
+    }
+
+    #[test]
+    fn conform_survives_zero_rate_and_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.wav");
+        std::fs::write(&path, b"not a wav at all, just bytes").unwrap();
+        // Must not panic, must not divide by zero into a NaN length.
+        let _ = decode(&path);
     }
 }
