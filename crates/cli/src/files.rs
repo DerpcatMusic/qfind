@@ -411,6 +411,7 @@ fn list(args: ListArgs) -> Result<()> {
             class,
             sort,
             date: DateAge::Any,
+            show_hidden: true,
             // The core browse helper truncates unconditionally; apply the
             // CLI limit after date filtering so the result count stays correct.
             limit: usize::MAX,

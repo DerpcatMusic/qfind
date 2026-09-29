@@ -13,12 +13,17 @@ portal = ["dep:async-channel", "dep:zbus"]
 [dependencies]
 anyhow.workspace = true
 async-channel = { workspace = true, optional = true }
+cpal.workspace = true
 dirs.workspace = true
 glow = "0.16"
+gstreamer.workspace = true
+gstreamer-app.workspace = true
+gstreamer-video.workspace = true
 gtk.workspace = true
 libloading = "0.8"
 image.workspace = true
 qfind-core = { workspace = true, features = ["archives"] }
+symphonia.workspace = true
 
 tempfile.workspace = true
 zbus = { workspace = true, optional = true }

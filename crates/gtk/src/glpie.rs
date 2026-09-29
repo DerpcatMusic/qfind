@@ -273,6 +273,7 @@ impl GlPie {
             pending: Rc::new(RefCell::new(None)),
         };
         pie.connect_realize();
+        pie.connect_unrealize();
         pie.connect_render();
         pie.connect_resize();
         pie
@@ -281,6 +282,28 @@ impl GlPie {
     fn fail(&self, message: String) {
         eprintln!("megaman: GL pie disabled: {message}");
         self.root.set_visible_child_name("gl-error");
+    }
+
+    /// A realized widget can be unrealized (a Stack page swap, a reparent), and
+    /// the old context's object names are meaningless in the new one. Without
+    /// this, a second realize reused names from a destroyed context and the
+    /// chart went blank, or kept drawing into a dead context.
+    fn connect_unrealize(&self) {
+        let state = Rc::clone(&self.state);
+        self.gl.connect_unrealize(move |_| {
+            let mut state = state.borrow_mut();
+            state.ctx = None;
+            state.program = None;
+            state.loc_center = None;
+            state.loc_scale = None;
+            state.loc_viewport = None;
+            state.vao_fill = None;
+            state.vbo_fill = None;
+            state.vao_line = None;
+            state.vbo_line = None;
+            state.fill_count = 0;
+            state.line_count = 0;
+        });
     }
 
     fn connect_realize(&self) {
@@ -320,12 +343,17 @@ impl GlPie {
 
     fn connect_render(&self) {
         let state = Rc::clone(&self.state);
-        self.gl.connect_render(move |_, _| unsafe {
+        self.gl.connect_render(move |area, _| unsafe {
             let state = state.borrow();
             let (Some(ctx), Some(program)) = (state.ctx.clone(), state.program) else {
                 return glib::Propagation::Proceed;
             };
-            ctx.viewport(0, 0, state.viewport.0, state.viewport.1);
+            // The GL framebuffer is the widget allocation *times the device
+            // scale*; passing the logical size drew the chart into the
+            // bottom-left quarter of the widget on any HiDPI display.
+            let scale = area.scale_factor().max(1);
+            let (w, h) = state.viewport;
+            ctx.viewport(0, 0, w * scale, h * scale);
             ctx.clear_color(0.0, 0.0, 0.0, 0.0);
             ctx.clear(glow::COLOR_BUFFER_BIT);
             ctx.use_program(Some(program));
@@ -333,8 +361,8 @@ impl GlPie {
             ctx.uniform_1_f32(state.loc_scale.as_ref(), state.scale);
             ctx.uniform_2_f32(
                 state.loc_viewport.as_ref(),
-                state.viewport.0 as f32,
-                state.viewport.1 as f32,
+                (state.viewport.0 * scale) as f32,
+                (state.viewport.1 * scale) as f32,
             );
             if state.fill_count > 0 {
                 ctx.bind_vertex_array(state.vao_fill);
@@ -359,40 +387,60 @@ impl GlPie {
 
     fn upload(&self, tris: &[f32], lines: &[f32]) {
         self.gl.make_current();
-        let mut state = self.state.borrow_mut();
-        let Some(ctx) = state.ctx.clone() else {
-            return;
+        // Scoped: the draw callback also borrows this cell, so holding the
+        // borrow across a redraw would be a re-entrant borrow.
+        let failure = {
+            let mut state = self.state.borrow_mut();
+            let Some(ctx) = state.ctx.clone() else {
+                return;
+            };
+            // SAFETY: buffers are created from this context, on the main thread.
+            // Reuse them only while they belong to *this* context;
+            // `connect_unrealize` clears them when the context goes away.
+            let buffer =
+                |ctx: &glow::Context,
+                 existing: (Option<glow::NativeVertexArray>, Option<glow::NativeBuffer>),
+                 data: &[f32]| unsafe {
+                    match existing {
+                        (Some(vao), Some(vbo)) => {
+                            ctx.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+                            ctx.buffer_data_u8_slice(
+                                glow::ARRAY_BUFFER,
+                                bytes_of(data),
+                                glow::STATIC_DRAW,
+                            );
+                            Ok((vao, vbo))
+                        }
+                        _ => bind_attribs(ctx, data),
+                    }
+                };
+            let fill = buffer(&ctx, (state.vao_fill, state.vbo_fill), tris);
+            let line = buffer(&ctx, (state.vao_line, state.vbo_line), lines);
+            match (fill, line) {
+                (Ok((vao_fill, vbo_fill)), Ok((vao_line, vbo_line))) => {
+                    state.vao_fill = Some(vao_fill);
+                    state.vbo_fill = Some(vbo_fill);
+                    state.fill_count = (tris.len() / 6) as i32;
+                    state.vao_line = Some(vao_line);
+                    state.vbo_line = Some(vbo_line);
+                    state.line_count = (lines.len() / 6) as i32;
+                    None
+                }
+                (Err(message), _) | (_, Err(message)) => Some(message),
+            }
         };
-        // SAFETY: buffers are created from this context on the main thread.
+        if let Some(message) = failure {
+            // No vertex arrays means a GLES 2.0 context. Fall back to the
+            // explanatory label rather than aborting the process.
+            self.fail(message);
+            return;
+        }
         unsafe {
-            let (vao_fill, vbo_fill) = match (state.vao_fill, state.vbo_fill) {
-                (Some(vao), Some(vbo)) => {
-                    ctx.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
-                    ctx.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes_of(tris), glow::STATIC_DRAW);
-                    (vao, vbo)
-                }
-                _ => bind_attribs(&ctx, tris),
-            };
-            state.vao_fill = Some(vao_fill);
-            state.vbo_fill = Some(vbo_fill);
-            state.fill_count = (tris.len() / 6) as i32;
-            let (vao_line, vbo_line) = match (state.vao_line, state.vbo_line) {
-                (Some(vao), Some(vbo)) => {
-                    ctx.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
-                    ctx.buffer_data_u8_slice(
-                        glow::ARRAY_BUFFER,
-                        bytes_of(lines),
-                        glow::STATIC_DRAW,
-                    );
-                    (vao, vbo)
-                }
-                _ => bind_attribs(&ctx, lines),
-            };
-            state.vao_line = Some(vao_line);
-            state.vbo_line = Some(vbo_line);
-            state.line_count = (lines.len() / 6) as i32;
-            ctx.bind_vertex_array(None);
-            ctx.bind_buffer(glow::ARRAY_BUFFER, None);
+            let state = self.state.borrow();
+            if let Some(ctx) = state.ctx.clone() {
+                ctx.bind_vertex_array(None);
+                ctx.bind_buffer(glow::ARRAY_BUFFER, None);
+            }
         }
     }
 
@@ -421,10 +469,17 @@ impl GlPie {
 unsafe fn bind_attribs(
     ctx: &glow::Context,
     data: &[f32],
-) -> (glow::NativeVertexArray, glow::NativeBuffer) {
+) -> Result<(glow::NativeVertexArray, glow::NativeBuffer), String> {
     unsafe {
-        let vao = ctx.create_vertex_array().expect("pie vertex array");
-        let vbo = ctx.create_buffer().expect("pie vertex buffer");
+        // GLES 2.0 has no vertex arrays, so `create_vertex_array` returns 0 and
+        // glow hands back `None`. Aborting the process over a missing GPU
+        // feature is the wrong answer; `fail()` already flips the stack to the
+        // "needs OpenGL 3.0" label for exactly this.
+        // glow already reports the failure: on a GLES 2.0 context there are no
+        // vertex arrays, and `.expect` aborted the whole process. `fail()`
+        // flips the stack to the "needs OpenGL 3.0" label instead.
+        let vao = ctx.create_vertex_array()?;
+        let vbo = ctx.create_buffer()?;
         ctx.bind_vertex_array(Some(vao));
         ctx.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
         ctx.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes_of(data), glow::STATIC_DRAW);
@@ -435,7 +490,7 @@ unsafe fn bind_attribs(
         ctx.vertex_attrib_pointer_f32(1, 3, glow::FLOAT, false, stride, 2 * 4);
         ctx.enable_vertex_attrib_array(2);
         ctx.vertex_attrib_pointer_f32(2, 1, glow::FLOAT, false, stride, 5 * 4);
-        (vao, vbo)
+        Ok((vao, vbo))
     }
 }
 

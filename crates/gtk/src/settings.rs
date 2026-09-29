@@ -12,8 +12,12 @@ use qfind_core::appearance::{
 use qfind_core::{Config, MatchMode, OpenMode, PreviewMode};
 
 thread_local! {
-    static ACCENT: gtk::CssProvider = gtk::CssProvider::new();
     static SYSTEM_GTK_THEME: RefCell<Option<Option<String>>> = const { RefCell::new(None) };
+    static SYSTEM_ICON_THEME: RefCell<Option<Option<String>>> = const { RefCell::new(None) };
+    /// One Settings window at a time. Each used to carry its own widget state
+    /// and its own `on_save`, so saving in one could Rebuild the Catalog out
+    /// from under another that was still open and stale.
+    static OPEN: Cell<bool> = const { Cell::new(false) };
 }
 
 /// `native`: leave the toolkit theme alone, take its accent.
@@ -21,31 +25,59 @@ pub fn is_native(cfg: &Config) -> bool {
     normalize_appearance(&cfg.appearance) == "native"
 }
 
-/// Push `cfg.theme` accent and `cfg.gtk_theme` onto the live display. Cheap; call on every save.
+/// Install the stylesheet, icons, and GTK theme for `cfg`. Cheap; call on save.
+///
+/// The whole sheet is (re)loaded every time, so switching Appearance between
+/// `native` and `custom` takes effect immediately instead of needing a restart.
+/// It used to be assembled once at startup, so the change was written to disk
+/// while the app kept looking the other way — and the header logo, which uses
+/// our bundled icon, rendered as a broken image.
 pub fn apply_appearance(cfg: &Config) {
     let native = is_native(cfg);
-    ACCENT.with(|css| {
-        let accent = if native {
+    let Some(display) = gtk::gdk::Display::default() else {
+        return;
+    };
+    let css = format!(
+        "{}\n@define-color qfind_accent {};",
+        sheet_for(cfg),
+        if native {
             "@accent_bg_color".to_owned()
         } else {
             accent_for(&cfg.theme).to_owned()
-        };
-        css.load_from_string(&format!("@define-color qfind_accent {accent};"));
-        if let Some(display) = gtk::gdk::Display::default() {
-            // Idempotent: GTK ignores re-adding the same provider.
-            gtk::style_context_add_provider_for_display(
-                &display,
-                css,
-                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
-            );
         }
-    });
+    );
+    let provider = gtk::CssProvider::new();
+    provider.load_from_string(&css);
+    // Idempotent: GTK ignores re-adding the same provider.
+    gtk::style_context_add_provider_for_display(
+        &display,
+        &provider,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+    if native {
+        // `icons::install` set ours process-wide, GTK's own file chooser
+        // included. Switching back has to put the user's theme back.
+        if let Some(settings) = gtk::Settings::default() {
+            let system_icons = SYSTEM_ICON_THEME.with(|slot| {
+                slot.borrow_mut()
+                    .get_or_insert_with(|| {
+                        settings.gtk_icon_theme_name().map(|name| name.to_string())
+                    })
+                    .clone()
+            });
+            if let Some(system_icons) = system_icons {
+                settings.set_gtk_icon_theme_name(Some(&system_icons));
+            }
+        }
+    } else {
+        crate::icons::install();
+    }
     let Some(settings) = gtk::Settings::default() else {
         return;
     };
     let system = SYSTEM_GTK_THEME.with(|slot| {
         slot.borrow_mut()
-            .get_or_insert_with(|| settings.gtk_theme_name().map(|n| n.to_string()))
+            .get_or_insert_with(|| settings.gtk_theme_name().map(|name| name.to_string()))
             .clone()
     });
     let wanted = if native {
@@ -56,6 +88,31 @@ pub fn apply_appearance(cfg: &Config) {
     match wanted {
         "system" => settings.set_gtk_theme_name(system.as_deref()),
         name => settings.set_gtk_theme_name(Some(name)),
+    }
+}
+
+/// The stylesheet body for the current Appearance: the toolkit-neutral part of
+/// `design.css`, plus the user's `custom.css` when in `custom` mode.
+fn sheet_for(cfg: &Config) -> String {
+    const DESIGN: &str = include_str!("design.css");
+    const CUSTOM_MARKER: &str = "/* --- custom palette ---";
+    let base = match (is_native(cfg), DESIGN.split_once(CUSTOM_MARKER)) {
+        (true, Some((before, _))) => before,
+        _ => DESIGN,
+    };
+    if is_native(cfg) {
+        return base.to_owned();
+    }
+    // User overrides live next to config.toml, so they win.
+    match Config::path().parent().map(|dir| dir.join("custom.css")) {
+        Some(user) if user.is_file() => match std::fs::read_to_string(&user) {
+            Ok(extra) => format!("{base}\n{extra}"),
+            Err(error) => {
+                gtk::glib::g_warning!("megaman", "could not read {}: {error}", user.display());
+                base.to_owned()
+            }
+        },
+        _ => base.to_owned(),
     }
 }
 
@@ -71,7 +128,24 @@ pub struct Live {
     pub on_save: Box<dyn Fn(bool)>,
 }
 
+/// A short modal error. Every failure the user can act on goes through here.
+fn alert(parent: &gtk::Window, message: &str, detail: &str) {
+    gtk::AlertDialog::builder()
+        .modal(true)
+        .message(message)
+        .detail(detail)
+        .build()
+        .show(Some(parent));
+}
+
+/// Open Settings. A second request focuses nothing new: each window used to
+/// carry its own widget state and its own `on_save`, so saving in one could
+/// Rebuild the Catalog while another was still open and stale.
 pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
+    if OPEN.get() {
+        return;
+    }
+    OPEN.set(true);
     let cfg = Config::load();
     let win = gtk::Window::builder()
         .transient_for(parent)
@@ -252,8 +326,10 @@ pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
     win.set_child(Some(&scroll));
 
     let live = Rc::new(live);
+    let reset_all = Rc::new(Cell::new(false));
     {
         let live = Rc::clone(&live);
+        let reset_all = Rc::clone(&reset_all);
         let exclude = exclude.clone();
         let include = include.clone();
         let preview_drop = preview_drop.clone();
@@ -265,7 +341,11 @@ pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
         let gtk_theme_drop = gtk_theme_drop.clone();
         let win = win.clone();
         save.connect_clicked(move |_| {
-            let mut cfg = Config::load();
+            let mut cfg = if reset_all.replace(false) {
+                Config::default()
+            } else {
+                Config::load()
+            };
             let old_exclude = cfg.exclude.clone();
             let old_include = cfg.include.clone();
             cfg.exclude = exclude.items();
@@ -298,7 +378,21 @@ pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
             cfg.theme = THEMES[theme_drop.selected() as usize % THEMES.len()].into();
             cfg.gtk_theme =
                 GTK_THEMES[gtk_theme_drop.selected() as usize % GTK_THEMES.len()].into();
-            let _ = cfg.save();
+            // A read-only `$XDG_CONFIG_HOME` or a full disk used to be swallowed
+            // with `let _ =`: the window closed, the live theme had already been
+            // mutated, so the app *looked* like the change took and silently
+            // reverted on next launch.
+            if let Err(error) = cfg.save() {
+                alert(
+                    &win,
+                    "Could not save settings",
+                    &format!(
+                        "{} could not be written. Your change is active for this session only.\n\n{error}",
+                        Config::path().display()
+                    ),
+                );
+                return;
+            }
             apply_appearance(&cfg);
             live.preview.set(cfg.preview);
             live.match_mode.set(cfg.match_mode);
@@ -316,20 +410,45 @@ pub fn open(parent: &gtk::ApplicationWindow, live: Live) {
         let appearance_drop = appearance_drop.clone();
         let theme_drop = theme_drop.clone();
         let gtk_theme_drop = gtk_theme_drop.clone();
+        // Reset every widget the window owns, and every setting it does not.
+        // It used to leave `exclude_paths`, the visibility flags, zoom, spacing,
+        // and preview width alone, and the Save handler started from
+        // `Config::load()` and wrote those keys back verbatim.
         reset.connect_clicked(move |_| {
+            let defaults = Config::default();
             appearance_drop.set_selected(0);
-            let cfg = Config::default();
-            exclude.set_items(&cfg.exclude);
-            include.set_items(&[]);
+            exclude.set_items(&defaults.exclude);
+            include.set_items(
+                &defaults
+                    .include
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>(),
+            );
             preview_drop.set_selected(0);
             match_drop.set_selected(0);
             open_drop.set_selected(0);
-            editor_entry.set_text("");
+            editor_entry.set_text(&defaults.editor);
             theme_drop.set_selected(0);
             gtk_theme_drop.set_selected(0);
+            // A full reset, not just the fields this window shows: zebra, zoom,
+            // spacing, Preview width, WeightMap, the visibility flags, and
+            // `exclude_paths` live in the View popover, and the Save handler
+            // started from `Config::load()` and wrote them back verbatim.
+            reset_all.set(true);
         });
     }
 
+    win.connect_close_request(|win| {
+        OPEN.set(false);
+        let _ = win;
+        gtk::glib::Propagation::Proceed
+    });
+    win.connect_close_request(|win| {
+        OPEN.set(false);
+        let _ = win;
+        gtk::glib::Propagation::Proceed
+    });
     win.present();
 }
 

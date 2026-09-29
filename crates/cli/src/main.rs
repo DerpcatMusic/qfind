@@ -268,6 +268,7 @@ fn run() -> Result<ExitCode> {
                     MatchArg::Substring => MatchMode::Substring,
                     MatchArg::Exact => MatchMode::Exact,
                 },
+                show_hidden: cli.hidden.unwrap_or_else(|| Config::load().show_hidden),
             };
             let cfg = Config::load();
             let mut ignores = IgnoreMatcher::new(cfg.respect_gitignore, cfg.respect_ignore);
@@ -275,7 +276,6 @@ fn run() -> Result<ExitCode> {
             if ignores.is_some() && limit > 0 {
                 opts.limit = 0;
             }
-            let show_hidden = cli.hidden.unwrap_or(cfg.show_hidden);
             let folder = cli
                 .directory
                 .as_ref()
@@ -288,10 +288,9 @@ fn run() -> Result<ExitCode> {
                         .with_context(|| format!("directory not indexed: {}", path.display()))
                 })
                 .transpose()?;
-            let hits = if let Some(folder) = &folder {
-                folder.search_with_hidden_cancel(&query, opts, show_hidden, || false)?
-            } else {
-                catalog.search_with_hidden_cancel(&query, opts, show_hidden, || false)?
+            let hits = match &folder {
+                Some(folder) => folder.search_with(&query, opts)?,
+                None => catalog.search_with(&query, opts)?,
             };
             let mut out = io::stdout().lock();
             let mut emitted = 0usize;

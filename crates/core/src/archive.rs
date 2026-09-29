@@ -148,14 +148,22 @@ pub fn repack(workspace: &Workspace) -> Result<()> {
             .as_nanos()
     ));
     let permissions = workspace.source.metadata()?.permissions();
-    let result = repack_into(workspace, &temporary);
-    if let Err(error) = result {
-        let _ = fs::remove_file(&temporary);
-        return Err(error);
+    // Every step after `repack_into` can fail, and each `?` used to return
+    // early and leave a multi-hundred-megabyte `.qfind-repack-*` in the user's
+    // Downloads folder. One guard covers the whole sequence.
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            // A no-op once the rename has consumed the temporary.
+            let _ = fs::remove_file(&self.0);
+        }
     }
+    let cleanup = Cleanup(temporary.clone());
+    repack_into(workspace, &temporary)?;
     fs::set_permissions(&temporary, permissions)?;
     File::open(&temporary)?.sync_all()?;
     fs::rename(&temporary, &workspace.source)?;
+    std::mem::forget(cleanup);
     crate::ops::refresh_sizes(&workspace.source);
     #[cfg(unix)]
     File::open(parent)?.sync_all()?;

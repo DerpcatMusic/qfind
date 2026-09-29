@@ -141,7 +141,7 @@ impl StorageMap {
         let hit = self.catalog.hit(id)?;
         Some(StorageEntry {
             id,
-            name: hit.name().to_owned(),
+            name: hit.name().into_owned(),
             path: hit.path(),
             is_dir: hit.is_dir(),
             bytes: self.bytes.get(id as usize).copied().unwrap_or(0),

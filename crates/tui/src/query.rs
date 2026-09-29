@@ -54,19 +54,12 @@ impl Session {
                 };
                 let mut rows = loop {
                     request.opts.limit = search_limit;
+                    request.opts.show_hidden = request.show_hidden;
                     let result = match request.folder.as_ref() {
-                        Some(folder) => folder.search_with_hidden_cancel(
-                            &request.query,
-                            request.opts,
-                            request.show_hidden,
-                            stale,
-                        ),
-                        None => catalog.search_with_hidden_cancel(
-                            &request.query,
-                            request.opts,
-                            request.show_hidden,
-                            stale,
-                        ),
+                        Some(folder) => {
+                            folder.search_with_cancel(&request.query, request.opts, stale)
+                        }
+                        None => catalog.search_with_cancel(&request.query, request.opts, stale),
                     };
                     let hits = match result {
                         Ok(hits) => hits,

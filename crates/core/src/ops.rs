@@ -132,20 +132,79 @@ pub fn create_dir(path: impl AsRef<Path>) -> Result<Mutation> {
     Ok(Mutation::CreatedDir(path.to_path_buf()))
 }
 
-/// Rename a file or directory. Fails when the source is missing,
-/// the destination exists, or the destination parent is missing.
+/// Rename `from` to `to`, refusing to replace an existing `to`.
+///
+/// `check_dest_free` followed by `fs::rename` is a TOCTOU: POSIX `rename`
+/// silently replaces the destination, so anything that created `to` in between
+/// — a second window, a sync client, the Rebuild — is destroyed. `renameat2`
+/// (`RENAME_NOREPLACE`) and `renameatx_np` (`RENAME_EXCL`) do the check inside
+/// the kernel, which is the only way to make it atomic.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "redox"))]
+fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+    use rustix::fs::{CWD, RenameFlags, renameat_with};
+    match renameat_with(CWD, from, CWD, to, RenameFlags::NOREPLACE).map_err(io::Error::from) {
+        // Filesystems predating the flag, and some network mounts, report it as
+        // unsupported. Fall back rather than refusing to rename at all.
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::InvalidInput | io::ErrorKind::Unsupported
+            ) =>
+        {
+            rename_fallback(from, to)
+        }
+        other => other,
+    }
+}
+
+/// No kernel exclusive-rename, or the flag is unsupported here: take the race
+/// rather than fail. Still refuses when we can see the destination.
+#[cfg(unix)]
+fn rename_fallback(from: &Path, to: &Path) -> io::Result<()> {
+    if fs::symlink_metadata(to).is_ok() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "destination exists",
+        ));
+    }
+    fs::rename(from, to)
+}
+
+#[cfg(windows)]
+fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+    // `MoveFileEx` without `MOVEFILE_REPLACE_EXISTING` already refuses to
+    // overwrite, so plain `fs::rename` is the atomic exclusive form here.
+    fs::rename(from, to)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+    rename_fallback(from, to)
+}
+
+/// Rename a file or directory. Fails with [`Error::AlreadyExists`] when the
+/// destination exists, atomically, and never replaces it.
 pub fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> Result<Mutation> {
     let (from, to) = (from.as_ref(), to.as_ref());
     check_source(from)?;
     check_dest_free(to)?;
     check_dest_parent(to)?;
-    fs::rename(from, to).map_err(|e| Error::io(to, e))?;
+    rename_noreplace(from, to).map_err(|e| dest_error(to, e))?;
     refresh_sizes(from);
     refresh_sizes(to);
     Ok(Mutation::Renamed {
         from: from.to_path_buf(),
         to: to.to_path_buf(),
     })
+}
+
+/// Turn a failed rename into the error the caller can act on.
+fn dest_error(dest: &Path, error: io::Error) -> Error {
+    match error.kind() {
+        io::ErrorKind::AlreadyExists => Error::AlreadyExists(dest.to_path_buf()),
+        io::ErrorKind::NotFound => Error::NotFound(dest.to_path_buf()),
+        _ => Error::io(dest, error),
+    }
 }
 
 fn copy_file_one(from: &Path, to: &Path) -> Result<()> {
@@ -253,26 +312,49 @@ pub fn copy(from: impl AsRef<Path>, to: impl AsRef<Path>) -> Result<Mutation> {
     })
 }
 
-/// Rename, falling back to copy+delete when `to` is on another Mount.
+/// Move a file or directory tree, refusing to replace the destination and
+/// falling back to copy+delete across Mounts.
 fn move_tree(from: &Path, to: &Path) -> Result<()> {
-    match fs::rename(from, to) {
+    match rename_noreplace(from, to) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {
             let meta = fs::symlink_metadata(from).map_err(|e2| Error::io(from, e2))?;
-            if meta.is_dir() {
-                copy_dir_all(from, to)?;
-                fs::remove_dir_all(from).map_err(|e2| Error::io(from, e2))?;
+            let copied = if meta.is_dir() {
+                copy_dir_all(from, to)
             } else {
-                copy_file_one(from, to)?;
-                fs::remove_file(from).map_err(|e2| Error::io(from, e2))?;
+                copy_file_one(from, to)
+            };
+            // A failed cross-Mount move must not leave a half-written tree at
+            // the destination for the user to trip over later.
+            if let Err(error) = copied {
+                let _ = remove_tree(to);
+                return Err(error);
+            }
+            let removed = if meta.is_dir() {
+                fs::remove_dir_all(from)
+            } else {
+                fs::remove_file(from)
+            };
+            if let Err(error) = removed {
+                let _ = remove_tree(to);
+                return Err(Error::io(from, error));
             }
             Ok(())
         }
-        Err(e) => Err(Error::io(to, e)),
+        Err(e) => Err(dest_error(to, e)),
     }
 }
 
-/// Move a file or directory tree. Falls back to copy+delete across Mounts.
+fn remove_tree(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => fs::remove_dir_all(path),
+        Ok(_) => fs::remove_file(path),
+        Err(_) => Ok(()),
+    }
+}
+
+/// Move a file or directory tree. Fails with [`Error::AlreadyExists`] when the
+/// destination is occupied. Falls back to copy+delete across Mounts.
 pub fn move_path(from: impl AsRef<Path>, to: impl AsRef<Path>) -> Result<Mutation> {
     let (from, to) = (from.as_ref(), to.as_ref());
     check_source(from)?;
@@ -319,27 +401,81 @@ fn info_path(trashed: &Path) -> Option<PathBuf> {
     Some(files.parent()?.join("info").join(name))
 }
 
+/// Percent-encode a path for the freedesktop `.trashinfo` `Path=` key.
+///
+/// The spec requires a URL-encoded absolute path. Emitting it raw meant a name
+/// containing `%`, `#`, or a newline corrupted the key, so Nautilus and GIO
+/// could not parse the file and "Restore from Trash" either failed or put the
+/// item back in the wrong place.
+fn trashinfo_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b':' | b'_' | b'.' | b'-' => {
+                out.push(char::from(byte));
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
+/// `YYYY-MM-DDThh:mm:ss` in local time, as the spec's `DeletionDate` requires.
+fn trashinfo_date() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    // Days since epoch -> civil date, via Howard Hinnant's algorithm. No chrono
+    // dependency for one line of formatting.
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}",
+        rem / 3_600,
+        (rem % 3_600) / 60,
+        rem % 60
+    )
+}
+
 fn write_info(trashed: &Path, original: &Path) {
     let Some(info) = info_path(trashed) else {
         return;
     };
     let Some(dir) = info.parent() else { return };
-    let _ = fs::create_dir_all(dir);
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    // ponytail: epoch seconds instead of ISO 8601; file managers only need Path.
+    if fs::create_dir_all(dir).is_err() {
+        return;
+    }
     let body = format!(
-        "[Trash Info]\nPath={}\nDeletionDate={secs}\n",
-        original.to_string_lossy()
+        "[Trash Info]\nPath={}\nDeletionDate={}\n",
+        trashinfo_path(original),
+        trashinfo_date()
     );
-    let _ = fs::write(info, body);
+    // Write-then-rename so a reader never sees a half-written `.trashinfo`.
+    let tmp = info.with_extension("trashinfotmp");
+    if fs::write(&tmp, body).is_ok() && fs::rename(&tmp, info).is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
 }
 
 fn unique_in(dir: &Path, name: &std::ffi::OsStr) -> PathBuf {
+    // `Path::exists` follows symlinks, so a broken link already sitting in the
+    // trash reported "free" and the rename then replaced it. `symlink_metadata`
+    // asks about the name itself, which is what a collision means here.
+    let taken = |path: &Path| fs::symlink_metadata(path).is_ok();
     let mut candidate = dir.join(name);
     let mut n: u32 = 1;
-    while candidate.exists() {
+    while taken(&candidate) {
         let suffixed = format!("{}.{n}", name.to_string_lossy());
         candidate = dir.join(suffixed);
         n = n.saturating_add(1);

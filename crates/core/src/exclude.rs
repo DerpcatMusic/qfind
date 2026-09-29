@@ -1,7 +1,7 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use globset::{Glob, GlobSet, GlobSetBuilder};
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 
 use crate::error::{Error, Result};
 
@@ -79,7 +79,10 @@ const PLATFORM_PATH_EXCLUDES: &[&str] = &[];
 
 #[derive(Clone)]
 pub(crate) struct Excludes {
+    /// Name matches are folded on case-insensitive filesystems, where
+    /// `System32` and `system32` are the same directory and both are junk.
     names: Vec<String>,
+    folded: Vec<String>,
     globs: GlobSet,
     paths: Vec<PathBuf>,
 }
@@ -102,42 +105,65 @@ impl Excludes {
             .copied()
             .chain(extra.iter().map(String::as_str))
         {
+            // A trailing separator is how people write a folder in a config
+            // file, but as a glob it anchors `^target/$` and can never match
+            // an enumerated path, which never ends in one.
+            let pat = pat.trim_end_matches('/');
             if !pat.contains(['/', '*', '?']) {
                 names.push(pat.to_string());
                 continue;
             }
-            let glob = Glob::new(pat).map_err(|source| Error::Exclude {
-                pattern: pat.to_string(),
-                source,
-            })?;
+            let glob = GlobBuilder::new(pat)
+                .case_insensitive(!CASE_SENSITIVE_NAMES)
+                .literal_separator(true)
+                .build()
+                .map_err(|source| Error::Exclude {
+                    pattern: pat.to_string(),
+                    source,
+                })?;
             builder.add(glob);
         }
         let globs = builder.build().map_err(|source| Error::Exclude {
             pattern: "<set>".into(),
             source,
         })?;
+        let folded = names.iter().map(|n| fold(n)).collect();
         Ok(Self {
             names,
+            folded,
             globs,
             paths: paths.to_vec(),
         })
     }
 
+    /// True when `path`, or anything above it, is excluded.
     pub(crate) fn skip(&self, path: &Path) -> bool {
         if self.globs.is_match(path) || self.paths.iter().any(|root| path.starts_with(root)) {
             return true;
         }
-        path.components().any(|c| {
-            c.as_os_str()
-                .to_str()
-                .is_some_and(|n| self.names.iter().any(|ex| ex == n))
-        })
+        path.components().any(|c| self.skip_os(c.as_os_str()))
     }
 
     pub(crate) fn skip_name(&self, name: &OsStr) -> bool {
-        name.to_str()
-            .is_some_and(|n| self.names.iter().any(|ex| ex == n))
+        self.skip_os(name)
     }
+
+    fn skip_os(&self, name: &OsStr) -> bool {
+        name.to_str().is_some_and(|n| {
+            self.names.iter().any(|ex| ex == n) || self.folded.iter().any(|ex| *ex == fold(n))
+        })
+    }
+}
+
+/// Case-insensitive where the filesystem is, so the built-in junk list still
+/// catches `System32` written `system32`.
+#[cfg(any(windows, target_os = "macos"))]
+const CASE_SENSITIVE_NAMES: bool = false;
+#[cfg(not(any(windows, target_os = "macos")))]
+const CASE_SENSITIVE_NAMES: bool = true;
+
+fn fold(name: &str) -> String {
+    name.to_lowercase()
 }
 
 #[cfg(test)]
@@ -162,5 +188,26 @@ mod tests {
     fn extra_name_exclude() {
         let ex = Excludes::new(&["secret".into()]).expect("excludes");
         assert!(ex.skip(Path::new("/home/secret/file")));
+    }
+
+    #[test]
+    fn a_trailing_separator_still_matches() {
+        let ex = Excludes::new(&["target/".into(), "build/".into()]).expect("excludes");
+        assert!(
+            ex.skip(Path::new("/home/me/proj/target")),
+            "a rule written `target/` must exclude the folder"
+        );
+        assert!(ex.skip(Path::new("/home/me/proj/build")));
+    }
+
+    #[test]
+    fn name_excludes_fold_case() {
+        let ex = Excludes::new(&[]).expect("excludes");
+        for spelling in ["System32", "system32", "SYSTEM32", "Node_Modules"] {
+            assert!(
+                ex.skip_name(OsStr::new(spelling)),
+                "{spelling} is the same junk folder"
+            );
+        }
     }
 }

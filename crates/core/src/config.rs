@@ -2,6 +2,7 @@
 //! Stored below the platform config directory as `qfind/config.toml`.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use crate::catalog::Rebuild;
 use crate::default_snapshot_path;
@@ -10,14 +11,42 @@ use crate::query::MatchMode;
 use crate::view::Zoom;
 
 /// Lazily loads hierarchical Git and ripgrep ignore rules for queried paths.
+#[derive(Clone)]
 pub struct IgnoreMatcher(Vec<ignore::IncrementalIgnore>);
 
+/// The one built matcher set, plus the settings that produced it.
+#[derive(Default)]
+struct CachedIgnore {
+    settings: Option<(bool, bool)>,
+    matcher: Option<IgnoreMatcher>,
+}
+
 impl IgnoreMatcher {
+    /// Build the matchers, or hand back the cached set for these settings.
+    /// Callers run this on every keystroke while browsing, and building costs a
+    /// metadata read up the tree for every Mount.
     #[must_use]
     pub fn new(respect_gitignore: bool, respect_ignore: bool) -> Option<Self> {
         if !respect_gitignore && !respect_ignore {
             return None;
         }
+        // `build_matchers` reads ignore metadata up the tree for every Mount,
+        // which is far too expensive to repeat per keystroke while browsing.
+        static CACHE: OnceLock<Mutex<CachedIgnore>> = OnceLock::new();
+        let cache = CACHE.get_or_init(|| Mutex::new(CachedIgnore::default()));
+        let Ok(mut slot) = cache.lock() else {
+            return Self::build(respect_gitignore, respect_ignore);
+        };
+        if slot.settings != Some((respect_gitignore, respect_ignore)) {
+            *slot = CachedIgnore {
+                settings: Some((respect_gitignore, respect_ignore)),
+                matcher: Self::build(respect_gitignore, respect_ignore),
+            };
+        }
+        slot.matcher.clone()
+    }
+
+    fn build(respect_gitignore: bool, respect_ignore: bool) -> Option<Self> {
         let matchers = mounts::discover()
             .into_iter()
             .flat_map(|root| {
@@ -201,11 +230,14 @@ impl Config {
 
     #[must_use]
     pub fn load() -> Self {
-        let path = Self::path();
-        std::fs::read_to_string(&path)
-            .ok()
-            .map(|s| parse(&s))
-            .unwrap_or_default()
+        Self::load_from(&Self::path())
+    }
+
+    /// Read a Config from an explicit file. A missing or unreadable file yields
+    /// the defaults, never an error: a bad config must not stop the app.
+    #[must_use]
+    pub fn load_from(path: &Path) -> Self {
+        std::fs::read_to_string(path).map_or_else(|_| Self::default(), |src| parse(&src))
     }
 
     /// # Errors
@@ -329,12 +361,122 @@ impl Config {
     }
 }
 
+/// TOML basic string: the only escaping that can appear is what we emit.
+fn toml_string(value: &str) -> String {
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n");
+    format!("\"{escaped}\"")
+}
+
 fn toml_list(items: &[String]) -> String {
     items
         .iter()
-        .map(|i| format!("\"{}\"", i.replace('\\', "\\\\").replace('"', "\\\"")))
+        .map(|i| toml_string(i))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Read one TOML basic string from just after its opening quote, resolving the
+/// escapes [`toml_string`] writes. Returns the value and how many bytes of
+/// `src` it consumed, closing quote included, so `src[n..]` is what follows.
+fn scan_string(src: &str) -> Option<(String, usize)> {
+    let bytes = src.as_bytes();
+    let mut out = String::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => return Some((out, i + 1)),
+            b'\\' => {
+                i += 1;
+                out.push(match bytes.get(i)? {
+                    b'n' => '\n',
+                    b't' => '\t',
+                    b'r' => '\r',
+                    other => char::from(*other),
+                });
+                i += 1;
+            }
+            _ => {
+                // Copy whole scalars so a multi-byte name survives intact.
+                let ch = src[i..].chars().next()?;
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+        }
+    }
+    None
+}
+
+/// Split a bracketed, comma-separated list of quoted strings.
+///
+/// This used to be `v.split(',')`, which turned the Mount `/mnt/My Drive,
+/// Backup` into two nonexistent roots and an Exclude glob containing a comma
+/// into two rules that never match.
+fn parse_list(value: &str) -> Vec<String> {
+    let mut rest = value.trim();
+    let Some(inner) = rest.strip_prefix('[').and_then(|s| s.strip_suffix(']')) else {
+        return Vec::new();
+    };
+    rest = inner.trim();
+    let mut out = Vec::new();
+    while !rest.is_empty() {
+        rest = rest.trim_start();
+        if rest.is_empty() {
+            break;
+        }
+        if let Some(tail) = rest.strip_prefix('"') {
+            match scan_string(tail) {
+                Some((item, used)) => {
+                    out.push(item);
+                    rest = tail[used..].trim_start();
+                }
+                // Unterminated string: keep the rest as one literal rather
+                // than silently dropping the user's Mount.
+                None => {
+                    out.push(tail.replace("\\\"", "\"").replace("\\\\", "\\"));
+                    break;
+                }
+            }
+        } else {
+            // A bare word: hand-written configs use these. Take it up to the
+            // next comma so at least the common case still works.
+            let (word, tail) = rest.split_once(',').unwrap_or((rest, ""));
+            out.push(word.trim().to_owned());
+            rest = tail;
+        }
+        rest = rest.strip_prefix(',').unwrap_or(rest).trim_start();
+    }
+    out.retain(|s| !s.is_empty());
+    out
+}
+
+/// One boolean spelling, so a hand-edited `yes` or `1` cannot silently flip a
+/// setting in the opposite direction from `true`.
+fn parse_bool(value: &str, default: bool) -> bool {
+    match value.trim().trim_matches('"').to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" | "1" => true,
+        "false" | "no" | "off" | "0" => false,
+        _ => default,
+    }
+}
+
+/// `~` and `$HOME` as the user meant them. Without this an `include` of
+/// `~/projects` yields a quietly incomplete Catalog with no error anywhere.
+fn expand_home(value: &str) -> PathBuf {
+    let expanded = match value.strip_prefix("~/") {
+        Some(rest) => dirs::home_dir().map_or_else(|| PathBuf::from(value), |h| h.join(rest)),
+        None if value == "~" => dirs::home_dir().unwrap_or_else(|| PathBuf::from(value)),
+        None => PathBuf::from(value),
+    };
+    if expanded.is_absolute() {
+        return expanded;
+    }
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return expanded;
+    };
+    home.join(expanded)
 }
 
 fn parse(src: &str) -> Config {
@@ -349,30 +491,37 @@ fn parse(src: &str) -> Config {
         };
         let k = k.trim();
         let v = v.trim();
+        // Scalars that can hold a quoted string go through `scan_string` so
+        // `\"` survives; the editor field especially depends on it.
+        let text = || {
+            v.strip_prefix('"')
+                .and_then(scan_string)
+                .map_or_else(|| v.trim_matches('"').to_owned(), |(s, _)| s)
+        };
         match k {
             "exclude" => cfg.exclude = parse_list(v),
             "exclude_paths" => {
-                cfg.exclude_paths = parse_list(v).into_iter().map(PathBuf::from).collect();
+                cfg.exclude_paths = parse_list(v).iter().map(|p| expand_home(p)).collect();
             }
-            "include" => cfg.include = parse_list(v).into_iter().map(PathBuf::from).collect(),
-            "show_hidden" => cfg.show_hidden = v != "false",
-            "respect_gitignore" => cfg.respect_gitignore = v == "true",
-            "respect_ignore" => cfg.respect_ignore = v == "true",
+            "include" => cfg.include = parse_list(v).iter().map(|p| expand_home(p)).collect(),
+            "show_hidden" => cfg.show_hidden = parse_bool(v, cfg.show_hidden),
+            "respect_gitignore" => cfg.respect_gitignore = parse_bool(v, cfg.respect_gitignore),
+            "respect_ignore" => cfg.respect_ignore = parse_bool(v, cfg.respect_ignore),
             "zoom" => cfg.zoom = v.parse().unwrap_or(cfg.zoom).min(100),
             "spacing" => cfg.spacing = v.parse().unwrap_or(cfg.spacing).min(24),
-            "preview" => cfg.preview = PreviewMode::parse(v.trim_matches('"')),
+            "preview" => cfg.preview = PreviewMode::parse(&text()),
             "preview_width" => {
                 cfg.preview_width = v.parse().unwrap_or(cfg.preview_width).clamp(20, 70);
             }
-            "zebra" => cfg.zebra = v == "true",
-            "weight_map" => cfg.weight_map = v == "true",
+            "zebra" => cfg.zebra = parse_bool(v, cfg.zebra),
+            "weight_map" => cfg.weight_map = parse_bool(v, cfg.weight_map),
             "match" => cfg.match_mode = MatchMode::parse(v),
-            "theme" => cfg.theme = v.trim_matches('"').to_string(),
-            "gtk_theme" => cfg.gtk_theme = v.trim_matches('"').to_string(),
-            "appearance" => cfg.appearance = v.trim_matches('"').to_string(),
-            "splash" => cfg.splash = v != "false",
+            "theme" => cfg.theme = text(),
+            "gtk_theme" => cfg.gtk_theme = text(),
+            "appearance" => cfg.appearance = text(),
+            "splash" => cfg.splash = parse_bool(v, cfg.splash),
             "open" => cfg.open = OpenMode::parse(v),
-            "editor" => cfg.editor = v.trim_matches('"').to_string(),
+            "editor" => cfg.editor = text(),
             _ => {}
         }
     }
@@ -504,17 +653,6 @@ pub fn is_text_path(path: &Path) -> bool {
             | "service"
             | "desktop"
     )
-}
-
-fn parse_list(v: &str) -> Vec<String> {
-    let v = v.trim().trim_start_matches('[').trim_end_matches(']');
-    if v.is_empty() {
-        return Vec::new();
-    }
-    v.split(',')
-        .map(|s| s.trim().trim_matches('"').to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
 }
 
 #[cfg(test)]

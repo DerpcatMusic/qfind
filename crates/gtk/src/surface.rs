@@ -23,8 +23,11 @@ pub struct Host {
     pub stack: gtk::Stack,
     pub list: gtk::ColumnView,
     pub grid: gtk::GridView,
-    #[allow(dead_code)]
     pub tree: gtk::ListView,
+    /// The list and grid share one model; the Tree has its own, and every
+    /// action has to resolve through whichever is on screen.
+    pub list_selection: gtk::MultiSelection,
+    pub tree_selection: gtk::MultiSelection,
     pub tree_store: gio::ListStore,
     pub weight: gtk::DrawingArea,
     pub weight_rev: Rc<Cell<u64>>,
@@ -41,6 +44,30 @@ pub struct Host {
 }
 
 impl Host {
+    /// The selection model for the surface the user is actually looking at.
+    ///
+    /// Routing every action through the list's model left the Tree read-only:
+    /// clicking rows there and pressing Delete, F2, or Ctrl+C did nothing, and
+    /// could act on the hidden list's stale selection instead.
+    pub fn selection(&self) -> gtk::MultiSelection {
+        match self.stack.visible_child_name().as_deref() {
+            Some("tree") => self.tree_selection.clone(),
+            _ => self.list_selection.clone(),
+        }
+    }
+
+    /// Hand keyboard focus to the visible surface. Without this, `Down` from
+    /// the search box focused the *hidden* ColumnView, so arrow keys moved a
+    /// selection the user could not see and the grid never scrolled.
+    pub fn focus_visible(&self) {
+        let widget: &gtk::Widget = match self.stack.visible_child_name().as_deref() {
+            Some("tree") => self.tree.upcast_ref(),
+            Some("grid") => self.grid.upcast_ref(),
+            _ => self.list.upcast_ref(),
+        };
+        widget.grab_focus();
+    }
+
     pub fn schedule_apply(self: &Rc<Self>) {
         if self.apply_pending.replace(true) {
             return;
@@ -73,15 +100,18 @@ impl Host {
         }
         self.fit_grid();
         match name {
-            "list" => {
+            "list" | "tree" => {
+                // Zoom used to do nothing in the Tree surface while the label
+                // happily showed a new percentage.
                 restyle_list(&self.list, zoom, self.spacing.get());
+                restyle_tree(&self.tree, zoom, self.spacing.get());
                 self.list.queue_resize();
+                self.tree.queue_resize();
             }
-            "grid" => {
+            _ => {
                 restyle_grid(&self.grid, zoom);
                 self.grid.queue_resize();
             }
-            _ => {}
         }
     }
 
@@ -161,6 +191,18 @@ pub fn attach_hover(
     row.add_controller(motion);
 }
 
+/// Forget the hovered path.
+///
+/// Rows are recycled under a stationary pointer, and `connect_enter` only fires
+/// on a real pointer *enter*, so a scroll could leave `hovered` on the row that
+/// used to be under the cursor. `PreviewMode::Hovered` then previewed a file
+/// that was no longer there, and possibly no longer on disk. Clearing it on
+/// every model change makes Hovered fall back to the selected row, which is
+/// the documented behaviour anyway, at no per-row cost.
+pub fn forget_hover(hovered: &Rc<RefCell<Option<String>>>) {
+    hovered.replace(None);
+}
+
 pub fn attach_zoom_scroll(widget: &impl IsA<gtk::Widget>, host: Rc<Host>) {
     let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
     scroll.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -189,10 +231,28 @@ pub fn attach_zoom_scroll(widget: &impl IsA<gtk::Widget>, host: Rc<Host>) {
     widget.add_controller(scroll);
 }
 
+/// Refresh the Tree from an indexed Hit list.
 pub fn rebuild_tree(host: &Host, catalog: &Catalog, ids: &[u32]) {
-    host.collapsed.borrow_mut().clear();
     *host.tree_src.borrow_mut() = Some((catalog.clone(), ids.to_vec()));
     fill_tree(host);
+}
+
+/// Refresh the Tree from a live folder listing.
+///
+/// The Tree used to only ever rebuild from the indexed path, so switching to it
+/// while browsing kept showing the previous Query's Hits, including paths that
+/// no longer existed. A folder listing is already one level deep, so there is
+/// nothing to fold.
+pub fn rebuild_tree_from_rows(host: &Host, rows: &[RowData]) {
+    let keep = selected_path(&host.tree_selection);
+    let mut paths = Vec::with_capacity(rows.len());
+    host.tree_store.remove_all();
+    for row in rows {
+        paths.push(row.path());
+        let data = RowData::with_fold(row.name(), row.path(), row.is_dir(), 0, false);
+        host.tree_store.append(&data);
+    }
+    reselect_tree(host, keep.as_deref(), &paths);
 }
 
 pub fn toggle_fold(host: &Host, path: &str) {
@@ -225,41 +285,76 @@ fn fill_tree(host: &Host) {
     let collapsed = host.collapsed.borrow();
     let flat = walk_visible(&stems, &|p| !collapsed.contains(p));
     drop(collapsed);
+    // `remove_all` drops the selected item and resets the scroll, so both are
+    // captured and restored by path. Expanding one folder used to lose the
+    // highlight and jump the view back to the top.
+    let keep_path = selected_path(&host.tree_selection);
     host.tree_store.remove_all();
+    let mut paths = Vec::with_capacity(flat.len());
     for row in flat {
-        host.tree_store.append(&RowData::with_fold(
+        let data = RowData::with_fold(
             row.stem.name,
             row.stem.path,
             row.stem.is_dir,
             row.depth,
             row.has_kids,
-        ));
+        );
+        paths.push(data.path());
+        host.tree_store.append(&data);
     }
+    reselect_tree(host, keep_path.as_deref(), &paths);
 }
 
-pub fn rebuild_weight(host: &Host, catalog: &Catalog, ids: &[u32], dir: Option<&std::path::Path>) {
+/// The first selected row's path, if any.
+fn selected_path(selection: &impl IsA<gtk::SelectionModel>) -> Option<String> {
+    let bits = selection.as_ref().selection();
+    if bits.is_empty() {
+        return None;
+    }
+    selection
+        .as_ref()
+        .upcast_ref::<gio::ListModel>()
+        .item(bits.nth(0))
+        .and_downcast::<RowData>()
+        .map(|row| row.path())
+}
+
+/// Re-select after a rebuild so the tree does not lose the highlighted row.
+fn reselect_tree(host: &Host, keep: Option<&str>, paths: &[String]) {
+    let Some(keep) = keep else { return };
+    let Some(at) = paths.iter().position(|path| path == keep) else {
+        return;
+    };
+    let Ok(at) = u32::try_from(at) else { return };
+    host.tree_selection.select_item(at, true);
+    host.tree.scroll_to(at, gtk::ListScrollFlags::FOCUS, None);
+}
+
+/// Build the WeightMap tiles for a set of Hits.
+///
+/// Kept separate from [`rebuild_weight_values`] so the caller can run the
+/// filesystem work off the interface thread.
+pub fn weight_tiles(
+    catalog: &Catalog,
+    ids: &[u32],
+    dir: Option<&std::path::Path>,
+) -> Vec<Weighted> {
     let items: Vec<HitRef> = ids
         .iter()
         .filter_map(|&id| {
             let hit = catalog.hit(id)?;
-            let path = hit.path().to_string_lossy().into_owned();
-            // Names-first hits store size 0: without a live stat every tile
-            // weighs 1 and the chart lies about proportions.
+            let path = hit.path();
+            // Rebuild records the real size, so this is only reached for an
+            // entry the walk could not measure.
             let mut size = hit.size();
             if size == 0 && !hit.is_dir() {
-                size = std::fs::metadata(hit.path())
-                    .map(|meta| meta.len())
-                    .unwrap_or(0);
+                size = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
             }
-            // Scope the chart to the browsed directory: tiles group by the
-            // top level under it instead of scattering worldwide.
+            // Scope the chart to the browsed directory: tiles group by the top
+            // level under it instead of scattering worldwide.
             let scoped = match dir {
-                Some(root) => std::path::Path::new(&path)
-                    .strip_prefix(root)
-                    .ok()?
-                    .to_string_lossy()
-                    .into_owned(),
-                None => path,
+                Some(root) => path.strip_prefix(root).ok()?.to_string_lossy().into_owned(),
+                None => path.to_string_lossy().into_owned(),
             };
             if scoped.is_empty() {
                 return None;
@@ -272,7 +367,29 @@ pub fn rebuild_weight(host: &Host, catalog: &Catalog, ids: &[u32], dir: Option<&
             })
         })
         .collect();
-    rebuild_weight_values(host, folder_weights(&items));
+    folder_weights(&items)
+}
+
+/// Refresh the WeightMap, doing every `stat` on a worker thread.
+///
+/// This ran one blocking `fs::metadata` per Hit — up to `MAX_ROWS` of them —
+/// on the GTK main thread for every completed search, so a slow or network
+/// Mount froze the whole window.
+pub fn rebuild_weight(
+    host: &Rc<Host>,
+    catalog: &Catalog,
+    ids: &[u32],
+    dir: Option<std::path::PathBuf>,
+) {
+    let catalog = catalog.clone();
+    let ids = ids.to_vec();
+    let host = Rc::clone(host);
+    gtk::glib::MainContext::default().spawn_local(async move {
+        let tiles = gtk::gio::spawn_blocking(move || weight_tiles(&catalog, &ids, dir.as_deref()))
+            .await
+            .unwrap_or_default();
+        rebuild_weight_values(&host, tiles);
+    });
 }
 
 pub fn rebuild_weight_values(host: &Host, weights: Vec<Weighted>) {
@@ -466,6 +583,14 @@ fn restyle_list(list: &gtk::ColumnView, zoom: Zoom, spacing: u8) {
     });
 }
 
+fn restyle_tree(tree: &gtk::ListView, zoom: Zoom, spacing: u8) {
+    walk_apply(tree.upcast_ref(), &|w| {
+        if w.has_css_class("qfind-row") {
+            apply_list_metrics(w, zoom, spacing);
+        }
+    });
+}
+
 fn restyle_grid(grid: &gtk::GridView, zoom: Zoom) {
     walk_apply(grid.upcast_ref(), &|w| {
         if w.has_css_class("qfind-tile") {
@@ -610,30 +735,74 @@ fn paint_zebra(cell: &gtk::Widget, zebra: bool, position: u32) {
     }
 }
 
+/// One ticker for every size cell, instead of one 500 ms timer per row.
+///
+/// A grid of 5 000 tiles used to own 5 000 repeating timers, each taking four
+/// mutex locks, so CPU stayed pegged while the window sat idle. A single timer
+/// walks the mapped cells once and stops when none are left.
+#[derive(Default)]
+struct SizeTicker {
+    source: Option<glib::SourceId>,
+    cells: Vec<(
+        glib::WeakRef<gtk::Label>,
+        glib::WeakRef<gtk::ListItem>,
+        crate::storage::Pane,
+    )>,
+}
+
+thread_local! {
+    static SIZE_TICKER: RefCell<SizeTicker> = const { RefCell::new(SizeTicker {
+        source: None,
+        cells: Vec::new(),
+    }) };
+}
+
 fn watch_size(item: &gtk::ListItem, label: &gtk::Label, storage: crate::storage::Pane) {
     label.set_tooltip_text(Some(
-        "Indexed or saved size; missing sizes update in the background.",
+        "Indexed or measured size. Unmeasured folders fill in when the background walk finishes.",
     ));
-    let item = item.downgrade();
-    let label = label.downgrade();
-    gtk::glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
-        let (Some(item), Some(label)) = (item.upgrade(), label.upgrade()) else {
-            return gtk::glib::ControlFlow::Break;
-        };
-        if !label.is_mapped() {
-            return gtk::glib::ControlFlow::Continue;
+    SIZE_TICKER.with(|ticker| {
+        let mut ticker = ticker.borrow_mut();
+        ticker
+            .cells
+            .push((label.downgrade(), item.downgrade(), storage));
+        if ticker.source.is_none() {
+            ticker.source = Some(gtk::glib::timeout_add_local(
+                std::time::Duration::from_millis(500),
+                || {
+                    SIZE_TICKER.with(|ticker| {
+                        let mut ticker = ticker.borrow_mut();
+                        ticker.cells.retain(|(label, item, storage)| {
+                            let (Some(label), Some(item)) = (label.upgrade(), item.upgrade())
+                            else {
+                                return false;
+                            };
+                            let Some(data) = item.item().and_downcast::<RowData>() else {
+                                return true;
+                            };
+                            if !label.is_mapped() {
+                                return true;
+                            }
+                            let text = if data.is_dir() {
+                                storage.indexed_size_text(std::path::Path::new(&data.path()))
+                            } else {
+                                crate::actions::human_size(data.size())
+                            };
+                            if label.text() != text {
+                                label.set_text(&text);
+                            }
+                            true
+                        });
+                        if ticker.cells.is_empty() {
+                            ticker.source = None;
+                            gtk::glib::ControlFlow::Break
+                        } else {
+                            gtk::glib::ControlFlow::Continue
+                        }
+                    })
+                },
+            ));
         }
-        if let Some(data) = item.item().and_downcast::<RowData>() {
-            let text = if data.is_dir() {
-                storage.indexed_size_text(std::path::Path::new(&data.path()))
-            } else {
-                crate::actions::human_size(data.size())
-            };
-            if label.text() != text {
-                label.set_text(&text);
-            }
-        }
-        gtk::glib::ControlFlow::Continue
     });
 }
 
@@ -713,12 +882,20 @@ fn label_set_age(item: &gtk::ListItem, data: &RowData) {
 }
 
 pub fn apply_list_metrics(row: &gtk::Widget, zoom: Zoom, spacing: u8) {
-    row.set_size_request(-1, 24 + i32::from(zoom.get().min(39)) / 6);
+    let step = i32::from(zoom.get().min(39)) / 6;
+    row.set_size_request(-1, 24 + step);
     let pad = 1 + i32::from(spacing) / 3;
     row.set_margin_top(pad);
     row.set_margin_bottom(pad);
-    if let Some(icon) = row.first_child().and_downcast::<gtk::Image>() {
-        icon.set_pixel_size(18 + i32::from(zoom.get().min(39)) / 6);
+    // The Tree row is `twist, icon, name, size, age`; the list row is `icon, …`.
+    // The first `gtk::Image` descendant is the folder/file icon either way.
+    let mut child = row.first_child();
+    while let Some(widget) = child {
+        if let Ok(icon) = widget.clone().downcast::<gtk::Image>() {
+            icon.set_pixel_size(18 + step);
+            break;
+        }
+        child = widget.next_sibling();
     }
 }
 
@@ -862,6 +1039,9 @@ pub fn make_grid_factory(
         col.set_tooltip_text(Some(&data.path()));
         col.remove_css_class("qfind-chart-hover");
         apply_grid_metrics(col.upcast_ref(), zoom.get());
+        // Without this the grid caption read "0 B" for every file until the
+        // List surface happened to stat the shared RowData first.
+        ensure_meta(&data);
         paint_icon(&icon, &data, &icons);
         crate::actions::load_thumbnail(
             &media,
@@ -955,6 +1135,7 @@ pub fn make_tree_factory(
             row.append(&size);
             row.append(&age);
             attach_hover(&row, item.clone(), Rc::clone(&hovered));
+            row.add_css_class("qfind-row");
             item.set_child(Some(&row));
         });
     }

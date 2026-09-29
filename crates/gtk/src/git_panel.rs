@@ -10,7 +10,7 @@ struct Query {
 }
 
 fn selected_path(state: &Rc<RefCell<State>>) -> Option<PathBuf> {
-    let rows = selected_rows(&state.borrow().selection);
+    let rows = selected_rows(&state.borrow().active_selection());
     if rows.len() == 1 {
         Some(rows[0].path().into())
     } else {
@@ -19,6 +19,51 @@ fn selected_path(state: &Rc<RefCell<State>>) -> Option<PathBuf> {
 }
 
 use qfind_core::components::git;
+
+/// Upper bound on an untracked file rendered as a diff. The same limit the
+/// backend's own `git` action applies, for the same reason: an untracked
+/// `node_modules` tarball must not turn a status poll into a memory spike.
+const UNTRACKED_DIFF_LIMIT: u64 = 512 * 1024;
+
+/// A unified diff for one untracked file, synthesised here.
+///
+/// This used to be `git diff --no-index -- /dev/null <path>`, which names a
+/// POSIX device: on Windows that path does not exist, git exits non-zero, and
+/// the raw error text ("fatal: could not open '/dev/null'") was rendered *as
+/// the diff*. `qfind_core::components` builds the same header in Rust for the
+/// same reason, so the header is built here too — and the whole patch is, which
+/// also keeps the file's bytes off the git command line.
+///
+/// `name` is the path as git spells it (relative to the repository root).
+fn untracked_diff(file: &Path, name: &Path) -> String {
+    let name = name.to_string_lossy();
+    let mut bytes = Vec::new();
+    if let Ok(mut handle) = std::fs::File::open(file) {
+        use std::io::Read;
+        let _ = handle
+            .by_ref()
+            .take(UNTRACKED_DIFF_LIMIT + 1)
+            .read_to_end(&mut bytes);
+    }
+    if bytes.is_empty() {
+        return format!("{name} is empty.");
+    }
+    if bytes.len() as u64 > UNTRACKED_DIFF_LIMIT {
+        return format!("Untracked file is larger than the 512 KiB diff limit: {name}");
+    }
+    if bytes.contains(&0) {
+        return "Binary untracked file".into();
+    }
+    let content = String::from_utf8_lossy(&bytes);
+    format!(
+        "--- /dev/null\n+++ b/{name}\n@@ -0,0 +1,{} @@\n{}",
+        content.lines().count(),
+        content
+            .lines()
+            .map(|line| format!("+{line}\n"))
+            .collect::<String>()
+    )
+}
 
 pub fn new(
     state: Rc<RefCell<State>>,
@@ -87,6 +132,13 @@ pub fn new(
         sync_bar.append(button);
     }
     root.append(&sync_bar);
+    // Shared by every handler below, including the sync buttons that are
+    // built before it would otherwise be in scope.
+    let status_label = Rc::new(gtk::Label::new(None));
+    status_label.set_wrap(true);
+    status_label.set_xalign(0.0);
+    status_label.set_visible(false);
+    root.append(status_label.as_ref());
     {
         let state_sync = state.clone();
         let project_sync = project.clone();
@@ -98,14 +150,23 @@ pub fn new(
         ] {
             let refresh = refresh_sync.clone();
             let state_sync = state_sync.clone();
+            let status_label = status_label.clone();
             let project_sync = project_sync.clone();
             button.connect_clicked(move |button| {
-                button.set_sensitive(false);
-                let button = button.clone();
-                let directory = project_sync
+                // Global scope has no Folder to inspect. Running git here would
+                // have reported the branch of whatever directory the process
+                // happened to start in.
+                let Some(directory) = project_sync
                     .as_ref()
                     .and_then(|path| path.borrow().clone())
-                    .unwrap_or_else(|| current_dir(&state_sync));
+                    .or_else(|| current_dir(&state_sync))
+                else {
+                    status_label.set_text("Browse a folder to use Git");
+                    status_label.set_visible(true);
+                    return;
+                };
+                button.set_sensitive(false);
+                let button = button.clone();
                 let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
                 let refresh = refresh.clone();
                 glib::MainContext::default().spawn_local(async move {
@@ -138,11 +199,6 @@ pub fn new(
     stage.set_sensitive(false);
     file_controls.append(&stage);
     root.append(&file_controls);
-    let action_status = gtk::Label::new(None);
-    action_status.set_wrap(true);
-    action_status.set_xalign(0.0);
-    action_status.set_visible(false);
-    root.append(&action_status);
     let buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
     root.append(&diff_view(&buffer));
     let copy = gtk::Button::from_icon_name("edit-copy-symbolic");
@@ -169,7 +225,7 @@ pub fn new(
             file_picker.clone(),
             file_names.clone(),
             refresh_requested.clone(),
-            action_status.clone(),
+            (*status_label).clone(),
             action_busy.clone(),
         );
         stage.connect_clicked(move |button| {
@@ -183,10 +239,14 @@ pub fn new(
                 busy.set(false);
                 return;
             };
-            let directory = project
+            let Some(directory) = project
                 .as_ref()
                 .and_then(|path| path.borrow().clone())
-                .unwrap_or_else(|| current_dir(&state));
+                .or_else(|| current_dir(&state))
+            else {
+                busy.set(false);
+                return;
+            };
             let staged = mode.selected() == 1;
             if !reviewed.borrow().as_ref().is_some_and(|query| {
                 query.directory == directory
@@ -255,12 +315,18 @@ pub fn new(
         let state_sync = state.clone();
         let project_sync = project.clone();
         let refresh_sync = refresh_requested.clone();
-        let status_sync = action_status.clone();
+        let status_label = status_label.clone();
+        let status_sync = (*status_label).clone();
         branches.connect_clicked(move |_| {
-            let directory = project_sync
+            let Some(directory) = project_sync
                 .as_ref()
                 .and_then(|path| path.borrow().clone())
-                .unwrap_or_else(|| current_dir(&state_sync));
+                .or_else(|| current_dir(&state_sync))
+            else {
+                status_label.set_text("Browse a folder to list branches");
+                status_label.set_visible(true);
+                return;
+            };
             let refresh = refresh_sync.clone();
             let status = status_sync.clone();
             glib::MainContext::default().spawn_local(async move {
@@ -275,6 +341,12 @@ pub fn new(
             });
         });
     }
+    // Is the panel actually on screen? A hidden `TextView` re-render is pure
+    // main-thread waste, and this panel stays alive while the user browses.
+    fn query_visible(root: &gtk::Box) -> bool {
+        root.is_mapped() && root.is_visible()
+    }
+
     let weak = root.downgrade();
     let mut last: Option<Query> = None;
     let in_flight = Rc::new(Cell::new(false));
@@ -307,10 +379,20 @@ pub fn new(
         if in_flight.get() || action_busy.get() {
             return glib::ControlFlow::Continue;
         }
-        let directory = project
+        let Some(directory) = project
             .as_ref()
             .and_then(|path| path.borrow().clone())
-            .unwrap_or_else(|| current_dir(&state));
+            .or_else(|| current_dir(&state))
+        else {
+            // Global scope: nothing to inspect. Returning here also stops the
+            // 5-second `git status` storm that ran even with the tab hidden.
+            if last.is_some() {
+                last = None;
+                status_label.set_text("Browse a folder to inspect Git");
+                status_label.set_visible(true);
+            }
+            return glib::ControlFlow::Continue;
+        };
         if last.as_ref().is_some_and(|last| {
             last.directory != directory || last.staged != (mode.selected() == 1)
         }) {
@@ -396,7 +478,7 @@ pub fn new(
                     if diff.is_empty() && !task.staged
                         && let Some(path) = path.filter(|path| root.join(path).is_file())
                             && git(&root, &["ls-files", "--error-unmatch"], Some(path)).is_err() {
-                                diff = git(&root, &["diff", "--no-index", "--no-ext-diff", "--no-textconv", "--no-color", "--", "/dev/null", &path.to_string_lossy()], None).unwrap_or_else(|diff| diff);
+                                diff = untracked_diff(&root.join(path), path);
                             }
                     if diff.is_empty() {
                         diff = if task.staged { "No staged changes for this selection.".into() }
@@ -409,7 +491,7 @@ pub fn new(
             let selected = if project.is_none() && query.visible { selected_path(&state) } else { None };
             let current_file = (file_picker.selected() > 0).then(|| file_names.string(file_picker.selected())).flatten().map(|path| PathBuf::from(path.as_str()));
             if current_file != query.file { return; }
-            if project.as_ref().and_then(|path| path.borrow().clone()).unwrap_or_else(|| current_dir(&state)) != query.directory || selected != query.selected || (mode.selected() == 1) != query.staged { return; }
+            if project.as_ref().and_then(|path| path.borrow().clone()).or_else(|| current_dir(&state)) != Some(query.directory.clone()) || selected != query.selected || (mode.selected() == 1) != query.staged { return; }
             match result {
                 Ok(Ok((root, label, diff, files))) => {
                     *reviewed.borrow_mut() = Some(query.clone());
@@ -428,10 +510,25 @@ pub fn new(
                     }
                 }
                 Ok(Err(error)) => {
-                    *reviewed.borrow_mut() = None;
-                    footer.set_label(if error.contains("not a git repository") { "Not a Git repo" } else { "Git · unavailable" });
-                    scope.set_text("Git status");
-                    buffer.set_text(&error);
+                    // Only write when the text actually changed, and only while
+                    // the panel is on screen. `set_text` fires `changed`, which
+                    // re-runs the word-diff pass and re-splices the hunk
+                    // dropdown, so doing it every five seconds on a hidden panel
+                    // in a non-repo directory was pure waste.
+                    let shown = footer.label();
+                    let unavailable = if error.contains("not a git repository") {
+                        "Not a Git repo"
+                    } else {
+                        "Git · unavailable"
+                    };
+                    if shown.as_deref() != Some(unavailable) {
+                        *reviewed.borrow_mut() = None;
+                        footer.set_label(unavailable);
+                        scope.set_text("Git status");
+                        if query_visible(&root) && buffer.text(&buffer.start_iter(), &buffer.end_iter(), true).as_str() != error {
+                            buffer.set_text(&error);
+                        }
+                    }
                 }
                 Err(_) => { footer.set_label("Git · refresh failed"); }
             }
@@ -972,4 +1069,33 @@ fn diff_view(source: &gtk::TextBuffer) -> gtk::Box {
         });
     }
     root
+}
+
+#[cfg(test)]
+mod diff_tests {
+    use super::*;
+
+    #[test]
+    fn untracked_patch_is_synthesised_without_a_null_device_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let text = temp.path().join("note.txt");
+        std::fs::write(&text, "one\ntwo\n").unwrap();
+        let name = Path::new("note.txt");
+        let patch = untracked_diff(&text, name);
+        assert_eq!(
+            patch,
+            "--- /dev/null\n+++ b/note.txt\n@@ -0,0 +1,2 @@\n+one\n+two\n"
+        );
+
+        let binary = temp.path().join("blob.bin");
+        std::fs::write(&binary, [0u8, 1, 2]).unwrap();
+        assert_eq!(
+            untracked_diff(&binary, Path::new("blob.bin")),
+            "Binary untracked file"
+        );
+
+        let huge = temp.path().join("huge.bin");
+        std::fs::write(&huge, vec![b'a'; UNTRACKED_DIFF_LIMIT as usize + 1]).unwrap();
+        assert!(untracked_diff(&huge, Path::new("huge.bin")).contains("512 KiB"));
+    }
 }

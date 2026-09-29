@@ -5,7 +5,7 @@ default-members = ["crates/core", "crates/cli", "crates/tui"]
 resolver = "2"
 
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 license = "MIT"
 rust-version = "1.92"
@@ -27,6 +27,24 @@ gtk = { version = "0.11", package = "gtk4", features = ["v4_12"] }
 image = { version = "0.25.6", default-features = false, features = ["bmp", "gif", "ico", "jpeg", "png", "tiff", "webp"] }
 memmap2 = "0.9"
 nucleo-matcher = "0.3"
+# Real media Preview: pure-Rust decode for the waveform, in-process output so
+# seeking is sample-accurate instead of a kill-and-respawn.
+symphonia = { version = "0.5", default-features = false, features = [
+  "pcm",
+  "adpcm",
+  "flac",
+  "mp3",
+  "vorbis",
+  "aiff",
+  "wav",
+  "ogg",
+] }
+cpal = "0.16"
+# Video needs a real transport, and `playbin` is the one pipeline that decodes
+# "whatever the file is". Frames arrive through an appsink as RGB.
+gstreamer = "0.25"
+gstreamer-app = "0.25"
+gstreamer-video = "0.25"
 ratatui = "0.30"
 ratatui-image = { version = "11.0.6", default-features = false, features = ["crossterm"] }
 rayon = "1"

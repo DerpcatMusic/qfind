@@ -1,5 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::f64::consts::{PI, TAU};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -47,6 +48,21 @@ struct ChartState {
     /// the epoch changes, never on resize.
     unit: Rc<RefCell<Vec<Arc>>>,
     unit_epoch: Rc<Cell<u64>>,
+    /// Whether the chart is weighted by bytes or by item count. Fixed by the
+    /// user's choice and by what the data can support, never by accident.
+    by_bytes: Rc<Cell<bool>>,
+    /// The unit toggle pair, weakly held. A strong pair would make
+    /// `button -> closure -> state -> button` a cycle, and the unit is also
+    /// changed by a data set that carries no byte information at all, so the
+    /// buttons have to be reachable from here.
+    unit_buttons: Rc<RefCell<Vec<gtk::glib::WeakRef<gtk::ToggleButton>>>>,
+    /// Heading of the WeightMap strip, which names the unit in use.
+    map_title: gtk::Label,
+    /// True while the browsed folder is being scanned. The centre total would
+    /// otherwise keep rendering the previous folder's bytes.
+    measuring: Rc<Cell<bool>>,
+    /// The browsed folder, so the "Other" tile has a real path.
+    chart_root: Rc<RefCell<Option<PathBuf>>>,
     /// Pixel-space arcs for hit-testing and labels: cheap rescale per size.
     arcs: Rc<RefCell<Vec<Arc>>>,
     pixel_key: Rc<RefCell<Option<LayoutKey>>>,
@@ -80,28 +96,42 @@ fn refresh_geometry(state: &ChartState, width: i32, height: i32) {
     if state.unit_epoch.get() != epoch {
         let manager = state.manager.borrow();
         let global = manager.chart_scope() == ChartScope::Global;
-        let by_bytes = map.is_some_and(|map| map.total_bytes() > 0)
-            || state
-                .live_nodes
-                .borrow()
-                .as_ref()
-                .is_some_and(|nodes| nodes.iter().any(|node| node.bytes > 0));
+        // The chart's meaning has to be stable. It used to be "whichever the
+        // data happens to have", so browsing a folder of empty files switched
+        // the ring to counting entries and creating one non-empty file switched
+        // it back, with the centre total still in bytes.
+        let by_bytes = state.by_bytes.get();
+        // `root` is the browsed folder; the "Other" tile is anchored to it so it
+        // has a real path and therefore a tooltip.
+        let root = state
+            .chart_root
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("/"));
         let nodes = if !global && state.live_nodes.borrow().is_some() {
             let mut nodes = state.live_nodes.borrow().clone().unwrap_or_default();
-            nodes.sort_by_key(|n| std::cmp::Reverse(n.bytes));
+            // Order and aggregate in the unit on screen. This branch sorted the
+            // tiles and summed the "Other" wedge by bytes while the ring drew
+            // every wedge by entry count, so the biggest wedge was whichever
+            // file happened to be largest rather than the one on screen.
+            let weight = |node: &StorageEntry| if by_bytes { node.bytes } else { node.entries };
+            nodes.sort_by_key(|node| std::cmp::Reverse(weight(node)));
             let remaining = nodes
                 .iter()
                 .skip(63)
-                .fold(0u64, |sum, node| sum.saturating_add(node.bytes));
+                .fold(0u64, |sum, node| sum.saturating_add(weight(node)));
             nodes.truncate(63);
             if remaining > 0 {
+                // A real path, so the tile has a tooltip and can be described.
+                // It used to be `PathBuf::new()`, which made the largest
+                // aggregate wedge in the chart hover with an empty string.
                 nodes.push(StorageEntry {
                     id: u32::MAX,
                     name: "Other".into(),
-                    path: PathBuf::new(),
+                    path: root.join("Other"),
                     is_dir: false,
-                    bytes: remaining,
-                    entries: 0,
+                    bytes: if by_bytes { remaining } else { 0 },
+                    entries: if by_bytes { 0 } else { remaining },
                 });
             }
             nodes
@@ -225,6 +255,123 @@ fn clear_hover(state: &ChartState) {
     state.hover_label.set_tooltip_text(None);
 }
 
+/// Record a unit choice and show it in the toggle pair.
+///
+/// Returns whether the unit actually changed, so the caller decides whether a
+/// redraw is worth it. The toggle pair is updated from here rather than from the
+/// button's own handler, because the standing unit is also the answer to
+/// "what can this data set describe", not only to a button press.
+fn set_unit(state: &ChartState, by_bytes: bool) -> bool {
+    if state.by_bytes.get() == by_bytes {
+        return false;
+    }
+    state.by_bytes.set(by_bytes);
+    for (index, button) in state.unit_buttons.borrow().iter().enumerate() {
+        let Some(button) = button.upgrade() else {
+            continue;
+        };
+        // `unit_buttons` is ordered "Size", "Items".
+        let wanted = (index == 0) == by_bytes;
+        if button.is_active() != wanted {
+            button.set_active(wanted);
+        }
+    }
+    state.map_title.set_text(if by_bytes {
+        "Space by size"
+    } else {
+        "Items by count"
+    });
+    state.layout_gen.set(state.layout_gen.get().wrapping_add(1));
+    true
+}
+
+/// Decide the unit for a data set that has just arrived, once.
+///
+/// The unit used to be "whichever the data happens to have", recomputed on
+/// every frame, so browsing a folder of empty files switched the ring to
+/// counting entries and creating one non-empty file switched it back — with the
+/// centre total still in bytes. Now the user's choice stands, and the only thing
+/// that overrides it is a deliberate single fall back to counting entries when a
+/// data set carries no byte information at all. The fall back is *written* into
+/// `by_bytes`, so the next frame reads the same answer instead of re-deciding.
+fn adopt_unit(state: &ChartState, has_bytes: bool) -> bool {
+    if state.by_bytes.get() && !has_bytes {
+        return set_unit(state, false);
+    }
+    false
+}
+
+#[derive(Clone)]
+/// The pieces of a `Pane` a scope button needs, as plain `Rc`s.
+///
+/// The scope buttons live inside `Pane::root` and `Pane` holds a strong `root`, so
+/// capturing the `Pane` in their handlers made `root -> button -> closure ->
+/// Pane -> root` an uncollectable cycle. The window and its 1 Hz timer then
+/// outlived every close.
+struct Shared {
+    state: ChartState,
+    capacity_path: Rc<RefCell<PathBuf>>,
+    detail: gtk::Label,
+    title: gtk::Label,
+}
+
+impl Shared {
+    fn of(pane: &Pane) -> Self {
+        Self {
+            state: pane.state.clone(),
+            capacity_path: Rc::clone(&pane.capacity_path),
+            detail: pane.detail.clone(),
+            title: pane.title.clone(),
+        }
+    }
+
+    fn set_directory_scope(&self, scope: ChartScope) {
+        self.state.manager.borrow_mut().set_chart_scope(scope);
+        match scope {
+            ChartScope::Directory => {
+                let directory = self
+                    .state
+                    .manager
+                    .borrow()
+                    .directory()
+                    .map(Path::to_path_buf);
+                if let Some(path) = directory {
+                    Pane::set_directory_shared(
+                        &self.state,
+                        &self.capacity_path,
+                        &self.detail,
+                        &self.title,
+                        &path,
+                    );
+                }
+            }
+            ChartScope::Global => {
+                self.state.current.set(None);
+                self.state.measuring.set(false);
+                self.state.arcs.borrow_mut().clear();
+                *self.state.pixel_key.borrow_mut() = None;
+                *self.state.map.borrow_mut() = self.state.catalog_map.borrow().clone();
+                let global_bytes = self
+                    .state
+                    .catalog_map
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|map| map.total_bytes() > 0);
+                refresh_labels(
+                    &self.state.map.borrow(),
+                    None,
+                    true,
+                    None,
+                    &self.title,
+                    &self.detail,
+                );
+                adopt_unit(&self.state, global_bytes);
+                redraw_state(&self.state);
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Pane {
     pub root: gtk::Box,
@@ -237,6 +384,8 @@ pub struct Pane {
     projects: Rc<RefCell<Option<Vec<crate::manager_tools::Project>>>>,
     project_account: Rc<RefCell<Option<String>>>,
     project_generation: Rc<Cell<u64>>,
+    /// Generation of the project refresh currently in flight, if any.
+    project_running: Rc<Cell<Option<u64>>>,
     project_revision: Rc<Cell<u64>>,
     project_error: Rc<RefCell<Option<String>>>,
     sizes: crate::folder_sizes::Sizes,
@@ -274,6 +423,7 @@ impl Pane {
         treemap.set_content_height(150);
 
         let sizes = crate::folder_sizes::Sizes::new();
+        let map_title = gtk::Label::new(Some("Space by size"));
         let state = ChartState {
             map: Rc::new(RefCell::new(None::<Rc<StorageMap>>)),
             catalog_map: Rc::new(RefCell::new(None::<Rc<StorageMap>>)),
@@ -281,6 +431,11 @@ impl Pane {
             manager,
             unit: Rc::new(RefCell::new(Vec::<Arc>::new())),
             unit_epoch: Rc::new(Cell::new(u64::MAX)),
+            by_bytes: Rc::new(Cell::new(true)),
+            unit_buttons: Rc::new(RefCell::new(Vec::new())),
+            map_title: map_title.clone(),
+            measuring: Rc::new(Cell::new(false)),
+            chart_root: Rc::new(RefCell::new(None)),
             arcs: Rc::new(RefCell::new(Vec::<Arc>::new())),
             pixel_key: Rc::new(RefCell::new(None::<LayoutKey>)),
             layout_gen: Rc::new(Cell::new(0)),
@@ -324,33 +479,38 @@ impl Pane {
                     0.9,
                 );
                 cr.set_font_size((radius * 0.09).clamp(12.0, 18.0));
-                let map = state.map.borrow();
-                let center = if state.manager.borrow().chart_scope() != ChartScope::Global
-                    && state.live_nodes.borrow().is_some()
+                let by_bytes = state.by_bytes.get();
+                let center = if state.measuring.get() {
+                    // A scan is running for the folder just opened. Any total
+                    // drawn here was the previous folder's, and the centre is
+                    // the number people read as "this folder".
+                    "Measuring…".into()
+                } else if state.manager.borrow().chart_scope() != ChartScope::Global
+                    && let Some(nodes) = state.live_nodes.borrow().as_ref()
                 {
-                    human_bytes(
-                        state
-                            .live_nodes
-                            .borrow()
-                            .as_ref()
-                            .unwrap()
-                            .iter()
-                            .fold(0u64, |sum, node| sum.saturating_add(node.bytes)),
-                    )
+                    // The centre total has to speak the unit the wedges are
+                    // drawn in. It used to stay in bytes while the ring counted
+                    // entries, so the two never agreed.
+                    let total = nodes.iter().fold(0u64, |sum, node| {
+                        sum.saturating_add(if by_bytes { node.bytes } else { node.entries })
+                    });
+                    if by_bytes {
+                        human_bytes(total)
+                    } else {
+                        format!("{total} items")
+                    }
+                } else if let Some(map) = state.map.borrow().as_ref() {
+                    let node = state.current.get().and_then(|id| map.node(id));
+                    if by_bytes && map.total_bytes() > 0 {
+                        human_bytes(node.map_or(map.total_bytes(), |node| node.bytes))
+                    } else {
+                        format!(
+                            "{} items",
+                            node.map_or(map.total_entries(), |node| node.entries)
+                        )
+                    }
                 } else {
-                    map.as_ref()
-                        .map(|map| {
-                            let node = state.current.get().and_then(|id| map.node(id));
-                            if map.total_bytes() > 0 {
-                                human_bytes(node.map_or(map.total_bytes(), |node| node.bytes))
-                            } else {
-                                format!(
-                                    "{} items",
-                                    node.map_or(map.total_entries(), |node| node.entries)
-                                )
-                            }
-                        })
-                        .unwrap_or_default()
+                    String::new()
                 };
                 let extents = cr.text_extents(&center).ok();
                 let x = extents.as_ref().map_or(cx, |e| cx - e.width() / 2.0);
@@ -525,12 +685,33 @@ impl Pane {
         scope.set_halign(gtk::Align::Center);
         scope.append(&directory_btn);
         scope.append(&global_btn);
+        // The WeightMap unit. This pair is what `by_bytes` is *for*: without it
+        // the field was initialised once and could never be written, so the
+        // chart was stuck on bytes no matter what the data supported.
+        let size_btn = gtk::ToggleButton::with_label("Size");
+        size_btn.set_active(true);
+        size_btn.set_tooltip_text(Some("Weight the chart and the map by bytes"));
+        let items_btn = gtk::ToggleButton::with_label("Items");
+        items_btn.set_group(Some(&size_btn));
+        items_btn.set_tooltip_text(Some("Weight the chart and the map by item count"));
+        let unit = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        unit.add_css_class("linked");
+        unit.set_halign(gtk::Align::Center);
+        unit.set_margin_top(4);
+        unit.append(&size_btn);
+        unit.append(&items_btn);
+        state
+            .unit_buttons
+            .borrow_mut()
+            .extend([size_btn.downgrade(), items_btn.downgrade()]);
         let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
         root.set_margin_top(8);
         root.set_margin_bottom(8);
         root.set_margin_start(12);
         root.set_margin_end(12);
         root.append(&scope);
+        // Under the scope buttons, because both rows describe the whole chart.
+        root.append(&unit);
         root.append(&title);
         root.append(&detail);
         state.pie.root.set_size_request(-1, 220);
@@ -541,7 +722,6 @@ impl Pane {
         capacity_label.set_justify(gtk::Justification::Center);
         root.append(&capacity_label);
         root.append(&state.hover_label);
-        let map_title = gtk::Label::new(Some("Space by item"));
         map_title.add_css_class("heading");
         map_title.set_margin_top(8);
         root.append(&map_title);
@@ -557,6 +737,7 @@ impl Pane {
             projects: Rc::new(RefCell::new(None)),
             project_account: Rc::new(RefCell::new(None)),
             project_generation: Rc::new(Cell::new(0)),
+            project_running: Rc::new(Cell::new(None)),
             project_revision: Rc::new(Cell::new(0)),
             project_error: Rc::new(RefCell::new(None)),
             sizes,
@@ -566,54 +747,45 @@ impl Pane {
             context_menu,
         };
         {
-            let pane = pane.clone();
+            // `Pane` owns `root`, and this button lives inside `root`, so
+            // capturing it strongly makes `root -> button -> closure -> Pane ->
+            // root` an uncollectable cycle: the window and its 1 Hz timer
+            // outlive every close.
+            let shared = Shared::of(&pane);
             directory_btn.connect_toggled(move |button| {
                 if !button.is_active() {
                     return;
                 }
-                pane.state
-                    .manager
-                    .borrow_mut()
-                    .set_chart_scope(ChartScope::Directory);
-                let directory = pane
-                    .state
-                    .manager
-                    .borrow()
-                    .directory()
-                    .map(Path::to_path_buf);
-                if let Some(path) = directory {
-                    pane.set_directory(&path);
-                }
+                shared.set_directory_scope(ChartScope::Directory);
             });
         }
         {
-            let pane = pane.clone();
+            let shared = Shared::of(&pane);
             global_btn.connect_toggled(move |button| {
                 if !button.is_active() {
                     return;
                 }
-                pane.state
-                    .manager
-                    .borrow_mut()
-                    .set_chart_scope(ChartScope::Global);
-                pane.state.current.set(None);
-
-                pane.state.arcs.borrow_mut().clear();
-                *pane.state.pixel_key.borrow_mut() = None;
-                pane.bump_layout();
-                *pane.state.map.borrow_mut() = pane.state.catalog_map.borrow().clone();
-                refresh_labels(
-                    &pane.state.map.borrow(),
-                    None,
-                    true,
-                    None,
-                    &pane.title,
-                    &pane.detail,
-                );
-                let (width, height) = (pane.state.pie.view.width(), pane.state.pie.view.height());
-                refresh_geometry(&pane.state, width, height);
-                pane.state.pie.gl.queue_render();
-                pane.state.pie.labels.queue_draw();
+                shared.set_directory_scope(ChartScope::Global);
+            });
+        }
+        {
+            // Only the `ChartState` is captured, never the `Pane`: these buttons
+            // live in `Pane::root`, and a strong `Pane` here would be the same
+            // `root -> button -> closure -> Pane -> root` cycle the scope
+            // buttons above avoid.
+            let state = pane.state.clone();
+            size_btn.connect_toggled(move |button| {
+                if button.is_active() && set_unit(&state, true) {
+                    redraw_state(&state);
+                }
+            });
+        }
+        {
+            let state = pane.state.clone();
+            items_btn.connect_toggled(move |button| {
+                if button.is_active() && set_unit(&state, false) {
+                    redraw_state(&state);
+                }
             });
         }
         {
@@ -632,10 +804,19 @@ impl Pane {
                 if revision.replace(current) == current {
                     return gtk::glib::ControlFlow::Continue;
                 }
+                // Only the bytes unit has anything to say about folder sizes,
+                // and a measurement is queued once per navigation now (see
+                // `set_directory_shared`), so this poll only *reads* what the
+                // worker already measured. It used to re-queue a recursive
+                // `du` for every child of the folder on screen on every
+                // revision — including revisions caused by other windows — which
+                // is what kept the 128-deep queue permanently saturated.
+                if !state.by_bytes.get() || state.measuring.get() {
+                    return gtk::glib::ControlFlow::Continue;
+                }
                 let mut changed = false;
                 if let Some(nodes) = state.live_nodes.borrow_mut().as_mut() {
                     for node in nodes.iter_mut().filter(|node| node.is_dir) {
-                        state.sizes.request(&node.path);
                         if let Some(bytes) = state.sizes.get(&node.path)
                             && bytes != node.bytes
                         {
@@ -687,6 +868,24 @@ impl Pane {
         self.project_error.borrow().clone()
     }
 
+    /// Forget a project error so the next attempt can be made.
+    ///
+    /// `refresh_projects` only cleared the error on the path that reached the
+    /// index, so one transient failure left the Projects page reading
+    /// "Projects are unavailable" for the rest of the session with no way back.
+    pub fn clear_project_error(&self) {
+        *self.project_error.borrow_mut() = None;
+    }
+
+    /// True while a project refresh is in flight.
+    ///
+    /// The generation is stamped when the work starts and cleared when it lands
+    /// (or is superseded), so a UI can grey out a button for exactly as long as
+    /// the work takes instead of guessing — and always get it back.
+    pub fn project_refresh_pending(&self) -> bool {
+        self.project_running.get().is_some()
+    }
+
     pub fn projects(&self, root: &Path) -> Option<Vec<crate::manager_tools::Project>> {
         Some(
             self.projects
@@ -725,61 +924,34 @@ impl Pane {
     }
 
     fn redraw(&self) {
-        let (width, height) = (self.state.pie.view.width(), self.state.pie.view.height());
-        refresh_geometry(&self.state, width, height);
-        self.state.pie.gl.queue_render();
-        self.state.pie.labels.queue_draw();
+        redraw_state(&self.state);
     }
 
     pub fn set_directory(&self, path: &Path) {
-        *self.capacity_path.borrow_mut() = path.to_path_buf();
-        *self.state.live_nodes.borrow_mut() = None;
-        let pane = self.clone();
-        let directory = path.to_path_buf();
-        gtk::glib::MainContext::default().spawn_local(async move {
-            let scanned = directory.clone();
-            let result = gtk::gio::spawn_blocking(move || {
-                qfind_core::components::storage_children(&scanned)
-            })
-            .await;
-            if *pane.capacity_path.borrow() != directory {
-                return;
-            }
-            if let Ok(Ok(mut nodes)) = result {
-                let map = pane.state.catalog_map.borrow();
-                for (index, node) in nodes.iter_mut().enumerate() {
-                    node.id = u32::MAX.saturating_sub(index as u32 + 1);
-                    if node.is_dir {
-                        let indexed = map.as_ref().and_then(|map| map.find_indexed(&node.path));
-                        if let Some(indexed) = indexed {
-                            node.id = indexed.id;
-                            node.bytes = indexed.bytes;
-                        }
-                        let _ = pane.sizes.text(&node.path);
-                        if let Some(bytes) = pane.sizes.get(&node.path) {
-                            node.bytes = bytes;
-                        }
-                    }
-                }
-                drop(map);
-                *pane.state.live_nodes.borrow_mut() = Some(nodes);
-                pane.bump_layout();
-                pane.redraw();
-                pane.detail
-                    .set_text("Measured and indexed sizes · click center to go up");
-            }
-        });
+        Self::set_directory_shared(
+            &self.state,
+            &self.capacity_path,
+            &self.detail,
+            &self.title,
+            path,
+        );
         self.state.capacity.set(None);
-        let this = self.clone();
-        let capacity_path = path.to_path_buf();
+        // The volume line belonged to the folder just left until the new
+        // Mount's capacity landed, and on another volume it is a different
+        // number entirely.
+        self.capacity_label.set_text("Volume capacity…");
+        let capacity_label = self.capacity_label.clone();
+        let state = self.state.clone();
+        let capacity_path = self.capacity_path.clone();
+        let path = path.to_path_buf();
         gtk::glib::MainContext::default().spawn_local(async move {
-            let result = gtk::gio::File::for_path(&capacity_path)
+            let result = gtk::gio::File::for_path(&path)
                 .query_filesystem_info_future(
                     "filesystem::size,filesystem::free",
                     gtk::glib::Priority::DEFAULT,
                 )
                 .await;
-            if *this.capacity_path.borrow() != capacity_path {
+            if *capacity_path.borrow() != path {
                 return;
             }
             match result {
@@ -789,42 +961,124 @@ impl Pane {
                 {
                     let total = info.attribute_uint64("filesystem::size");
                     let free = info.attribute_uint64("filesystem::free").min(total);
-                    this.state.capacity.set(Some((total, free)));
-                    this.capacity_label.set_text(&format!(
-                        "{} free of {} · volume",
+                    state.capacity.set(Some((total, free)));
+                    capacity_label.set_text(&format!(
+                        "{} free of {} - volume",
                         human_bytes(free),
                         human_bytes(total)
                     ));
                 }
-                _ => this.capacity_label.set_text("Volume capacity unavailable"),
+                _ => state.capacity.set(None),
             }
-            this.bump_layout();
-            this.redraw();
         });
-        if self.state.manager.borrow().chart_scope() == ChartScope::Global {
-            return;
-        }
-        let map = self.state.catalog_map.borrow().clone();
-        if let Some(map) = map {
+    }
+
+    /// The half of [`Self::set_directory`] that a scope button can call without
+    /// holding the `Pane`, and so without a `root -> button -> closure -> Pane ->
+    /// root` reference cycle.
+    fn set_directory_shared(
+        state: &ChartState,
+        capacity_path: &Rc<RefCell<PathBuf>>,
+        detail: &gtk::Label,
+        title: &gtk::Label,
+        path: &Path,
+    ) {
+        *capacity_path.borrow_mut() = path.to_path_buf();
+        *state.live_nodes.borrow_mut() = None;
+        *state.chart_root.borrow_mut() = Some(path.to_path_buf());
+        // Drill into the indexed child of this folder, when there is one, so
+        // the indexed view is in place before the measuring state goes on.
+        if state.manager.borrow().chart_scope() != ChartScope::Global
+            && let Some(map) = state.catalog_map.borrow().clone()
+        {
             let next = map.find(path).map(|node| node.id);
-            *self.state.map.borrow_mut() = Some(map);
-            self.state.current.set(next);
-            self.bump_layout();
-            refresh_labels(
-                &self.state.map.borrow(),
-                next,
-                false,
-                Some(path),
-                &self.title,
-                &self.detail,
-            );
-            self.redraw();
+            *state.map.borrow_mut() = Some(map);
+            state.current.set(next);
+            state.layout_gen.set(state.layout_gen.get().wrapping_add(1));
+            refresh_labels(&state.map.borrow(), next, false, Some(path), title, detail);
         }
+        // Mark the chart as measuring *after* the drill-in: `refresh_labels` has
+        // just written this folder's indexed numbers into the title and detail,
+        // and a slow or network Mount must not keep them on screen next to a
+        // chart that is still the previous folder's.
+        begin_measuring(state, title, detail, path);
+        let scan_state = state.clone();
+        let scan_path = Rc::clone(capacity_path);
+        let scan_detail = detail.clone();
+        let directory = path.to_path_buf();
+        gtk::glib::MainContext::default().spawn_local(async move {
+            let scanned = directory.clone();
+            let result = gtk::gio::spawn_blocking(move || read_children(&scanned)).await;
+            // A newer navigation owns the chart now; leave its state alone.
+            if *scan_path.borrow() != directory {
+                return;
+            }
+            scan_state.measuring.set(false);
+            let Ok(Ok(mut nodes)) = result else {
+                // Leaving `measuring` set would keep the ring blank with
+                // "Measuring …" under a folder that can never be measured.
+                scan_detail.set_text("Could not read this folder");
+                scan_state.pie.gl.queue_render();
+                scan_state.pie.labels.queue_draw();
+                return;
+            };
+            let map = scan_state.catalog_map.borrow();
+            let mut unmeasured = Vec::new();
+            for (index, node) in nodes.iter_mut().enumerate() {
+                node.id = u32::MAX.saturating_sub(index as u32 + 1);
+                if !node.is_dir {
+                    continue;
+                }
+                // The Catalog's own index answers first, and it is already in
+                // memory; the folder-size cache answers second. Only what is
+                // still unknown is worth a measurement.
+                if let Some(indexed) = map.as_ref().and_then(|map| map.find_indexed(&node.path)) {
+                    node.id = indexed.id;
+                    node.bytes = indexed.bytes;
+                }
+                if let Some(bytes) = scan_state.sizes.get(&node.path) {
+                    node.bytes = bytes;
+                }
+                if node.bytes == 0 {
+                    unmeasured.push(node.path.clone());
+                }
+            }
+            drop(map);
+            // One request pass per navigation, for the folder on screen, and
+            // only while the chart is actually counting bytes. The listing
+            // above used to queue a recursive `du` for *every* child of *every*
+            // folder visited (twice: once through `components::storage_children`
+            // and again through `Sizes::text`), and the 1 Hz poll kept
+            // re-queueing them; the 128-deep queue then saturated and dropped
+            // the work, while every completed job rewrote the whole JSON cache.
+            if scan_state.by_bytes.get() {
+                for path in unmeasured {
+                    scan_state.sizes.request(&path);
+                }
+            }
+            let has_bytes = nodes.iter().any(|node| node.bytes > 0);
+            *scan_state.live_nodes.borrow_mut() = Some(nodes);
+            scan_state
+                .layout_gen
+                .set(scan_state.layout_gen.get().wrapping_add(1));
+            adopt_unit(&scan_state, has_bytes);
+            redraw_state(&scan_state);
+            scan_detail.set_text("Measured and indexed sizes - click center to go up");
+        });
     }
 
     pub fn refresh_projects(&self, catalog: Catalog, force: bool) {
+        // The cheap in-memory test first. `Catalog` adoption happens on every
+        // navigation and subtree refresh, and it used to resolve the GitHub
+        // account *first* — a `gh config get user` subprocess with a 15 s
+        // timeout — before discovering there was nothing to do. Nothing is
+        // spawned unless the work will actually be done.
+        if !force && self.projects.borrow().is_some() {
+            return;
+        }
         let generation = self.project_generation.get().wrapping_add(1);
         self.project_generation.set(generation);
+        self.project_running.set(Some(generation));
         let this = self.clone();
         gtk::glib::MainContext::default().spawn_local(async move {
             // Offline-first: GitHub account is best-effort enrichment only.
@@ -839,6 +1093,7 @@ impl Pane {
             }
             let changed = this.project_account.borrow().as_ref() != Some(&account);
             if !changed && !force && this.projects.borrow().is_some() {
+                this.project_running.set(None);
                 return;
             }
             if changed {
@@ -864,6 +1119,7 @@ impl Pane {
                         Some("Project indexing failed. Refresh to retry.".into())
                 }
             }
+            this.project_running.set(None);
             this.project_revision
                 .set(this.project_revision.get().wrapping_add(1));
         });
@@ -886,6 +1142,7 @@ impl Pane {
                 return;
             };
             let map = Rc::new(map);
+            let has_bytes = map.total_bytes() > 0;
             let manager = this.state.manager.borrow();
             let global = manager.chart_scope() == ChartScope::Global;
             let directory = manager.directory().map(Path::to_path_buf);
@@ -911,10 +1168,19 @@ impl Pane {
                 &this.title,
                 &this.detail,
             );
-            if !global && this.state.live_nodes.borrow().is_some() {
+            if this.state.measuring.get() {
+                // A scan for this folder is still running, and the snapshot it
+                // will be compared against predates the folder the user just
+                // opened, so the measuring line wins over any numbers this
+                // refresh can offer.
+                this.detail.set_text("Measuring this folder…");
+            } else if !global && this.state.live_nodes.borrow().is_some() {
                 this.detail
                     .set_text("Measured and indexed sizes · click center to go up");
             }
+            // A fresh index is a fresh data set: one deliberate unit decision
+            // for it, never one per frame.
+            adopt_unit(&this.state, has_bytes);
             this.bump_layout();
             this.redraw();
         });
@@ -1082,4 +1348,80 @@ fn refresh_labels(
 
 fn human_bytes(bytes: u64) -> String {
     crate::actions::human_size(bytes)
+}
+
+/// Recompute the chart and ask for the two repaints that show it.
+///
+/// A free function so a button handler can repaint without holding the `Pane`
+/// (and so without the `root -> button -> closure -> Pane -> root` cycle).
+fn redraw_state(state: &ChartState) {
+    let (width, height) = (state.pie.view.width(), state.pie.view.height());
+    refresh_geometry(state, width, height);
+    state.pie.gl.queue_render();
+    state.pie.labels.queue_draw();
+}
+
+/// Put the chart into its "measuring this folder" state.
+///
+/// Everything on screen belongs to the folder the user just left until the scan
+/// lands: the ring is still its wedges, the WeightMap strip its rectangles, the
+/// centre its total, and the hover highlight its row. Reading those as the new
+/// folder's numbers is the whole bug, so they are dropped here rather than
+/// refreshed later. The epoch bump is what stops `refresh_geometry` from
+/// rebuilding the same arcs out of the cached unit geometry.
+fn begin_measuring(state: &ChartState, title: &gtk::Label, detail: &gtk::Label, path: &Path) {
+    state.measuring.set(true);
+    state.hover_index.set(None);
+    state.arcs.borrow_mut().clear();
+    *state.pixel_key.borrow_mut() = None;
+    clear_hover(state);
+    // The strip caches by revision, so an empty list plus a new revision is
+    // what empties it.
+    *state.weights.borrow_mut() = Vec::new();
+    state.weight_rev.set(state.weight_rev.get().wrapping_add(1));
+    state.treemap.queue_draw();
+    state.layout_gen.set(state.layout_gen.get().wrapping_add(1));
+    let name = path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    title.set_text(&name);
+    title.set_tooltip_text(Some(&path.display().to_string()));
+    detail.set_text(&format!("Measuring {name}…"));
+    redraw_state(state);
+}
+
+/// The immediate children of one folder, for the chart.
+///
+/// Not `qfind_core::components::storage_children`: that helper queues a
+/// recursive `du` for every child folder it sees, so every navigation filled
+/// the 128-deep measurement queue with work for folders nobody was looking at
+/// and the tail was dropped when it saturated. This lists the directory and
+/// nothing else; sizes that are already known are merged in by the caller, and
+/// measurement is requested once per navigation for what is left. Called on a
+/// worker thread, never on the interface thread.
+fn read_children(path: &Path) -> Result<Vec<StorageEntry>, String> {
+    let entries = fs::read_dir(path).map_err(|error| error.to_string())?;
+    let children = entries
+        // One unreadable child must not fail the whole listing.
+        .flatten()
+        .filter_map(|entry| {
+            // `DirEntry::metadata` does not traverse symlinks, so a symlinked
+            // folder came out as a ~10-byte "file" that could not be opened or
+            // drilled into. `path().metadata()` resolves the link.
+            let metadata = entry.path().metadata().ok()?;
+            Some(StorageEntry {
+                id: u32::MAX,
+                name: entry.file_name().to_string_lossy().into_owned(),
+                path: entry.path(),
+                is_dir: metadata.is_dir(),
+                // A folder's own size is unknown until something measures it.
+                // `0` is the honest answer, not a placeholder for a `du` this
+                // listing is not going to run.
+                bytes: if metadata.is_dir() { 0 } else { metadata.len() },
+                entries: 1,
+            })
+        })
+        .collect();
+    Ok(children)
 }

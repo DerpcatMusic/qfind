@@ -467,7 +467,7 @@ fn manager_rows(hits: &crate::Hits<'_>) -> Vec<ManagerRow> {
         .zip(hits.iter())
         .map(|(id, hit)| ManagerRow {
             id: Some(id),
-            name: hit.name().to_owned(),
+            name: hit.name().into_owned(),
             path: hit.path(),
             is_dir: hit.is_dir(),
             bytes: hit.size(),
