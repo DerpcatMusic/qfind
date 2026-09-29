@@ -53,13 +53,23 @@ pub fn breadcrumb(path: &Path) -> Vec<Crumb> {
     let mut acc = PathBuf::new();
     for comp in path.components() {
         match comp {
-            Component::Prefix(prefix) => acc.push(prefix.as_os_str()),
-            Component::RootDir => {
-                acc.push("/");
+            // `C:` then `\` are two components, so the drive letter is its own
+            // crumb and the root is not labelled `/` on top of it.
+            Component::Prefix(prefix) => {
+                acc.push(prefix.as_os_str());
                 crumbs.push(Crumb {
-                    name: "/".into(),
+                    name: prefix.as_os_str().to_string_lossy().into_owned(),
                     path: acc.clone(),
                 });
+            }
+            Component::RootDir => {
+                acc.push("/");
+                if crumbs.is_empty() {
+                    crumbs.push(Crumb {
+                        name: "/".into(),
+                        path: acc.clone(),
+                    });
+                }
             }
             Component::Normal(part) => {
                 acc.push(part);

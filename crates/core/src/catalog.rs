@@ -1,7 +1,9 @@
+use std::io;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::exclude::Excludes;
 use crate::mounts;
 use crate::search;
@@ -91,11 +93,30 @@ impl Catalog {
                 .collect(),
         };
         let mut builder = Builder::new();
+        let mut walked = 0usize;
         for root in &roots {
             if !root.exists() {
                 continue;
             }
+            walked += 1;
             walk::collect(root, &excludes, &mut builder)?;
+        }
+        // An Exclude that swallows every Mount leaves a valid but empty
+        // snapshot and the only symptom is "no results anywhere". Say so.
+        if walked == 0 && !rebuild.extra_exclude_paths.is_empty() {
+            let listed = rebuild
+                .extra_exclude_paths
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(Error::io(
+                &rebuild.snapshot,
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("every Mount is excluded or missing; check Exclude ({listed})"),
+                ),
+            ));
         }
         builder.write(&rebuild.snapshot)?;
         Self::open(&rebuild.snapshot)
@@ -151,9 +172,12 @@ impl Catalog {
             return true;
         };
         let indexed: std::collections::HashSet<String> =
-            hits.iter().map(|hit| hit.name().to_owned()).collect();
+            hits.iter().map(|hit| hit.name().into_owned()).collect();
+        // An unreadable or vanished folder cannot be verified, so report it
+        // as stale. Returning `false` here left the UI showing the last indexed
+        // contents of a folder that no longer exists, with no Rebuild triggered.
         let Ok(entries) = std::fs::read_dir(dir) else {
-            return false;
+            return true;
         };
         let excludes =
             Excludes::with_paths(&rebuild.extra_excludes, &rebuild.extra_exclude_paths).ok();
@@ -225,12 +249,7 @@ impl Catalog {
     /// # Errors
     /// Returns [`crate::Error::Query`] for a malformed glob.
     pub fn search_with(&self, query: &str, opts: crate::SearchOpts) -> Result<Hits<'_>> {
-        let ranked = search::search(&self.snapshot, query, opts)?;
-        Ok(Hits {
-            catalog: self,
-            ids: ranked.ids,
-            indices: ranked.indices,
-        })
+        self.search_in(query, opts, None, false, &|| false)
     }
 
     /// Filter while allowing a caller to stop stale Query work.
@@ -243,34 +262,24 @@ impl Catalog {
         opts: crate::SearchOpts,
         cancelled: impl Fn() -> bool + Sync,
     ) -> Result<Hits<'_>> {
-        let ranked =
-            search::search_with_cancel(&self.snapshot, query, opts, true, None, false, &cancelled)?;
-        Ok(Hits {
-            catalog: self,
-            ids: ranked.ids,
-            indices: ranked.indices,
-        })
+        self.search_in(query, opts, None, false, &cancelled)
     }
 
-    /// Filter while optionally hiding dotfiles and allowing stale work to stop.
-    ///
-    /// # Errors
-    /// Returns [`crate::Error::Cancelled`](crate::Error::Cancelled) when `cancelled` becomes true.
-    pub fn search_with_hidden_cancel(
+    fn search_in(
         &self,
         query: &str,
         opts: crate::SearchOpts,
-        show_hidden: bool,
-        cancelled: impl Fn() -> bool + Sync,
+        folder: Option<u32>,
+        direct_children: bool,
+        cancelled: &(impl Fn() -> bool + Sync),
     ) -> Result<Hits<'_>> {
         let ranked = search::search_with_cancel(
             &self.snapshot,
             query,
             opts,
-            show_hidden,
-            None,
-            false,
-            &cancelled,
+            folder,
+            direct_children,
+            cancelled,
         )?;
         Ok(Hits {
             catalog: self,
@@ -308,34 +317,20 @@ impl CatalogFolder {
     /// # Errors
     /// Returns [`crate::Error::Query`] for a malformed glob.
     pub fn search_with(&self, query: &str, opts: crate::SearchOpts) -> Result<Hits<'_>> {
-        self.search_with_hidden_cancel(query, opts, true, || false)
+        self.search_with_cancel(query, opts, || false)
     }
 
-    /// Search descendants while allowing a caller to hide dotfiles and cancel stale work.
+    /// Search descendants while allowing a caller to cancel stale Query work.
     ///
     /// # Errors
     /// Returns [`crate::Error::Cancelled`](crate::Error::Cancelled) when `cancelled` becomes true.
-    pub fn search_with_hidden_cancel(
+    pub fn search_with_cancel(
         &self,
         query: &str,
         opts: crate::SearchOpts,
-        show_hidden: bool,
         cancelled: impl Fn() -> bool + Sync,
     ) -> Result<Hits<'_>> {
-        let ranked = search::search_with_cancel(
-            &self.catalog.snapshot,
-            query,
-            opts,
-            show_hidden,
-            Some(self.id),
-            false,
-            &cancelled,
-        )?;
-        Ok(Hits {
-            catalog: &self.catalog,
-            ids: ranked.ids,
-            indices: ranked.indices,
-        })
+        self.search_in(query, opts, false, &cancelled)
     }
 
     /// Search only this Folder's immediate children.
@@ -343,14 +338,23 @@ impl CatalogFolder {
     /// # Errors
     /// Returns [`crate::Error::Query`] for a malformed glob.
     pub fn search_children_with(&self, query: &str, opts: crate::SearchOpts) -> Result<Hits<'_>> {
+        self.search_in(query, opts, true, &|| false)
+    }
+
+    fn search_in(
+        &self,
+        query: &str,
+        opts: crate::SearchOpts,
+        direct_children: bool,
+        cancelled: &(impl Fn() -> bool + Sync),
+    ) -> Result<Hits<'_>> {
         let ranked = search::search_with_cancel(
             &self.catalog.snapshot,
             query,
             opts,
-            true,
             Some(self.id),
-            true,
-            &|| false,
+            direct_children,
+            cancelled,
         )?;
         Ok(Hits {
             catalog: &self.catalog,
@@ -424,13 +428,14 @@ pub struct Hit<'a> {
 }
 
 impl Hit<'_> {
+    /// The Hit's name. Borrows when the on-disk name is valid UTF-8 and only
+    /// allocates for the rare lossy case; use [`Self::path`] to act on the Hit.
     #[must_use]
-    pub fn name(&self) -> &str {
-        self.catalog
-            .snapshot()
-            .entry(self.id)
-            .map(|e| self.catalog.snapshot().name(e))
-            .unwrap_or("")
+    pub fn name(&self) -> std::borrow::Cow<'_, str> {
+        self.catalog.snapshot().entry(self.id).map_or_else(
+            || std::borrow::Cow::Borrowed(""),
+            |e| self.catalog.snapshot().name(e),
+        )
     }
 
     #[must_use]
@@ -506,7 +511,7 @@ mod tests {
                 .search(q)
                 .expect("search")
                 .iter()
-                .map(|h| h.name().to_owned())
+                .map(|h| h.name().into_owned())
                 .collect();
             v.sort();
             v
@@ -555,7 +560,7 @@ mod tests {
         let hits = folder
             .search_children_with("", crate::SearchOpts::default())
             .unwrap();
-        let names: Vec<_> = hits.iter().map(|hit| hit.name().to_string()).collect();
+        let names: Vec<_> = hits.iter().map(|hit| hit.name().into_owned()).collect();
 
         assert!(names.contains(&"folder".to_string()));
         assert!(names.contains(&"file.txt".to_string()));

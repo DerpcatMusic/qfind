@@ -1,5 +1,14 @@
 use super::*;
 use manager_tools::Project;
+use std::fs;
+
+/// First wait before the page retries a failed project index, and its ceiling.
+///
+/// A transient `gh` or filesystem failure used to be permanent: the error was
+/// never cleared, so the page sat on "Projects are unavailable" until the app
+/// was restarted. These two numbers are the whole recovery policy.
+const RETRY_MIN: Duration = Duration::from_secs(2);
+const RETRY_MAX: Duration = Duration::from_secs(30);
 
 fn status_pill(project: &Project) -> String {
     let mut pill = project.branch.clone();
@@ -28,23 +37,193 @@ fn health_text(project: &Project) -> String {
     format!("●{} · {} untracked", project.dirty, project.untracked)
 }
 
-fn cache_bytes(project: &Project) -> u64 {
+fn cache_bytes(storage: &storage::Pane, project: &Project) -> u64 {
     project
         .artifacts
         .iter()
-        .filter_map(|(_, bytes)| *bytes)
+        .filter_map(|(path, known)| known.or_else(|| artifact_bytes(storage, path)))
         .sum()
 }
 
-fn cache_text(project: &Project) -> String {
+thread_local! {
+    /// `path -> bytes` for the artifacts behind the Caches column, per revision.
+    ///
+    /// The backend records every artifact folder with `None`, so this column read
+    /// "N dirs" for every project and sorting by it did nothing. The sizes that
+    /// answer it are already in memory — the indexed `StorageMap` and the
+    /// folder-size cache — but resolving them per comparison meant a sort of
+    /// 2 000 projects did tens of thousands of lookups, and per *render* meant
+    /// re-stat'ing the same paths on every scroll. One pass per project
+    /// revision, misses included.
+    static ARTIFACT_SIZES: RefCell<Option<(u64, HashMap<PathBuf, Option<u64>>)>> =
+        const { RefCell::new(None) };
+}
+
+/// The size of one build/dependency artifact, or `None` when nothing knows it.
+///
+/// `storage.known_size` answers from memory (never a `du`); a plain file falls
+/// back to one `stat`, which reads a single inode and never walks. Nothing here
+/// touches the disk beyond that, so it is safe on the interface thread.
+fn artifact_bytes(storage: &storage::Pane, path: &Path) -> Option<u64> {
+    let revision = storage.catalog_revision();
+    ARTIFACT_SIZES.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let entry = slot.get_or_insert_with(|| (revision, HashMap::new()));
+        if entry.0 != revision {
+            *entry = (revision, HashMap::new());
+        }
+        let sizes = &mut entry.1;
+        if let Some(bytes) = sizes.get(path) {
+            return *bytes;
+        }
+        let bytes = storage.known_size(path).or_else(|| {
+            fs::metadata(path)
+                .ok()
+                .filter(|meta| meta.is_file())
+                .map(|meta| meta.len())
+        });
+        sizes.insert(path.to_path_buf(), bytes);
+        bytes
+    })
+}
+
+thread_local! {
+    /// `path -> index` into the project list, rebuilt only when it changes.
+    ///
+    /// The sort comparator used to linearly scan every project for *both*
+    /// operands on *every* comparison, so a table of 2 000 repos did millions of
+    /// path comparisons and 2·N·log N String allocations on the GTK thread.
+    static PROJECT_INDEX: RefCell<Option<(usize, std::collections::HashMap<PathBuf, usize>)>> =
+        const { RefCell::new(None) };
+}
+
+fn project_index(
+    projects: &Rc<RefCell<Vec<Project>>>,
+) -> std::collections::HashMap<PathBuf, usize> {
+    PROJECT_INDEX.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let records = projects.borrow();
+        if slot.as_ref().is_some_and(|(len, _)| *len == records.len()) {
+            return slot
+                .as_ref()
+                .map(|(_, map)| map.clone())
+                .unwrap_or_default();
+        }
+        let map: std::collections::HashMap<PathBuf, usize> = records
+            .iter()
+            .enumerate()
+            .map(|(index, project)| (project.path.clone(), index))
+            .collect();
+        *slot = Some((records.len(), map.clone()));
+        map
+    })
+}
+
+fn cache_text(storage: &storage::Pane, project: &Project) -> String {
     if project.artifacts.is_empty() {
         return "—".into();
     }
-    let bytes = cache_bytes(project);
-    if bytes == 0 && project.artifacts.iter().any(|(_, bytes)| bytes.is_none()) {
+    let mut bytes = 0u64;
+    let mut unknown = 0usize;
+    for (path, known) in &project.artifacts {
+        match known.or_else(|| artifact_bytes(storage, path)) {
+            Some(size) => bytes = bytes.saturating_add(size),
+            None => unknown += 1,
+        }
+    }
+    if unknown == project.artifacts.len() {
+        // Nothing anywhere knows a size for these, so a folder count is the only
+        // honest thing to show — this used to be the *only* thing it ever showed.
         return format!("{} dirs", project.artifacts.len());
     }
-    actions::human_size(bytes)
+    let total = actions::human_size(bytes);
+    if unknown == 0 {
+        total
+    } else {
+        format!("{total} (+{unknown})")
+    }
+}
+
+/// The project data the two detail panels render, as one comparable value.
+///
+/// The panels used to be cached per path alone and re-appended, so a panel kept
+/// the numbers of the render that built it, and GTK re-parented the box on the
+/// way in. Keying the cache on the content rebuilds exactly when the data moved
+/// and leaves the panels alone when it did not.
+#[derive(PartialEq, Eq, Clone)]
+struct DetailKey {
+    path: PathBuf,
+    branch: String,
+    target: String,
+    last_commit: String,
+    repository: String,
+    modified: i64,
+    ahead: u32,
+    behind: u32,
+    dirty: u32,
+    untracked: u32,
+    conflicted: u32,
+    artifacts: usize,
+    scripts: usize,
+    rust: bool,
+    node: bool,
+    git: bool,
+    is_linked: bool,
+}
+
+fn detail_key(project: &Project) -> DetailKey {
+    DetailKey {
+        path: project.path.clone(),
+        branch: project.branch.clone(),
+        target: project.target.clone(),
+        last_commit: project.last_commit.clone(),
+        repository: project.repository.clone(),
+        modified: project.modified,
+        ahead: project.ahead,
+        behind: project.behind,
+        dirty: project.dirty,
+        untracked: project.untracked,
+        conflicted: project.conflicted,
+        artifacts: project.artifacts.len(),
+        scripts: project.scripts.len(),
+        rust: project.rust,
+        node: project.node,
+        git: project.git,
+        is_linked: project.is_linked,
+    }
+}
+
+/// One project's detail panels, plus what they were built from.
+struct DetailPanels {
+    overview: gtk::Box,
+    overview_key: DetailKey,
+    caches: gtk::Box,
+    /// Catalog revision the caches panel was built from. It lists every
+    /// project's artifacts, so it is refreshed by the index, not by selection.
+    caches_revision: u64,
+}
+
+impl DetailPanels {
+    /// Put the panels back on screen after a rebuild.
+    ///
+    /// Re-appending a panel that is already showing is what re-parented it in
+    /// the first place, so a render that changed nothing leaves the sections
+    /// exactly as they are — no reparent, no second round of `git` spawns.
+    fn show(&self, rebuilt: bool, overview: &gtk::Box, caches: &gtk::Box) {
+        if !rebuilt
+            && self.overview.parent().as_ref() == Some(overview.upcast_ref::<gtk::Widget>())
+            && self.caches.parent().as_ref() == Some(caches.upcast_ref::<gtk::Widget>())
+        {
+            return;
+        }
+        for section in [overview, caches] {
+            while let Some(child) = section.first_child() {
+                section.remove(&child);
+            }
+        }
+        overview.append(&self.overview);
+        caches.append(&self.caches);
+    }
 }
 
 fn toolchain_text(project: &Project) -> String {
@@ -82,6 +261,117 @@ fn parent_text(project: &Project) -> String {
     } else {
         text
     }
+}
+
+/// Split a typed `git` command into arguments.
+///
+/// `split_whitespace` meant `git commit -m "fix bug"` became
+/// `["commit", "-m", "\"fix", "bug\""]` and committed a message of `"fix`, and
+/// `strip_prefix("git ")` failed on two spaces, turning the literal `git` into
+/// the first argument.
+fn git_command_args(text: &str) -> Vec<String> {
+    let trimmed = text.trim();
+    let body = trimmed
+        .strip_prefix("git")
+        .map(str::trim_start)
+        .filter(|rest| rest.len() < trimmed.len())
+        .unwrap_or(trimmed);
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    for ch in body.chars() {
+        match (quote, ch) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), c) => current.push(c),
+            (None, c @ ('\'' | '"')) => quote = Some(c),
+            (None, c) if c.is_whitespace() => {
+                if !current.is_empty() {
+                    args.push(std::mem::take(&mut current));
+                }
+            }
+            (None, c) => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        args.push(current);
+    }
+    args
+}
+
+/// A git verb that changes the working tree needs a re-index afterwards; a
+/// read-only one does not.
+///
+/// Re-indexing spawned 3-7 `git` processes per project plus one `gh` call, and
+/// it ran for *every* command including `git log -3`, so a few commands in a row
+/// piled up concurrent full scans of every repository on disk.
+fn mutates_working_tree(args: &[String]) -> bool {
+    args.first().is_some_and(|verb| {
+        matches!(
+            verb.as_str(),
+            "switch"
+                | "checkout"
+                | "merge"
+                | "pull"
+                | "fetch"
+                | "reset"
+                | "rebase"
+                | "clean"
+                | "stash"
+                | "restore"
+                | "add"
+                | "rm"
+                | "mv"
+                | "init"
+                | "clone"
+        )
+    })
+}
+
+/// Run one git verb on a worker thread: show it, re-enable the buttons,
+/// re-index only when the verb changed the working tree, then report success.
+fn run_git_verb(
+    output: &gtk::TextBuffer,
+    state: &Rc<RefCell<State>>,
+    buttons: &[gtk::Button],
+    dir: PathBuf,
+    args: Vec<String>,
+    done: Box<dyn Fn(bool)>,
+) {
+    output.set_text(&format!("$ git {}\n...", args.join(" ")));
+    for button in buttons {
+        button.set_sensitive(false);
+    }
+    let (output, state, buttons) = (output.clone(), state.clone(), buttons.to_vec());
+    let touched = mutates_working_tree(&args);
+    glib::MainContext::default().spawn_local(async move {
+        let result = gio::spawn_blocking(move || {
+            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            let text = qfind_core::components::git(&dir, &refs, None);
+            (refs.join(" "), text)
+        })
+        .await;
+        let (line, text) = match result {
+            Ok(pair) => pair,
+            Err(_) => (String::new(), Err("git worker failed".into())),
+        };
+        let ok = text.is_ok();
+        let body = match text {
+            Ok(output) if output.trim().is_empty() => "done".to_owned(),
+            Ok(output) => output,
+            Err(error) => error,
+        };
+        output.set_text(&format!("$ git {line}\n{body}"));
+        for button in &buttons {
+            button.set_sensitive(true);
+        }
+        if touched {
+            manager_tools::refresh_project_account();
+            if let Some(catalog) = state.borrow().catalog.clone() {
+                state.borrow().storage.refresh_projects(catalog, true);
+            }
+        }
+        done(ok);
+    });
 }
 
 pub fn new(
@@ -174,6 +464,7 @@ pub fn new(
                 item.set_child(Some(&label));
             });
             let projects = projects.clone();
+            let storage = storage.clone();
             factory.connect_bind(move |_, item| {
                 let Some(item) = item.downcast_ref::<gtk::ListItem>() else {
                     return;
@@ -210,7 +501,7 @@ pub fn new(
                             "Clean".into()
                         }
                     }
-                    "Caches" => cache_text(project),
+                    "Caches" => cache_text(&storage, project),
                     "Worktrees" => project.worktrees.len().max(1).to_string(),
                     "Last commit" => {
                         if project.last_commit.is_empty() {
@@ -282,14 +573,17 @@ pub fn new(
             else {
                 return gtk::Ordering::Equal;
             };
-            let records = records.borrow();
+            // One hash lookup per operand, not a scan of every project. The
+            // table is rebuilt only when the project list actually changes.
+            let table = project_index(&records);
             let (ap, bp) = (a.path(), b.path());
-            let (Some(pa), Some(pb)) = (
-                records.iter().find(|p| p.path == Path::new(&ap)),
-                records.iter().find(|p| p.path == Path::new(&bp)),
-            ) else {
+            let known = records.borrow();
+            let (Some(&left), Some(&right)) =
+                (table.get(Path::new(&ap)), table.get(Path::new(&bp)))
+            else {
                 return gtk::Ordering::Equal;
             };
+            let (pa, pb) = (&known[left], &known[right]);
             let order = match column {
                 "Indexed size" => storage
                     .known_size(&pa.path)
@@ -306,7 +600,7 @@ pub fn new(
                     pb.dirty,
                     pb.untracked,
                 )),
-                "Caches" => cache_bytes(pa).cmp(&cache_bytes(pb)),
+                "Caches" => cache_bytes(&storage, pa).cmp(&cache_bytes(&storage, pb)),
                 "Worktrees" => pa.worktrees.len().cmp(&pb.worktrees.len()),
                 "Last commit" => pa.last_commit.cmp(&pb.last_commit),
                 "Repository" => pa
@@ -328,7 +622,7 @@ pub fn new(
         .and_downcast::<gtk::ColumnViewColumn>();
     table.sort_by_column(first.as_ref(), gtk::SortType::Ascending);
     toolbar.append(&columns::configure(&table, "projects"));
-    let details = Rc::new(RefCell::new(HashMap::<PathBuf, (gtk::Box, gtk::Box)>::new()));
+    let details = Rc::new(RefCell::new(HashMap::<PathBuf, DetailPanels>::new()));
     let open = Rc::new(open);
     {
         let open = open.clone();
@@ -504,40 +798,9 @@ pub fn new(
 
     // Every git verb funnels through here: run, show output, re-read projects.
     let run_git: Rc<dyn Fn(PathBuf, Vec<String>)> = {
-        let output = output.clone();
-        let state = state.clone();
-        let buttons = buttons.clone();
+        let (output, state, buttons) = (output.clone(), state.clone(), buttons.clone());
         Rc::new(move |dir: PathBuf, args: Vec<String>| {
-            output.set_text(&format!("$ git {}\n…", args.join(" ")));
-            for button in &buttons {
-                button.set_sensitive(false);
-            }
-            let (output, state, buttons) = (output.clone(), state.clone(), buttons.clone());
-            glib::MainContext::default().spawn_local(async move {
-                let result = gio::spawn_blocking(move || {
-                    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-                    let text = qfind_core::components::git(&dir, &refs, None);
-                    (refs.join(" "), text)
-                })
-                .await;
-                let (line, text) = match result {
-                    Ok(pair) => pair,
-                    Err(_) => (String::new(), Err("git worker failed".into())),
-                };
-                let body = match text {
-                    Ok(ok) if ok.trim().is_empty() => "done".to_owned(),
-                    Ok(ok) => ok,
-                    Err(error) => error,
-                };
-                output.set_text(&format!("$ git {line}\n{body}"));
-                for button in &buttons {
-                    button.set_sensitive(true);
-                }
-                manager_tools::refresh_project_account();
-                if let Some(catalog) = state.borrow().catalog.clone() {
-                    state.borrow().storage.refresh_projects(catalog, true);
-                }
-            });
+            run_git_verb(&output, &state, &buttons, dir, args, Box::new(|_| {}));
         })
     };
     {
@@ -596,7 +859,11 @@ pub fn new(
         let projects = projects.clone();
         let run_git = run_git.clone();
         let window = window.clone();
+        let (output, state, buttons) = (output.clone(), state.clone(), buttons.clone());
         merge.connect_clicked(move |_| {
+            // `connect_clicked` takes an `Fn`, so the `move` closure below can
+            // only borrow these. Clone into locals the closure may own.
+            let (output, state, buttons) = (output.clone(), state.clone(), buttons.clone());
             let Some(project) = current.borrow().clone() else {
                 return;
             };
@@ -650,16 +917,37 @@ pub fn new(
                     return;
                 }
                 if switching {
-                    // Two steps: switch, then merge. The second runs once the first has reported.
-                    let run_git = run_git.clone();
+                    // Two steps, and the second only if the first worked. An
+                    // unconditional 1.5 s timer merged the feature branch into
+                    // whatever branch a *failed* checkout was left on, with no
+                    // second confirmation.
+                    // `choose` hands back an `Fn`, so clone here and move the
+                    // owned copies into the continuation.
                     let dir_for_merge = dir.clone();
-                    run_git(dir, args);
-                    glib::timeout_add_local_once(Duration::from_millis(1500), move || {
-                        run_git(
-                            dir_for_merge,
-                            vec!["merge".into(), "--no-ff".into(), branch],
-                        )
-                    });
+                    let (done_output, done_state, done_buttons) =
+                        (output.clone(), state.clone(), buttons.clone());
+                    run_git_verb(
+                        &output,
+                        &state,
+                        &buttons,
+                        dir,
+                        args,
+                        Box::new(move |switched| {
+                            if !switched {
+                                return;
+                            }
+                            let dir = dir_for_merge.clone();
+                            let branch = branch.clone();
+                            run_git_verb(
+                                &done_output,
+                                &done_state,
+                                &done_buttons,
+                                dir,
+                                vec!["merge".into(), "--no-ff".into(), branch],
+                                Box::new(|_| {}),
+                            );
+                        }),
+                    );
                 } else {
                     run_git(dir, args);
                 }
@@ -727,12 +1015,9 @@ pub fn new(
             let Some(project) = current.borrow().clone() else {
                 return;
             };
-            let main = project
-                .worktrees
-                .first()
-                .cloned()
-                .unwrap_or_else(|| project.path.clone());
-            remove_tree(main, project.path);
+            // The primary checkout, not a sibling: `worktrees` deliberately
+            // excludes the project itself, so `.first()` was never the repo root.
+            remove_tree(project.main_repo.clone(), project.path);
         });
     }
     {
@@ -742,14 +1027,7 @@ pub fn new(
             let Some(path) = selected.borrow().clone() else {
                 return;
             };
-            let text = entry.text();
-            let words: Vec<String> = text
-                .trim()
-                .strip_prefix("git ")
-                .unwrap_or(text.trim())
-                .split_whitespace()
-                .map(str::to_owned)
-                .collect();
+            let words = git_command_args(&entry.text());
             if words.is_empty() {
                 return;
             }
@@ -760,6 +1038,7 @@ pub fn new(
     {
         let window = window.clone();
         let state = state.clone();
+        let storage = storage.clone();
         let details = details.clone();
         let projects_for_render = projects.clone();
         let render = Rc::new(move |project: Option<Project>| {
@@ -816,11 +1095,10 @@ pub fn new(
             } else {
                 format!("Merge → {target}")
             });
-            let is_linked = project
-                .worktrees
-                .first()
-                .is_some_and(|main| main != &project.path);
-            remove_worktree.set_sensitive(project.git && is_linked);
+            // Only a *linked* worktree can be removed. The old test
+            // (`worktrees.first() != project.path`) held for any repository that
+            // had a worktree, so this offered to delete the main checkout.
+            remove_worktree.set_sensitive(project.git && project.is_linked);
             output.set_text(&format!(
                 "{}\n{}\n{}",
                 status_pill(&project),
@@ -888,24 +1166,45 @@ pub fn new(
             }
             worktree_head.set_text(&format!("WORKTREES · {}", trees.len()));
             drop(known);
-            while let Some(child) = overview.first_child() {
-                overview.remove(&child);
+            // Rebuild a panel only when the data it renders actually moved, and
+            // never re-append one that is already on screen: the panels used to
+            // be cached per path alone and re-appended every render, so they
+            // kept the numbers of the render that built them.
+            let revision = storage.catalog_revision();
+            let key = detail_key(&project);
+            let mut rebuilt = false;
+            {
+                let mut cached = details.borrow_mut();
+                let panels = cached
+                    .entry(project.path.clone())
+                    .or_insert_with(|| DetailPanels {
+                        overview: manager_tools::project_detail_content(
+                            &window,
+                            &state,
+                            project.clone(),
+                        ),
+                        overview_key: key.clone(),
+                        caches: manager_tools::project_content_at(
+                            &window,
+                            &state,
+                            project.path.clone(),
+                        ),
+                        caches_revision: revision,
+                    });
+                if panels.overview_key != key {
+                    panels.overview =
+                        manager_tools::project_detail_content(&window, &state, project.clone());
+                    panels.overview_key = key.clone();
+                    rebuilt = true;
+                }
+                if panels.caches_revision != revision {
+                    panels.caches =
+                        manager_tools::project_content_at(&window, &state, project.path.clone());
+                    panels.caches_revision = revision;
+                    rebuilt = true;
+                }
+                panels.show(rebuilt, &overview, &caches);
             }
-            while let Some(child) = caches.first_child() {
-                caches.remove(&child);
-            }
-            let panels = details
-                .borrow_mut()
-                .entry(project.path.clone())
-                .or_insert_with(|| {
-                    (
-                        manager_tools::project_detail_content(&window, &state, project.clone()),
-                        manager_tools::project_content_at(&window, &state, project.path.clone()),
-                    )
-                })
-                .clone();
-            overview.append(&panels.0);
-            caches.append(&panels.1);
         });
         let choices = Rc::new(RefCell::new(Vec::<Project>::new()));
         let changing = Rc::new(Cell::new(false));
@@ -1023,7 +1322,11 @@ pub fn new(
     }
     let weak = root.downgrade();
     let mut last = None;
+    let mut backoff = RETRY_MIN;
+    let mut retry_at = std::time::Instant::now();
     let refresh_button = refresh.clone();
+    let window = window.clone();
+    let state = state.clone();
     glib::timeout_add_local(Duration::from_millis(200), move || {
         let Some(root) = weak.upgrade() else {
             return glib::ControlFlow::Break;
@@ -1031,15 +1334,35 @@ pub fn new(
         if !root.is_mapped() {
             return glib::ControlFlow::Continue;
         }
+        // The Refresh button's state follows the work, not the click: it used to
+        // be greyed by `set_sensitive(false)` and re-enabled only on the success
+        // path, so a refresh that errored — or never produced a list — left the
+        // button dead for the rest of the session.
+        refresh_button.set_sensitive(!storage.project_refresh_pending());
         if let Some(error) = storage.project_error() {
-            status.set_text(&error);
+            status.set_text(&format!("{error} Retrying…"));
             empty_title.set_text("Projects are unavailable");
-            empty_hint.set_text(&error);
+            empty_hint.set_text(&format!(
+                "{error}\nThis is retried on its own; Refresh retries now."
+            ));
             project_list.set_visible_child_name("empty");
-            model.remove_all();
-            last = None;
-            refresh_button.set_sensitive(true);
-            return glib::ControlFlow::Continue;
+            if model.n_items() > 0 {
+                model.remove_all();
+            }
+            // Retry instead of returning. `project_error` is sticky, so the
+            // first early return here wedged the page on "Projects are
+            // unavailable" after a single transient failure, with the only way
+            // out being the one button that had just been greyed out.
+            if std::time::Instant::now() >= retry_at {
+                retry_at = std::time::Instant::now() + backoff;
+                backoff = backoff.saturating_mul(2).min(RETRY_MAX);
+                storage.clear_project_error();
+                if let Some(catalog) = state.borrow().catalog.clone() {
+                    storage.refresh_projects(catalog, true);
+                } else {
+                    start_rebuild(&state, &window, true);
+                }
+            }
         }
         let key = (search.text().to_lowercase(), storage.catalog_revision());
         if last.as_ref() == Some(&key) {
@@ -1157,7 +1480,9 @@ pub fn new(
             selection.set_selected(position);
         }
         last = Some(key);
-        refresh_button.set_sensitive(true);
+        // The index answered, so the next failure starts its wait over instead
+        // of inheriting the previous one's backoff.
+        backoff = RETRY_MIN;
         glib::ControlFlow::Continue
     });
     root

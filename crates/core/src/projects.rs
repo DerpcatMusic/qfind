@@ -31,9 +31,17 @@ pub struct Project {
     /// Short last-commit summary (`sha message`).
     #[serde(default)]
     pub last_commit: String,
-    /// Linked worktree paths sharing this repository.
+    /// Linked worktree paths sharing this repository, excluding this one.
     #[serde(default)]
     pub worktrees: Vec<PathBuf>,
+    /// The repository's primary checkout. `worktrees.first()` used to stand in
+    /// for this and was a *sibling*, so `git -C <sibling> worktree remove`
+    /// ran against the wrong root for every linked-worktree project.
+    #[serde(default)]
+    pub main_repo: PathBuf,
+    /// True when this row is a linked worktree rather than the primary checkout.
+    #[serde(default)]
+    pub is_linked: bool,
     /// package.json script names (capped) for web projects.
     #[serde(default)]
     pub scripts: Vec<String>,
@@ -223,6 +231,13 @@ fn describe_project(path: PathBuf, owned: &HashSet<String>) -> Project {
     .max()
     .unwrap_or(0);
     // Build/dependency caches worth reviewing, including web outputs.
+    //
+    // The size is left `None` on purpose: measuring a `node_modules` here would
+    // mean a full recursive walk per project inside the discovery pass, and
+    // discovery runs over every repository in the index. The sizes that are
+    // already known — the file index and the folder-size cache — are resolved
+    // by the surface that renders them, which is the only place that knows
+    // whether they are in memory.
     let mut artifacts = Vec::new();
     for name in [
         "target",
@@ -333,6 +348,8 @@ fn describe_project(path: PathBuf, owned: &HashSet<String>) -> Project {
         conflicted,
         last_commit,
         worktrees: Vec::new(),
+        main_repo: PathBuf::new(),
+        is_linked: false,
         scripts,
         web_tool,
     }
@@ -479,7 +496,7 @@ pub fn index_projects(catalog: &Catalog) -> Result<Vec<Project>, String> {
             continue;
         };
         if !matches!(
-            hit.name(),
+            hit.name().as_ref(),
             "Cargo.toml"
                 | "package.json"
                 | ".git"
@@ -582,11 +599,16 @@ pub fn index_projects(catalog: &Catalog) -> Result<Vec<Project>, String> {
     }
     for (project, common) in projects.iter_mut().zip(&all_commons) {
         if let Some(siblings) = by_common.get(common) {
+            // The first row seen for a shared git dir is the primary checkout;
+            // `by_common` is built in discovery order and every worktree resolves
+            // to the same `--git-common-dir`.
+            project.main_repo = siblings[0].clone();
             project.worktrees = siblings
                 .iter()
                 .filter(|path| *path != &project.path)
                 .cloned()
                 .collect();
+            project.is_linked = project.path != project.main_repo;
         }
     }
     if !login.is_empty() {

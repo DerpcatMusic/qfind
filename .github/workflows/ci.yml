@@ -16,7 +16,9 @@ env:
   RUSTDOCFLAGS: -D warnings
   # Linux system libraries this crate links against (space separated). Edit per repo.
   # gtk4 crate feature v4_12 needs GTK >= 4.12 (24.04 ships 4.14).
-  APT_PACKAGES: "libgtk-4-dev libarchive-dev xvfb"
+  # GStreamer is the video Preview's decoder and transport; libasound2 is the
+  # audio one.
+  APT_PACKAGES: "libgtk-4-dev libarchive-dev libasound2-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev xvfb"
 jobs:
   lint:
     name: fmt + clippy + doc

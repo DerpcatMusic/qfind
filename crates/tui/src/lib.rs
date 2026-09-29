@@ -1358,6 +1358,7 @@ impl App {
             limit: MAX_ROWS,
             highlight: true,
             match_mode: self.match_mode,
+            show_hidden: self.show_hidden,
         }
     }
 

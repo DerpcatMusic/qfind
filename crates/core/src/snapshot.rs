@@ -13,6 +13,11 @@ pub(crate) const VERSION: u32 = 1;
 pub(crate) const ENTRY_SIZE: usize = 32;
 const HEADER_SIZE: usize = 28;
 
+/// Hard ceiling on how far up the parent chain we will walk. Real trees are
+/// nowhere near this; hitting it means the snapshot is malformed, and every
+/// ancestor walk shares this bound so they can never disagree about a path.
+const MAX_DEPTH: u32 = 512;
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Entry {
     pub parent: u32,
@@ -41,7 +46,36 @@ pub(crate) struct Snapshot {
     names_off: usize,
     letter_mask: OnceLock<Box<[u64]>>,
     hidden: OnceLock<Box<[bool]>>,
-    folder_paths: OnceLock<std::collections::HashMap<PathBuf, u32>>,
+    folder_paths: OnceLock<FolderIndex>,
+}
+
+/// Exact path → folder id, plus a case-folded tier for the case-insensitive
+/// filesystems where `/Users/me` and `/users/me` are the same folder.
+struct FolderIndex {
+    exact: std::collections::HashMap<PathBuf, u32>,
+    folded: std::collections::HashMap<String, u32>,
+}
+
+impl FolderIndex {
+    fn get(&self, path: &Path) -> Option<u32> {
+        self.exact
+            .get(path)
+            .copied()
+            .or_else(|| self.folded.get(&fold_key(path)).copied())
+    }
+}
+
+/// Case-folded lookup key. Only consulted after an exact miss, so a
+/// case-sensitive filesystem is unaffected.
+#[cfg(any(windows, target_os = "macos"))]
+fn fold_key(path: &Path) -> String {
+    path.to_string_lossy().to_lowercase()
+}
+
+/// On case-sensitive filesystems an exact miss is a genuine miss.
+#[cfg(not(any(windows, target_os = "macos")))]
+fn fold_key(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
 }
 
 impl Snapshot {
@@ -132,22 +166,24 @@ impl Snapshot {
     }
 
     /// Walk parents up to the Mount root this entry was walked from.
-    pub(crate) fn root_of(&self, mut id: u32) -> u32 {
-        let mut guard = 0u32;
-        while let Some(e) = self.entry(id) {
-            if e.parent == Entry::ROOT_PARENT || guard > 512 {
-                break;
-            }
-            id = e.parent;
-            guard += 1;
-        }
-        id
+    pub(crate) fn root_of(&self, id: u32) -> u32 {
+        self.ancestors(id).last().map_or(id, |(id, _)| id)
     }
 
-    pub(crate) fn name(&self, entry: Entry) -> &str {
-        let start = self.names_off + entry.name_off as usize;
-        let end = start + entry.name_len as usize;
-        std::str::from_utf8(self.bytes.get(start..end).unwrap_or(b"")).unwrap_or("")
+    /// Raw on-disk bytes of an entry's name. Names are *not* guaranteed UTF-8;
+    /// a latin-1 or GBK filename is stored verbatim so [`Self::path`] can hand
+    /// back the exact path the filesystem has.
+    pub(crate) fn name_bytes(&self, entry: Entry) -> &[u8] {
+        let start = self.names_off.saturating_add(entry.name_off as usize);
+        let end = start.saturating_add(entry.name_len as usize);
+        self.bytes.get(start..end).unwrap_or_default()
+    }
+
+    /// The entry's name for display and matching. Borrows when the name is
+    /// valid UTF-8 (the overwhelming majority) and only allocates for the rest.
+    pub(crate) fn name(&self, entry: Entry) -> std::borrow::Cow<'_, str> {
+        let raw = self.name_bytes(entry);
+        String::from_utf8_lossy(raw)
     }
 
     /// One `u64` letter/digit mask per id. Prefers the sidecar mmap written on Rebuild.
@@ -160,12 +196,16 @@ impl Snapshot {
             let mut v = vec![0u64; n];
             for (id, slot) in v.iter_mut().enumerate() {
                 if let Some(e) = self.entry(id as u32) {
-                    *slot = prefilter::mask_name(self.name(e).as_bytes());
+                    *slot = prefilter::mask_name(self.name_bytes(e));
                 }
             }
-            let _ = write_mask_file(&self.path.with_extension("mask"), &v);
+            let _ = write_mask_file(&self.mask_path(), &v);
             v.into_boxed_slice()
         })
+    }
+
+    fn mask_path(&self) -> PathBuf {
+        self.path.with_extension("mask")
     }
 
     fn mapped_masks(&self) -> Option<&[u64]> {
@@ -173,28 +213,30 @@ impl Snapshot {
         mask_slice(map, self.len() as usize)
     }
 
+    /// Ancestors of `id`, nearest first, ending at its Mount root.
+    ///
+    /// Every parent walk in this file goes through here so the depth cap, the
+    /// root test, and the parent ordering can never drift apart.
+    fn ancestors(&self, id: u32) -> Ancestors<'_> {
+        Ancestors {
+            snapshot: self,
+            next: Some(id),
+            depth: 0,
+        }
+    }
+
     pub(crate) fn path(&self, id: u32) -> PathBuf {
-        let mut parts = Vec::with_capacity(16);
-        let mut cur = id;
-        let mut guard = 0u32;
-        while let Some(e) = self.entry(cur) {
-            parts.push(self.name(e));
-            if e.parent == Entry::ROOT_PARENT {
-                break;
-            }
-            cur = e.parent;
-            guard += 1;
-            if guard > 512 {
-                break;
-            }
-        }
+        let mut parts: Vec<&[u8]> = self
+            .ancestors(id)
+            .map(|(_, e)| self.name_bytes(e))
+            .collect();
         parts.reverse();
-        if parts.is_empty() {
+        let Some((first, rest)) = parts.split_first() else {
             return PathBuf::from(".");
-        }
-        let mut path = PathBuf::from(parts[0]);
-        for p in &parts[1..] {
-            path.push(p);
+        };
+        let mut path = os_path(first);
+        for part in rest {
+            path.push(os_path(part));
         }
         path
     }
@@ -202,33 +244,22 @@ impl Snapshot {
     pub(crate) fn folder_id(&self, path: &Path) -> Option<u32> {
         self.folder_paths
             .get_or_init(|| {
-                let mut paths = std::collections::HashMap::new();
+                let mut index = FolderIndex {
+                    exact: std::collections::HashMap::with_capacity(self.folder_count as usize),
+                    folded: std::collections::HashMap::new(),
+                };
                 for id in 0..self.folder_count {
-                    paths.entry(self.path(id)).or_insert(id);
+                    let path = self.path(id);
+                    index.exact.entry(path.clone()).or_insert(id);
+                    index.folded.entry(fold_key(&path)).or_insert(id);
                 }
-                paths
+                index
             })
             .get(path)
-            .copied()
     }
 
     pub(crate) fn is_descendant_of(&self, id: u32, folder: u32) -> bool {
-        let mut current = id;
-        let mut guard = 0u32;
-        while let Some(entry) = self.entry(current) {
-            if entry.parent == folder {
-                return true;
-            }
-            if entry.parent == Entry::ROOT_PARENT || entry.parent == current {
-                return false;
-            }
-            current = entry.parent;
-            guard = guard.saturating_add(1);
-            if guard > 512 {
-                return false;
-            }
-        }
-        false
+        id != folder && self.ancestors(id).any(|(id, _)| id == folder)
     }
 
     pub(crate) fn is_hidden(&self, id: u32) -> bool {
@@ -239,16 +270,13 @@ impl Snapshot {
                     let Some(entry) = self.entry(current) else {
                         continue;
                     };
-                    let name = self.name(entry);
+                    let name = self.name_bytes(entry);
                     let own = if entry.parent == Entry::ROOT_PARENT {
-                        Path::new(name).components().any(|part| {
-                            part.as_os_str()
-                                .as_encoded_bytes()
-                                .first()
-                                .is_some_and(|byte| *byte == b'.')
-                        })
+                        os_path(name)
+                            .components()
+                            .any(|part| part.as_os_str().as_encoded_bytes().first() == Some(&b'.'))
                     } else {
-                        name.as_bytes().first().is_some_and(|byte| *byte == b'.')
+                        name.first() == Some(&b'.')
                     };
                     let inherited = entry
                         .parent
@@ -265,6 +293,69 @@ impl Snapshot {
             .copied()
             .unwrap_or(false)
     }
+}
+
+/// `id` plus each ancestor's entry, nearest first, stopping at the Mount root
+/// or at [`MAX_DEPTH`].
+struct Ancestors<'a> {
+    snapshot: &'a Snapshot,
+    next: Option<u32>,
+    depth: u32,
+}
+
+impl Iterator for Ancestors<'_> {
+    type Item = (u32, Entry);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.depth > MAX_DEPTH {
+            return None;
+        }
+        let id = self.next?;
+        let entry = self.snapshot.entry(id)?;
+        self.next = (entry.parent != Entry::ROOT_PARENT).then_some(entry.parent);
+        self.depth += 1;
+        Some((id, entry))
+    }
+}
+
+/// Rebuild a path component from raw bytes. `OsStr::from_bytes` is exact on
+/// Unix, so a non-UTF-8 name round-trips instead of collapsing to its parent.
+fn os_path(raw: &[u8]) -> PathBuf {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        PathBuf::from(std::ffi::OsStr::from_bytes(raw))
+    }
+    #[cfg(not(unix))]
+    {
+        PathBuf::from(String::from_utf8_lossy(raw).into_owned())
+    }
+}
+
+/// Raw bytes of a path's final component. Never lossy and never empty, so an
+/// entry can always be turned back into the exact path the filesystem has.
+#[cfg(unix)]
+fn name_bytes(path: &Path) -> &[u8] {
+    use std::ffi::OsStr;
+    path.file_name().map_or(b"", OsStr::as_encoded_bytes)
+}
+
+/// Non-Unix filesystems hand out UTF-8, so the lossy form is already exact.
+#[cfg(not(unix))]
+fn name_bytes(path: &Path) -> &[u8] {
+    path.file_name()
+        .map_or(b"", |name| name.to_string_lossy().as_bytes())
+}
+
+/// Raw bytes of a whole path, used for a Mount root's own name.
+#[cfg(unix)]
+fn path_bytes(path: &Path) -> &[u8] {
+    path.as_os_str().as_encoded_bytes()
+}
+
+#[cfg(not(unix))]
+fn path_bytes(path: &Path) -> &[u8] {
+    path.to_string_lossy().as_bytes()
 }
 
 pub(crate) struct Builder {
@@ -359,8 +450,7 @@ impl Builder {
         }
         let parent_path = path.parent().unwrap_or(walk_root);
         let parent = self.intern_dir(parent_path, walk_root);
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        self.push_dir(path.to_path_buf(), parent, name, 0, 0)
+        self.push_dir(path.to_path_buf(), parent, name_bytes(path), 0, 0)
     }
 
     pub(crate) fn add_dir(&mut self, path: &Path, walk_root: &Path, size: u64, mtime: i64) -> u32 {
@@ -375,8 +465,7 @@ impl Builder {
     pub(crate) fn add_file(&mut self, path: &Path, walk_root: &Path, size: u64, mtime: i64) {
         let parent_path = path.parent().unwrap_or(walk_root);
         let parent = self.intern_dir(parent_path, walk_root);
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        let (name_off, name_len) = self.push_name(name);
+        let (name_off, name_len) = self.push_name(name_bytes(path));
         self.files.push(Entry {
             parent,
             name_off,
@@ -391,17 +480,18 @@ impl Builder {
         if let Some(id) = self.ids.get(walk_root) {
             return id;
         }
-        let name = walk_root.to_string_lossy();
+        // A Mount root is stored under its *whole* path, so `path(id)` on any
+        // entry below it comes back absolute rather than root-relative.
         self.push_dir(
             walk_root.to_path_buf(),
             Entry::ROOT_PARENT,
-            name.as_ref(),
+            path_bytes(walk_root),
             0,
             0,
         )
     }
 
-    fn push_dir(&mut self, path: PathBuf, parent: u32, name: &str, size: u64, mtime: i64) -> u32 {
+    fn push_dir(&mut self, path: PathBuf, parent: u32, name: &[u8], size: u64, mtime: i64) -> u32 {
         let (name_off, name_len) = self.push_name(name);
         let id = u32::try_from(self.folders.len()).unwrap_or(u32::MAX);
         self.folders.push(Entry {
@@ -416,17 +506,29 @@ impl Builder {
         id
     }
 
-    fn push_name(&mut self, name: &str) -> (u32, u32) {
+    fn push_name(&mut self, name: &[u8]) -> (u32, u32) {
         let off = u32::try_from(self.names.len()).unwrap_or(u32::MAX);
-        let bytes = name.as_bytes();
-        self.names.extend_from_slice(bytes);
-        (off, u32::try_from(bytes.len()).unwrap_or(u32::MAX))
+        self.names.extend_from_slice(name);
+        (off, u32::try_from(name.len()).unwrap_or(u32::MAX))
     }
 
     pub(crate) fn write(&self, path: &Path) -> Result<()> {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir).map_err(|e| Error::io(dir, e))?;
         }
+        // The mask sidecar must land *before* the snapshot it describes. A
+        // reader that opens in between then sees a complete pair, never a new
+        // entry table paired with the previous permutation of masks.
+        let mut masks = Vec::with_capacity(self.folders.len() + self.files.len());
+        for e in self.folders.iter().chain(self.files.iter()) {
+            let start = e.name_off as usize;
+            let end = start.saturating_add(e.name_len as usize);
+            masks.push(prefilter::mask_name(
+                self.names.get(start..end).unwrap_or(b""),
+            ));
+        }
+        let _ = write_mask_file(&path.with_extension("mask"), &masks);
+
         let tmp = path.with_extension("tmp");
         {
             let file = File::create(&tmp).map_err(|e| Error::io(&tmp, e))?;
@@ -435,14 +537,6 @@ impl Builder {
             w.flush().map_err(|e| Error::io(&tmp, e))?;
         }
         fs::rename(&tmp, path).map_err(|e| Error::io(path, e))?;
-        let mut masks = Vec::with_capacity(self.folders.len() + self.files.len());
-        for e in self.folders.iter().chain(self.files.iter()) {
-            let start = e.name_off as usize;
-            let end = start.saturating_add(e.name_len as usize);
-            let name = self.names.get(start..end).unwrap_or(b"");
-            masks.push(prefilter::mask_name(name));
-        }
-        let _ = write_mask_file(&path.with_extension("mask"), &masks);
         Ok(())
     }
 

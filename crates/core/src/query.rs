@@ -116,6 +116,8 @@ pub struct SearchOpts {
     pub limit: usize,
     pub highlight: bool,
     pub match_mode: MatchMode,
+    /// Keep dotfiles and anything below a dot-directory out of the Hits.
+    pub show_hidden: bool,
 }
 
 impl Default for SearchOpts {
@@ -128,6 +130,7 @@ impl Default for SearchOpts {
             limit: 0,
             highlight: false,
             match_mode: MatchMode::Fuzzy,
+            show_hidden: true,
         }
     }
 }

@@ -24,10 +24,24 @@ pub struct Tile {
 }
 
 /// Group Hits by parent folder. Weight is size, or 1 per Hit if size is 0.
+///
+/// `items` may be a mix of full paths and paths already made relative to the
+/// browsed folder. A path with no separator at all is its own group rather than
+/// joining every direct child of the browsed folder under one bogus `/` tile.
 pub fn folder_weights(items: &[HitRef]) -> Vec<Weighted> {
     let mut map: BTreeMap<String, Weighted> = BTreeMap::new();
     for it in items {
-        let parent = parent_of(&it.path);
+        let Some(parent) = parent_of(&it.path) else {
+            let name = folder_name(&it.path);
+            let e = map.entry(it.path.clone()).or_insert_with(|| Weighted {
+                name,
+                path: it.path.clone(),
+                weight: 0,
+                id: it.id,
+            });
+            e.weight = e.weight.saturating_add(it.weight.max(1));
+            continue;
+        };
         let name = folder_name(&parent);
         let e = map.entry(parent.clone()).or_insert_with(|| Weighted {
             name,
@@ -42,12 +56,16 @@ pub fn folder_weights(items: &[HitRef]) -> Vec<Weighted> {
     v
 }
 
-fn parent_of(path: &str) -> String {
-    match path.rsplit_once('/') {
-        Some(("", _)) => "/".into(),
-        Some((p, _)) => p.to_string(),
-        None => "/".into(),
-    }
+/// The directory a path lives in, or `None` when the path is a bare name with
+/// no directory part to group by.
+fn parent_of(path: &str) -> Option<String> {
+    path.rsplit_once(['/', '\\']).map(|(parent, _)| {
+        if parent.is_empty() {
+            "/".to_string()
+        } else {
+            parent.to_string()
+        }
+    })
 }
 
 fn folder_name(path: &str) -> String {

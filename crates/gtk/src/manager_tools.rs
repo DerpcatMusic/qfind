@@ -75,6 +75,19 @@ fn job(
     title: &str,
     work: impl FnOnce() -> Result<String, String> + Send + 'static,
 ) {
+    run_job(window, state, title, work, Box::new(|_| {}));
+}
+
+/// [`job`], with a completion callback for callers that own state the job holds
+/// busy — a transfer in flight has to release the Tools actions when it lands,
+/// or a failure leaves them disabled for the rest of the session.
+fn run_job(
+    window: &gtk::ApplicationWindow,
+    state: &Rc<RefCell<State>>,
+    title: &str,
+    work: impl FnOnce() -> Result<String, String> + Send + 'static,
+    done: Box<dyn Fn(bool)>,
+) {
     let (dialog, body) = dialog(window, title);
     let output = text_view(&body);
     output.set_text(
@@ -86,6 +99,7 @@ fn job(
     let window = window.clone();
     glib::MainContext::default().spawn_local(async move {
         let result = gio::spawn_blocking(work).await;
+        let ok = result.is_ok();
         let message = match result {
             Ok(Ok(message)) => message,
             Ok(Err(error)) => error,
@@ -95,7 +109,25 @@ fn job(
         };
         output.set_text(&message);
         refresh_current(&state, &window);
+        done(ok);
     });
+}
+
+/// Whether a batch action has anything to act on.
+///
+/// Deliberately *not* `ActionTarget::rows`: that resolves through the chart's
+/// right-click target and **takes** it, so polling it to grey out a menu item
+/// would swallow the row the context menu was opened for. The visible selection
+/// and the chart popover are read without side effects instead.
+fn has_rows(target: &ActionTarget) -> bool {
+    let host = Rc::clone(&target.host);
+    let selected = |selection: &gtk::MultiSelection| selection.selection().size() > 0;
+    selected(&target.selection())
+        || selected(&host.tree_selection)
+        || target
+            .popover
+            .parent()
+            .is_some_and(|parent| parent.widget_name() == "qfind-storage-map")
 }
 
 pub(super) fn install(
@@ -103,37 +135,95 @@ pub(super) fn install(
     state: &Rc<RefCell<State>>,
     target: &ActionTarget,
 ) {
-    for name in [
+    // A transfer in flight. Enter-spamming the destination prompt used to start
+    // another copy of the same paths while the first was still running, so
+    // several workers raced on one destination, and the Tools/Edit items stayed
+    // live for the whole of a long copy.
+    let busy = Rc::new(Cell::new(false));
+    let names = [
         "select-matching",
         "batch-rename",
         "batch-copy",
         "batch-move",
         "batch-zip",
         "batch-extract",
-    ] {
-        let action = gio::SimpleAction::new(name, None);
-        window.add_action(&action);
+    ];
+    let actions: Vec<(gio::SimpleAction, &'static str)> = names
+        .iter()
+        .map(|&name| (gio::SimpleAction::new(name, None), name))
+        .collect();
+    for (action, _) in &actions {
+        window.add_action(action);
+    }
+    // Re-evaluate every action against the current selection and transfer. The
+    // actions are held weakly: the window owns them, and a strong `action ->
+    // activate handler -> this closure -> action` cycle would keep the whole
+    // application state alive after the last window closed.
+    let enabled: Rc<dyn Fn()> = {
+        let target = target.clone();
+        let busy = Rc::clone(&busy);
+        let weak: Vec<(&'static str, glib::WeakRef<gio::SimpleAction>)> = actions
+            .iter()
+            .map(|(action, name)| (*name, action.downgrade()))
+            .collect();
+        Rc::new(move || {
+            let rows = has_rows(&target);
+            for (name, action) in &weak {
+                let Some(action) = action.upgrade() else {
+                    continue;
+                };
+                // `select-matching` acts on the loaded results, so it needs no
+                // selection; the batch actions do, and none of them may start
+                // while a transfer is already moving the same paths.
+                action.set_enabled(*name == "select-matching" || (!busy.get() && rows));
+            }
+        })
+    };
+    for (action, name) in actions.clone() {
+        let name: &'static str = name;
         let window = window.clone();
         let state = state.clone();
         let target = target.clone();
+        let busy = Rc::clone(&busy);
+        let enabled = Rc::clone(&enabled);
         action.connect_activate(move |_, _| {
             if name == "select-matching" {
                 select_matching(&window, &state);
+                return;
+            }
+            let rows = target.rows();
+            if rows.is_empty() {
+                state
+                    .borrow()
+                    .status
+                    .set_text("Select files or folders first");
+            } else if busy.get() {
+                state
+                    .borrow()
+                    .status
+                    .set_text("A transfer is already running — wait for it to finish");
+            } else if name == "batch-rename" {
+                rename(&window, &state, rows);
             } else {
-                let rows = target.rows();
-                if rows.is_empty() {
-                    state
-                        .borrow()
-                        .status
-                        .set_text("Select files or folders first");
-                } else if name == "batch-rename" {
-                    rename(&window, &state, rows);
-                } else {
-                    transfer(&window, &state, rows, name);
-                }
+                transfer(
+                    &window,
+                    &state,
+                    rows,
+                    name,
+                    Rc::clone(&busy),
+                    Rc::clone(&enabled),
+                );
             }
         });
     }
+    for selection in [
+        Rc::clone(&target.host).list_selection.clone(),
+        target.host.tree_selection.clone(),
+    ] {
+        let enabled = Rc::clone(&enabled);
+        selection.connect_selection_changed(move |_, _, _| enabled());
+    }
+    enabled();
 }
 
 fn select_matching(window: &gtk::ApplicationWindow, state: &Rc<RefCell<State>>) {
@@ -167,7 +257,6 @@ fn select_matching(window: &gtk::ApplicationWindow, state: &Rc<RefCell<State>>) 
         let kind = kind.clone();
         let summary = summary.clone();
         Rc::new(move |apply| {
-            let st = state.borrow();
             let needle = name.text().to_lowercase();
             let ext_text = extensions.text().to_lowercase();
             let exts: Vec<_> = ext_text
@@ -177,35 +266,42 @@ fn select_matching(window: &gtk::ApplicationWindow, state: &Rc<RefCell<State>>) 
                 .collect();
             let matches = gtk::Bitset::new_empty();
             let mut count = 0;
-            for i in 0..st.model.n_items() {
-                let Some(row) = st.model.item(i).and_downcast::<RowData>() else {
-                    continue;
-                };
-                let filename = row.name().to_lowercase();
-                let extension = Path::new(&filename)
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("");
-                let class = match kind.selected() {
-                    1 => !row.is_dir(),
-                    2 => row.is_dir(),
-                    3 => FileClass::Archive.matches(&filename, row.is_dir()),
-                    4 => FileClass::Image.matches(&filename, row.is_dir()),
-                    5 => FileClass::Audio.matches(&filename, row.is_dir()),
-                    6 => FileClass::Video.matches(&filename, row.is_dir()),
-                    _ => true,
-                };
-                if class
-                    && filename.contains(&needle)
-                    && (exts.is_empty() || (!row.is_dir() && exts.contains(&extension)))
-                {
-                    count += 1;
-                    matches.add(i);
+            // Scope the borrow tightly: `set_selection` emits `selection-changed`
+            // synchronously and that handler borrows `state` again, so holding
+            // the RefCell across it panicked with "already borrowed" and took
+            // the whole window down.
+            let (n_items, selection) = {
+                let st = state.borrow();
+                for i in 0..st.model.n_items() {
+                    let Some(row) = st.model.item(i).and_downcast::<RowData>() else {
+                        continue;
+                    };
+                    let filename = row.name().to_lowercase();
+                    let extension = Path::new(&filename)
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("");
+                    let class = match kind.selected() {
+                        1 => !row.is_dir(),
+                        2 => row.is_dir(),
+                        3 => FileClass::Archive.matches(&filename, row.is_dir()),
+                        4 => FileClass::Image.matches(&filename, row.is_dir()),
+                        5 => FileClass::Audio.matches(&filename, row.is_dir()),
+                        6 => FileClass::Video.matches(&filename, row.is_dir()),
+                        _ => true,
+                    };
+                    if class
+                        && filename.contains(&needle)
+                        && (exts.is_empty() || (!row.is_dir() && exts.contains(&extension)))
+                    {
+                        count += 1;
+                        matches.add(i);
+                    }
                 }
-            }
+                (st.model.n_items(), st.active_selection())
+            };
             if apply {
-                st.selection
-                    .set_selection(&matches, &gtk::Bitset::new_range(0, st.model.n_items()));
+                selection.set_selection(&matches, &gtk::Bitset::new_range(0, n_items));
             }
             summary.set_text(&format!("{count} matches in the currently loaded results"));
         })
@@ -234,6 +330,34 @@ fn rename_pairs(
     qfind_core::components::rename_pairs(paths, find, replace, prefix, "", 1)
 }
 
+/// How many renames a preview shows before it says "and N more".
+const PREVIEW_LIMIT: usize = 200;
+
+/// The review list. Always says how many rows it did *not* show, so a 500-file
+/// batch cannot be reviewed on 200 lines and then applied to all 500.
+fn summarize(pairs: &[(PathBuf, PathBuf)]) -> String {
+    let mut text = pairs
+        .iter()
+        .take(PREVIEW_LIMIT)
+        .map(|(a, b)| {
+            format!(
+                "{}  ->  {}",
+                a.display(),
+                b.file_name().unwrap_or_default().to_string_lossy()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if pairs.len() > PREVIEW_LIMIT {
+        text.push_str(&format!(
+            "\n... and {} more (all {} will be renamed)",
+            pairs.len() - PREVIEW_LIMIT,
+            pairs.len()
+        ));
+    }
+    text
+}
+
 pub(super) fn rename(
     window: &gtk::ApplicationWindow,
     state: &Rc<RefCell<State>>,
@@ -260,20 +384,7 @@ pub(super) fn rename(
             move || match rename_pairs(&paths, &find.text(), &replace.text(), &prefix.text()) {
                 Ok(pairs) => {
                     apply.set_sensitive(pairs.iter().any(|(a, b)| a != b));
-                    output.set_text(
-                        &pairs
-                            .iter()
-                            .take(200)
-                            .map(|(a, b)| {
-                                format!(
-                                    "{}  →  {}",
-                                    a.display(),
-                                    b.file_name().unwrap_or_default().to_string_lossy()
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                    );
+                    output.set_text(&summarize(&pairs));
                 }
                 Err(error) => {
                     apply.set_sensitive(false);
@@ -323,6 +434,8 @@ fn transfer(
     state: &Rc<RefCell<State>>,
     rows: Vec<RowData>,
     action: &'static str,
+    busy: Rc<Cell<bool>>,
+    enabled: Rc<dyn Fn()>,
 ) {
     let paths: Vec<PathBuf> = rows.iter().map(|row| row.path().into()).collect();
     let title = match action {
@@ -331,7 +444,7 @@ fn transfer(
         "batch-zip" => "Compress selected (.zip, .7z, .tar.gz)",
         _ => "Extract archives to folder",
     };
-    let initial = current_dir(state).join(if action == "batch-zip" {
+    let initial = current_dir_or(state).join(if action == "batch-zip" {
         "Archive.zip"
     } else {
         ""
@@ -348,9 +461,37 @@ fn transfer(
                 .set_text("Enter an absolute destination path");
             return;
         }
-        job(&win, &state, title, move || {
-            transfer_paths(&paths, &dest, action)
-        });
+        // The prompt's own Apply button closes the dialog on the first Enter, but
+        // its key handler stays live until that close is processed, so a repeated
+        // Enter queued the same transfer again and again — several workers, one
+        // destination. The second request is refused here, where the paths are
+        // known; the prompt's button lives in `main.rs` and cannot be reached.
+        if busy.get() {
+            state
+                .borrow()
+                .status
+                .set_text("A transfer is already running — wait for it to finish");
+            return;
+        }
+        busy.set(true);
+        // Grey the batch actions for the whole transfer, and hand them straight
+        // back on every exit path, failure included.
+        enabled();
+        let release = {
+            let busy = Rc::clone(&busy);
+            let enabled = Rc::clone(&enabled);
+            Box::new(move |_ok: bool| {
+                busy.set(false);
+                enabled();
+            }) as Box<dyn Fn(bool)>
+        };
+        run_job(
+            &win,
+            &state,
+            title,
+            move || transfer_paths(&paths, &dest, action),
+            release,
+        );
     });
 }
 
@@ -380,10 +521,16 @@ pub(super) fn drop_paths(
     state: &Rc<RefCell<State>>,
     paths: Vec<PathBuf>,
     dest: PathBuf,
+    move_it: bool,
 ) {
-    job(window, state, "Copy dropped files", move || {
-        transfer_paths(&paths, &dest, "batch-copy")
-    });
+    let action = if move_it { "batch-move" } else { "batch-copy" };
+    let label = if move_it { "Move" } else { "Copy" };
+    job(
+        window,
+        state,
+        &format!("{label} dropped files"),
+        move || transfer_paths(&paths, &dest, action),
+    );
 }
 
 fn transfer_paths(paths: &[PathBuf], dest: &Path, action: &str) -> Result<String, String> {
@@ -395,10 +542,20 @@ fn transfer_paths(paths: &[PathBuf], dest: &Path, action: &str) -> Result<String
         return Err("Destination must be an existing folder".into());
     }
     let dest = dest.canonicalize().map_err(|e| e.to_string())?;
+    // Resolve the whole selection before testing it. The nesting guard compared
+    // a *canonicalized* source against the raw paths from the selection, so a
+    // selection reached through a symlinked Mount (`/mnt/Windows11/DEV` →
+    // `/real/DEV`) looked like a folder nested inside itself and every batch
+    // was refused with "nested inside another selected folder".
+    let sources: Vec<PathBuf> = paths
+        .iter()
+        .map(|path| path.canonicalize().map_err(|e| e.to_string()))
+        .collect::<Result<_, String>>()?;
     let mut targets = HashSet::new();
     let pairs: Vec<_> = paths
         .iter()
-        .map(|path| {
+        .enumerate()
+        .map(|(index, path)| {
             let name = path
                 .file_name()
                 .ok_or("Cannot operate on a filesystem root")?;
@@ -407,29 +564,40 @@ fn transfer_paths(paths: &[PathBuf], dest: &Path, action: &str) -> Result<String
             } else {
                 dest.join(name)
             };
-            let source = path.canonicalize().map_err(|e| e.to_string())?;
-            if target.starts_with(&source)
-                || paths
+            let source = &sources[index];
+            if target.starts_with(source)
+                || sources
                     .iter()
-                    .any(|other| other != path && path.starts_with(other))
+                    .enumerate()
+                    .any(|(other, candidate)| other != index && source.starts_with(candidate))
             {
                 return Err(
                     "Destination or selection is nested inside another selected folder".into(),
                 );
             }
-            if fs::symlink_metadata(&target).is_ok() || !targets.insert(target.clone()) {
-                return Err(format!(
-                    "Destination already exists or repeats: {}",
-                    target.display()
-                ));
+            // A collision used to abort the whole batch, so pasting into a
+            // folder that already held any of the names was a dead end with no
+            // overwrite, no skip, and no auto-suffix. Renumber instead.
+            let mut unique = target.clone();
+            let mut n = 1;
+            while fs::symlink_metadata(&unique).is_ok() || !targets.insert(unique.clone()) {
+                let stem = target
+                    .file_stem()
+                    .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+                let ext = target
+                    .extension()
+                    .map_or_else(String::new, |s| format!(".{}", s.to_string_lossy()));
+                unique = dest.join(format!("{stem} ({n}){ext}"));
+                n += 1;
             }
             if action == "batch-extract" && !archive::is_archive(path) {
                 return Err(format!("Not a supported archive: {}", path.display()));
             }
-            Ok((path.clone(), target))
+            Ok((path.clone(), unique))
         })
         .collect::<Result<_, String>>()?;
     let mut done = 0;
+    let mut failures = Vec::new();
     for (source, target) in pairs {
         let result = match action {
             "batch-copy" => qfind_core::copy(&source, &target)
@@ -440,10 +608,21 @@ fn transfer_paths(paths: &[PathBuf], dest: &Path, action: &str) -> Result<String
                 .map_err(|e| e.to_string()),
             _ => archive::extract(&source, &target).map_err(|e| e.to_string()),
         };
-        result.map_err(|e| format!("Completed {done}; stopped at {}: {e}\nCheck the destination for partial output before retrying.", source.display()))?;
-        done += 1;
+        // Keep going: one bad item must not abandon the rest of the batch.
+        match result {
+            Ok(()) => done += 1,
+            Err(error) => failures.push(format!("{}: {error}", source.display())),
+        }
     }
-    Ok(format!("Completed {done} items in {}", dest.display()))
+    let mut message = format!("Completed {done} item(s) in {}", dest.display());
+    if !failures.is_empty() {
+        message.push_str(&format!(
+            " · {} failed: {}",
+            failures.len(),
+            failures.join("; ")
+        ));
+    }
+    Ok(message)
 }
 
 fn project_details(window: &gtk::ApplicationWindow, state: &Rc<RefCell<State>>, project: Project) {
@@ -652,29 +831,49 @@ pub(super) fn project_detail_content(
     body
 }
 
-fn builds_active() -> Result<bool, String> {
-    // Global guard: shared targets and package caches may be used from another project.
-    for entry in fs::read_dir("/proc").map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
+/// Is some build or package tool running right now?
+///
+/// Reads `/proc` directly, so it used to be `read_dir("/proc")` and nothing
+/// else: on macOS and Windows the call failed and *every* cleanup was refused
+/// with "Cannot inspect active processes". Returns `false` where `/proc` is
+/// absent rather than blocking the action.
+fn builds_active() -> bool {
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return false;
+    };
+    const BUILDERS: &[&str] = &[
+        "cargo",
+        "rustc",
+        "rust-analyzer",
+        "npm",
+        "bun",
+        "node",
+        "pnpm",
+        "yarn",
+    ];
+    for entry in entries.flatten() {
         if entry.file_name().to_string_lossy().parse::<u32>().is_err() {
             continue;
         }
-        match fs::read_to_string(entry.path().join("comm")) {
-            Ok(name)
-                if matches!(
-                    name.trim(),
-                    "cargo" | "rustc" | "rust-analyzer" | "npm" | "bun" | "node" | "pnpm" | "yarn"
-                ) =>
-            {
-                return Ok(true);
+        // The *owning directory* of a process tells us what it is building, not
+        // merely that a process with a common name exists. An editor's language
+        // server is a `node`/`rust-analyzer` process, which used to block
+        // cleanup of every project on the machine.
+        let Ok(cwd) = fs::read_link(entry.path().join("cwd")) else {
+            continue;
+        };
+        let target = cwd.join("target");
+        if target.is_dir() {
+            return true;
+        }
+        if BUILDERS.contains(&entry.file_name().to_string_lossy().as_ref()) {
+            let name = fs::read_to_string(entry.path().join("comm")).unwrap_or_default();
+            if name.trim() == "cargo" || name.trim() == "rustc" {
+                return true;
             }
-            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-                return Err("Cannot inspect active processes; cleanup is unavailable".into());
-            }
-            _ => {}
         }
     }
-    Ok(false)
+    false
 }
 
 pub(super) fn project_content_at(
@@ -707,11 +906,21 @@ pub(super) fn project_content_at(
     let cleanup = gtk::Button::with_label("Review selected cleanup…");
     cleanup.set_sensitive(false);
     body.append(&cleanup);
-    let selected = Rc::new(RefCell::new(Vec::<(gtk::CheckButton, PathBuf, u64)>::new()));
+    // Weak, not strong: a strong `CheckButton` here plus the `Rc` clone its own
+    // `connect_toggled` handler holds made `selected -> check -> closure ->
+    // selected` a reference cycle, so no checkbox was ever dropped and the 500 ms
+    // refresh timer inside it could never see its weak reference fail. Every
+    // visit to the storage page then leaked one permanent 500 ms timer per
+    // artifact, forever.
+    let selected = Rc::new(RefCell::new(Vec::<(
+        glib::WeakRef<gtk::CheckButton>,
+        PathBuf,
+        u64,
+    )>::new()));
+    let weak_cleanup = cleanup.downgrade();
     let win = window.clone();
     let state_for_scan = state.clone();
     let selected_for_scan = selected.clone();
-    let cleanup_for_scan = cleanup.clone();
     let storage = state.borrow().storage.clone();
     let weak_body = body.downgrade();
     glib::timeout_add_local(Duration::from_millis(50), move || {
@@ -797,18 +1006,28 @@ pub(super) fn project_content_at(
                     });
                     row.append(&check);
                     let selected = selected_for_scan.clone();
-                    let cleanup = cleanup_for_scan.clone();
+                    let cleanup = weak_cleanup.clone();
                     check.connect_toggled(move |_| {
-                        cleanup.set_sensitive(
-                            selected
-                                .borrow()
-                                .iter()
-                                .any(|(check, _, _)| check.is_active()),
-                        )
+                        // Both sides are upgraded here rather than held: a
+                        // strong `cleanup` in this handler is the other half of
+                        // the cycle (`check -> handler -> cleanup -> row ->
+                        // check`) that kept every checkbox alive.
+                        let Some(cleanup) = cleanup.upgrade() else {
+                            return;
+                        };
+                        let mut entries = selected.borrow_mut();
+                        // A checkbox whose row was replaced is no longer part of
+                        // the question, so it stops being counted.
+                        entries.retain(|(check, _, _)| check.upgrade().is_some());
+                        cleanup.set_sensitive(entries.iter().any(|(check, _, _)| {
+                            check.upgrade().is_some_and(|check| check.is_active())
+                        }));
                     });
-                    selected_for_scan
-                        .borrow_mut()
-                        .push((check, path, bytes.unwrap_or(0)));
+                    selected_for_scan.borrow_mut().push((
+                        check.downgrade(),
+                        path,
+                        bytes.unwrap_or(0),
+                    ));
                 }
                 list.append(&row);
             }
@@ -818,7 +1037,15 @@ pub(super) fn project_content_at(
     let win = window.clone();
     let state = state.clone();
     cleanup.connect_clicked(move |_| {
-        let paths: Vec<_> = selected.borrow().iter().filter(|(check,_,_)| check.is_active()).map(|(_,path,_)| path.clone()).collect();
+        let mut entries = selected.borrow_mut();
+        // Drop whatever the panel has replaced since the last click.
+        entries.retain(|(check, _, _)| check.upgrade().is_some());
+        let paths: Vec<_> = entries
+            .iter()
+            .filter(|(check, _, _)| check.upgrade().is_some_and(|check| check.is_active()))
+            .map(|(_, path, _)| path.clone())
+            .collect();
+        drop(entries);
         if paths.is_empty() { return; }
         let (review, body) = self::dialog(&win, "Review storage cleanup");
         let output = text_view(&body);
@@ -835,7 +1062,11 @@ pub(super) fn project_content_at(
             job(&win, &state, "Storage cleanup", move || {
                 let mut done = 0;
                 for path in paths {
-                    if builds_active()? { return Err(format!("Moved {done} folders; cleanup blocked by an active build/package process.")); }
+                    if builds_active() {
+                        return Err(format!(
+                            "Moved {done} folders; cleanup blocked because a build is writing to a target/ directory."
+                        ));
+                    }
                     if !fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) { return Err(format!("Folder changed since review: {}", path.display())); }
                     if path.canonicalize().map_err(|e| e.to_string())? != path {
                         return Err(format!("Path changed since review: {}", path.display()));
@@ -864,7 +1095,7 @@ mod transfer_tests {
     use super::*;
 
     #[test]
-    fn dropped_files_copy_and_reject_unsafe_destinations() {
+    fn dropped_files_copy_renumber_collisions_and_reject_unsafe_destinations() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source");
         let dest = temp.path().join("destination");
@@ -885,10 +1116,20 @@ mod transfer_tests {
             "keep me"
         );
         assert!(source.join("note.txt").exists());
-        assert!(transfer_paths(std::slice::from_ref(&source), &dest, "batch-copy").is_err());
+        // A second drop renumbers rather than aborting the batch or clobbering.
+        assert!(
+            transfer_paths(std::slice::from_ref(&source), &dest, "batch-copy").is_ok(),
+            "a name collision must not fail the whole paste"
+        );
         assert_eq!(
             fs::read_to_string(dest.join("source/note.txt")).unwrap(),
-            "keep me"
+            "keep me",
+            "the first copy is untouched"
+        );
+        assert_eq!(
+            fs::read_to_string(dest.join("source (1)/note.txt")).unwrap(),
+            "keep me",
+            "the collision landed in a suffixed folder"
         );
         assert!(
             transfer_paths(

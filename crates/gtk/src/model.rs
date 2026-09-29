@@ -1,6 +1,5 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 
 use gio::subclass::prelude::ListModelImpl;
 use gtk::gio;
@@ -21,6 +20,8 @@ mod imp {
         pub live: RefCell<Option<Vec<RowData>>>,
         /// Keep RowData GObjects across scroll. Zed: don't rebuild visible items every frame.
         pub rows: RefCell<HashMap<u32, RowData>>,
+        /// `id -> position`, so restoring a selection does not rescan the list.
+        pub positions: RefCell<HashMap<u32, u32>>,
         pub text_sort: Cell<Option<(bool, bool)>>,
     }
 
@@ -81,7 +82,15 @@ impl HitModel {
         glib::Object::new()
     }
 
+    /// Adopt a new snapshot.
+    ///
+    /// A `Catalog::refresh` writes a *new* snapshot whose ids are positional
+    /// indices into a fresh entry table, so an id that survives the refresh can
+    /// now mean a completely different file. The `RowData` cache is keyed by id,
+    /// so it has to go with the old catalog — keeping it left the list showing
+    /// deleted files and hiding new ones after any rename or save.
     pub fn set_catalog(&self, catalog: Catalog) {
+        self.imp().rows.borrow_mut().clear();
         self.imp().catalog.replace(Some(catalog));
     }
 
@@ -89,15 +98,15 @@ impl HitModel {
         self.sort_ids(&mut ids);
         let old = self.n_items();
         let new = ids.len() as u32;
-        {
-            let keep: HashSet<u32> = ids.iter().copied().collect();
-            let mut cache = self.imp().rows.borrow_mut();
-            cache.retain(|id, _| keep.contains(id));
-            if cache.len() > 512 {
-                cache.clear();
-            }
+        if self.imp().rows.borrow().len() > 512 {
+            self.imp().rows.borrow_mut().clear();
         }
         self.imp().live.replace(None);
+        *self.imp().positions.borrow_mut() = ids
+            .iter()
+            .enumerate()
+            .map(|(at, &id)| (id, at as u32))
+            .collect();
         self.imp().ids.replace(ids);
         self.items_changed(0, old, new);
     }
@@ -113,8 +122,11 @@ impl HitModel {
     }
 
     /// Supplementary columns sort loaded results without losing catalog identity.
+    ///
+    /// Clearing the column sort is a change too: it has to put the list back in
+    /// backend order, not leave it in Type/Location order until the next Query.
     pub fn set_text_sort(&self, sort: Option<(bool, bool)>) {
-        if self.imp().text_sort.replace(sort) == sort || sort.is_none() {
+        if self.imp().text_sort.replace(sort) == sort {
             return;
         }
         if let Some(rows) = self.imp().live.borrow_mut().as_mut() {
@@ -127,6 +139,8 @@ impl HitModel {
     }
 
     fn sort_ids(&self, ids: &mut Vec<u32>) {
+        // No column sort: the backend already returned these in the order the
+        // user asked for, so re-sorting here would only fight it.
         let Some((location, descending)) = self.imp().text_sort.get() else {
             return;
         };
@@ -142,7 +156,7 @@ impl HitModel {
                     (
                         crate::FOLDERS_FIRST.load(std::sync::atomic::Ordering::Relaxed)
                             && !hit.is_dir(),
-                        crate::columns::text_key(hit.name(), &path, hit.is_dir(), location),
+                        crate::columns::text_key(&hit.name(), &path, hit.is_dir(), location),
                         path.to_string_lossy().into_owned(),
                     )
                 })
@@ -168,33 +182,44 @@ impl HitModel {
     }
 
     pub fn position(&self, id: u32) -> Option<u32> {
-        self.imp()
-            .ids
-            .borrow()
-            .iter()
-            .position(|candidate| *candidate == id)
-            .and_then(|position| u32::try_from(position).ok())
+        self.imp().positions.borrow().get(&id).copied()
     }
 
-    pub fn position_path(&self, path: &str) -> Option<u32> {
-        if let Some(rows) = self.imp().live.borrow().as_ref() {
-            return rows
-                .iter()
-                .position(|row| row.path() == path)
-                .and_then(|position| u32::try_from(position).ok());
+    /// Positions of `paths`, in the order given, skipping any that are gone.
+    ///
+    /// One pass over the model for the whole selection. The old per-path
+    /// lookup rebuilt a `PathBuf` for every id, so restoring a multi-selection
+    /// after a Sort allocated 5 000 paths *per selected row*.
+    pub fn positions_for(&self, paths: &[String]) -> Vec<u32> {
+        if paths.is_empty() {
+            return Vec::new();
         }
-        let catalog = self.imp().catalog.borrow();
-        let catalog = catalog.as_ref()?;
-        self.imp()
-            .ids
-            .borrow()
+        let wanted: HashSet<&str> = paths.iter().map(String::as_str).collect();
+        let mut index: HashMap<String, u32> = HashMap::with_capacity(paths.len());
+        if let Some(rows) = self.imp().live.borrow().as_ref() {
+            for (at, row) in rows.iter().enumerate() {
+                let path = row.path();
+                if wanted.contains(path.as_str()) {
+                    index.insert(path, at as u32);
+                }
+            }
+        } else if let Some(catalog) = self.imp().catalog.borrow().as_ref() {
+            for (at, &id) in self.imp().ids.borrow().iter().enumerate() {
+                let Some(hit) = catalog.hit(id) else { continue };
+                let path = hit.path();
+                // One `PathBuf` per id, unavoidable without a stored path
+                // index, but now once for the whole selection instead of once
+                // per selected row.
+                if wanted.contains(path.to_string_lossy().as_ref()) {
+                    index.insert(path.to_string_lossy().into_owned(), at as u32);
+                }
+            }
+        }
+        // Report positions in the caller's order.
+        paths
             .iter()
-            .position(|id| {
-                catalog
-                    .hit(*id)
-                    .is_some_and(|hit| hit.path() == Path::new(path))
-            })
-            .and_then(|position| u32::try_from(position).ok())
+            .filter_map(|path| index.get(path).copied())
+            .collect()
     }
 }
 

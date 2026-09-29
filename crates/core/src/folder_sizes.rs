@@ -39,7 +39,16 @@ struct Shared {
     queued: Mutex<HashMap<PathBuf, bool>>,
     failed: Mutex<BTreeMap<PathBuf, u64>>,
     revision: AtomicU64,
+    /// When the cache was last written to disk. The in-memory values are
+    /// always current; only the on-disk copy is coalesced, because navigating
+    /// a folder queues a measurement per child and re-serialising the whole
+    /// cache after each one is quadratic in the number of children.
+    last_persist: Mutex<Instant>,
 }
+
+/// Minimum gap between cache writes. Long enough to coalesce a folder's worth
+/// of children, short enough that a crash loses almost nothing.
+const PERSIST_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Deserialize)]
 struct CacheFile {
@@ -91,6 +100,7 @@ impl FolderSizes {
             queued: Mutex::new(HashMap::new()),
             failed: Mutex::new(BTreeMap::new()),
             revision: AtomicU64::new(1),
+            last_persist: Mutex::new(Instant::now() - PERSIST_INTERVAL),
         });
         let worker = Arc::clone(&shared);
         let _ = thread::Builder::new()
@@ -259,7 +269,7 @@ fn worker_loop(shared: Arc<Shared>, receiver: std::sync::mpsc::Receiver<Job>) {
             queued.remove(&path);
             drop(queued);
             shared.revision.fetch_add(1, Ordering::Release);
-            persist(&shared);
+            persist_if_due(&shared);
             break;
         }
     }
@@ -280,6 +290,26 @@ fn load_cache() -> BTreeMap<PathBuf, (u64, u64)> {
         .into_iter()
         .map(|entry| (PathBuf::from(entry.path), (entry.bytes, entry.measured)))
         .collect()
+}
+
+/// Write the cache to disk unless one was written very recently.
+fn persist_if_due(shared: &Shared) {
+    let due = shared
+        .last_persist
+        .lock()
+        .map(|mut last| {
+            let now = Instant::now();
+            if now.duration_since(*last) < PERSIST_INTERVAL {
+                false
+            } else {
+                *last = now;
+                true
+            }
+        })
+        .unwrap_or(false);
+    if due {
+        persist(shared);
+    }
 }
 
 fn persist(shared: &Shared) {
@@ -335,16 +365,19 @@ fn measure(path: &Path) -> Option<u64> {
         if Instant::now() >= deadline {
             return None;
         }
-        let entries = fs::read_dir(directory).ok()?;
-        for entry in entries {
+        // One unreadable entry must not void the whole folder: skip it and keep
+        // counting. `?` here used to mark an entire directory unmeasured for
+        // ten minutes because of a single permission-denied child.
+        let Ok(entries) = fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
             if Instant::now() >= deadline {
                 return None;
             }
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(_) => return None,
+            let Ok(metadata) = fs::symlink_metadata(entry.path()) else {
+                continue;
             };
-            let metadata = fs::symlink_metadata(entry.path()).ok()?;
             if metadata.file_type().is_symlink() || crate::ops::is_reparse_point(&metadata) {
                 continue;
             }

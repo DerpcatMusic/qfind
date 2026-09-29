@@ -21,6 +21,7 @@ use qfind_core::{
 
 mod actions;
 mod archive;
+mod audio;
 mod columns;
 mod folder_sizes;
 mod git_panel;
@@ -28,11 +29,13 @@ mod glpie;
 mod icons;
 mod manager_tools;
 mod model;
+mod preview;
 mod project_workspace;
 mod row;
 mod settings;
 mod storage;
 mod surface;
+mod video;
 use actions::{
     copy_name, copy_paths, copy_text, open, open_folder, open_with, preview, preview_widget,
     reveal, selected_row, selected_rows,
@@ -174,6 +177,10 @@ fn main() -> glib::ExitCode {
     let argv = [std::env::args()
         .next()
         .unwrap_or_else(|| "qfind-gtk".into())];
+    // Reap every helper we launch. A dropped `Child` is never waited for, so
+    // every Enter that opened an editor, every Reveal, and every terminal left a
+    // `defunct` entry in the process table for the life of the app, and their
+    // stdout/stderr stayed attached to ours.
     app.run_with_args(&argv)
 }
 
@@ -492,13 +499,17 @@ struct State {
     bookmark_btn: gtk::Button,
     archive_save_btn: gtk::Button,
     model: HitModel,
-    selection: gtk::MultiSelection,
+    /// The list/grid and Tree selection models. [`Self::active_selection`]
+    /// picks whichever is on screen.
+    list_selection: gtk::MultiSelection,
+    tree_selection: gtk::MultiSelection,
     status: gtk::Label,
     search: gtk::SearchEntry,
     scope: Scope,
     class: FileClass,
     sort: Sort,
     match_mode: MatchMode,
+    show_hidden: bool,
     seq: u64,
     snap_mtime: Option<SystemTime>,
     /// Folders whose index children were verified against disk since their
@@ -508,6 +519,8 @@ struct State {
     dir_monitor: Option<gio::FileMonitor>,
     /// Paths marked with Ctrl+X; the next paste moves instead of copies.
     cut: Vec<PathBuf>,
+    /// The path under the pointer, for `PreviewMode::Hovered`.
+    hovered: Rc<RefCell<Option<String>>>,
     last_ids: Vec<u32>,
     visible_folders: usize,
     visible_files: usize,
@@ -521,6 +534,10 @@ fn build_ui(app: &gtk::Application) {
 }
 
 fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
+    // Read the config once. It used to be parsed twice during construction, so
+    // `apply_appearance` and the widgets could disagree if the file changed
+    // between the two reads.
+    let cfg = Config::load();
     let manager = Rc::new(RefCell::new(ManagerSession::new(initial_folder.clone())));
     let window = gtk::ApplicationWindow::builder()
         .application(app)
@@ -538,43 +555,11 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
         .default_height(820)
         .build();
 
-    let cfg = Config::load();
-    let native = settings::is_native(&cfg);
-    if !native {
-        icons::install();
-    }
+    // One stylesheet, installed by `apply_appearance` so a change of Appearance
+    // in Settings takes effect without a restart. This used to be built here
+    // from `design.css` plus a separate `custom.css` provider, and nothing
+    // re-applied either when the setting changed.
     gtk::Window::set_default_icon_name("megaman");
-    let css = gtk::CssProvider::new();
-    let design = include_str!("design.css");
-    let sheet = if native {
-        design
-            .split("/* --- custom palette ---")
-            .next()
-            .unwrap_or(design)
-    } else {
-        design
-    };
-    css.load_from_string(sheet);
-    if let Some(display) = gdk::Display::default() {
-        gtk::style_context_add_provider_for_display(
-            &display,
-            &css,
-            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-        );
-        // User overrides: ~/.config/qfind/custom.css, loaded last so it wins.
-        if !native
-            && let Some(user) = Config::path().parent().map(|d| d.join("custom.css"))
-            && user.is_file()
-        {
-            let extra = gtk::CssProvider::new();
-            extra.load_from_path(&user);
-            gtk::style_context_add_provider_for_display(
-                &display,
-                &extra,
-                gtk::STYLE_PROVIDER_PRIORITY_USER,
-            );
-        }
-    }
     settings::apply_appearance(&cfg);
 
     let header = gtk::HeaderBar::new();
@@ -640,7 +625,6 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     let settings_btn = gtk::Button::from_icon_name("emblem-system-symbolic");
     settings_btn.set_tooltip_text(Some("Settings"));
 
-    let cfg = Config::load();
     let zebra = Rc::new(Cell::new(cfg.zebra));
     let zoom = Rc::new(Cell::new(Zoom::new(cfg.zoom)));
     let spacing = Rc::new(Cell::new(cfg.spacing));
@@ -940,7 +924,7 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
             };
             let descending = sorter.primary_sort_order() == gtk::SortType::Descending;
             if matches!(column.title().as_deref(), Some("Type" | "Location")) {
-                let paths: Vec<_> = selected_rows(&selection)
+                let paths: Vec<String> = selected_rows(&selection)
                     .into_iter()
                     .map(|row| row.path())
                     .collect();
@@ -961,10 +945,8 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
                     column.title().as_deref() == Some("Location"),
                     descending,
                 )));
-                for path in paths {
-                    if let Some(position) = model.position_path(&path) {
-                        selection.select_item(position, false);
-                    }
+                for position in model.positions_for(&paths) {
+                    selection.select_item(position, false);
                 }
                 return;
             }
@@ -1049,7 +1031,9 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     });
 
     let tree_store = gio::ListStore::new::<RowData>();
-    let tree_sel = gtk::SingleSelection::new(Some(tree_store.clone()));
+    // A MultiSelection so the Tree gets the same range/ctrl-click behaviour as
+    // the list instead of being a read-only one-at-a-time view.
+    let tree_sel = gtk::MultiSelection::new(Some(tree_store.clone()));
     let tree_toggle: Rc<RefCell<Box<dyn Fn(&str)>>> = Rc::new(RefCell::new(Box::new(|_| {})));
     let tree_collapsed: Rc<RefCell<HashSet<String>>> = Rc::new(RefCell::new(HashSet::new()));
     let tree = gtk::ListView::new(
@@ -1068,8 +1052,15 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     let win_tree = window.clone();
     let tree_sel_open = tree_sel.clone();
     let nav_for_tree = Rc::clone(&navigate);
-    tree.connect_activate(move |_, _| {
-        if let Some(data) = tree_sel_open.selected_item().and_downcast::<RowData>() {
+    tree.connect_activate(move |_, position| {
+        let Some(data) = tree_sel_open
+            .model()
+            .and_then(|model| model.item(position))
+            .and_downcast::<RowData>()
+        else {
+            return;
+        };
+        {
             if data.is_dir() {
                 nav_for_tree.borrow()(PathBuf::from(data.path()));
             } else {
@@ -1100,6 +1091,8 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
         list: list.clone(),
         grid: grid.clone(),
         tree: tree.clone(),
+        list_selection: selection.clone(),
+        tree_selection: tree_sel.clone(),
         tree_store,
         weight: weight.clone(),
         weight_rev: Rc::clone(&weight_rev),
@@ -1109,8 +1102,9 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
         zoom: Rc::clone(&zoom),
         spacing: Rc::clone(&spacing),
         surface: Rc::new(Cell::new(Surface::Auto)),
-        // Storage owns the catalog-backed treemap; file searches need no extra size walk.
-        show_weight: Rc::new(Cell::new(false)),
+        // The Config toggle used to be written to disk and then ignored, so the
+        // WeightMap never appeared on the files surface at all.
+        show_weight: Rc::new(Cell::new(cfg.weight_map)),
         collapsed: Rc::clone(&tree_collapsed),
         tree_src: RefCell::new(None),
         weights,
@@ -1251,10 +1245,11 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
         storage.bind_results(
             popover.clone(),
             move |entry| {
-                let path = entry.path.to_string_lossy();
+                let path = entry.path.to_string_lossy().into_owned();
                 let Some(position) = model
-                    .position(entry.id)
-                    .or_else(|| model.position_path(&path))
+                    .positions_for(std::slice::from_ref(&path))
+                    .first()
+                    .copied()
                 else {
                     return false;
                 };
@@ -1461,18 +1456,21 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
         bookmark_btn: bookmark_btn.clone(),
         archive_save_btn: archive_save_btn.clone(),
         model: model.clone(),
-        selection: selection.clone(),
+        list_selection: selection.clone(),
+        tree_selection: tree_sel.clone(),
         status: status.clone(),
         search: search.clone(),
         scope: Scope::All,
         class: FileClass::All,
         sort: Sort::Score,
         match_mode: cfg.match_mode,
+        show_hidden: cfg.show_hidden,
         seq: 0,
         snap_mtime: None,
         fresh: HashSet::new(),
         refreshing: false,
         cut: Vec::new(),
+        hovered: Rc::clone(&hovered),
         dir_monitor: None,
         last_ids: Vec::new(),
         visible_folders: 0,
@@ -1502,16 +1500,16 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
             let name_entry = name_entry.clone();
             move || {
                 let paths = match pick.mode {
-                    PickMode::Folder => vec![current_dir(&state)],
+                    PickMode::Folder => vec![current_dir_or(&state)],
                     PickMode::Save => {
                         let name = name_entry.text();
                         if name.trim().is_empty() {
                             return;
                         }
-                        vec![current_dir(&state).join(name.trim())]
+                        vec![current_dir_or(&state).join(name.trim())]
                     }
                     PickMode::File => {
-                        let rows = selected_rows(&state.borrow().selection);
+                        let rows = selected_rows(&state.borrow().active_selection());
                         let mut paths: Vec<PathBuf> = rows
                             .iter()
                             .filter(|row| !row.is_dir())
@@ -1551,7 +1549,7 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
             let name_entry = name_entry.clone();
             state
                 .borrow()
-                .selection
+                .list_selection
                 .connect_selection_changed(move |sel, _, _| {
                     if let Some(row) = selected_row(sel)
                         && !row.is_dir()
@@ -1565,7 +1563,13 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     surface::attach_file_drag(&list_scroll, selection.clone());
     surface::attach_file_drag(&grid_scroll, selection.clone());
     surface::attach_file_drag(&tree_scroll, tree_sel.clone());
-    let drop = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
+    // Both actions, so a drag can copy *or* move. Copy-only meant the single
+    // most common file-manager gesture — drag to another folder to move — did
+    // not exist.
+    let drop = gtk::DropTarget::new(
+        gdk::FileList::static_type(),
+        gdk::DragAction::COPY | gdk::DragAction::MOVE,
+    );
     drop.set_propagation_phase(gtk::PropagationPhase::Capture);
     let drop_stack = stack.clone();
     let over_files = move |target: &gtk::DropTarget, x, y| {
@@ -1576,10 +1580,14 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     };
     let motion = over_files.clone();
     drop.connect_motion(move |target, x, y| {
-        if motion(target, x, y) {
+        if !motion(target, x, y) {
+            return gdk::DragAction::empty();
+        }
+        // Ctrl forces a copy, matching every other file manager.
+        if ctrl_held() {
             gdk::DragAction::COPY
         } else {
-            gdk::DragAction::empty()
+            gdk::DragAction::MOVE
         }
     });
     {
@@ -1602,8 +1610,12 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
                 .and_then(|item| item.tooltip_text())
                 .map(|path| PathBuf::from(path.as_str()))
                 .filter(|path| path.is_dir())
-                .unwrap_or_else(|| current_dir(&state));
-            manager_tools::drop_paths(&window, &state, paths, destination);
+                .or_else(|| current_dir(&state));
+            let Some(destination) = destination else {
+                report(&state, "Drop onto a folder, or browse one first");
+                return false;
+            };
+            manager_tools::drop_paths(&window, &state, paths, destination, !ctrl_held());
             true
         });
     }
@@ -1646,7 +1658,7 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
         &window,
         &navigate,
         ActionTarget {
-            selection: selection.clone(),
+            host: Rc::clone(&host),
             popover: popover.clone(),
             context_target,
         },
@@ -1656,7 +1668,6 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     );
     let bind_visibility = |button: &gtk::CheckButton| {
         let state = Rc::clone(&state);
-        let _window = window.clone();
         let hidden_btn = hidden_btn.clone();
         let gitignore_btn = gitignore_btn.clone();
         let ignore_btn = ignore_btn.clone();
@@ -1665,7 +1676,12 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
             cfg.show_hidden = hidden_btn.is_active();
             cfg.respect_gitignore = gitignore_btn.is_active();
             cfg.respect_ignore = ignore_btn.is_active();
-            let _ = cfg.save();
+            if let Err(error) = cfg.save() {
+                report(&state, format!("Could not save settings: {error}"));
+            }
+            // The hidden rule travels in `SearchOpts`, so an Indexed Query has
+            // to be re-issued for it to take effect.
+            state.borrow_mut().show_hidden = cfg.show_hidden;
             kick_search(&state);
         });
     };
@@ -1896,6 +1912,7 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
         let preview_mode = Rc::clone(&preview_mode);
         let zebra = Rc::clone(&zebra);
         let match_live = Rc::new(Cell::new(cfg.match_mode));
+        let match_drop = match_drop.clone();
         settings_btn.connect_clicked(move |_| {
             let host = state.borrow().host.clone();
             let weight = host
@@ -2068,8 +2085,8 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
                     },
                 ));
             }
-            let selection = state.borrow().selection.clone();
-            selection.unselect_all();
+            state.borrow().list_selection.unselect_all();
+            state.borrow().tree_selection.unselect_all();
             workspace.set_visible_child_name("projects");
             places_scroll.set_visible(false);
             search.set_visible(false);
@@ -2147,7 +2164,7 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
                     if generation_now.get() != generation {
                         return;
                     }
-                    let child = preview_widget(std::path::Path::new(&row.path()));
+                    let child = preview_widget(std::path::Path::new(&row.path()), false);
                     child.set_hexpand(true);
                     child.set_vexpand(true);
                     preview_content.append(&child);
@@ -2172,17 +2189,30 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
         });
         stack.add_controller(back_forward);
     }
+    crate::actions::set_navigator(Rc::clone(&navigate));
+
     install_keys(
         &window,
         &search,
         &preview_btn,
-        &list,
-        &selection,
+        Rc::clone(&host),
         Rc::clone(&preview_slot),
         Rc::clone(&hovered),
         Rc::clone(&preview_mode),
         Rc::clone(&state),
         popover.clone(),
+        Keys {
+            sort: sort_drop.clone(),
+            class: class_drop.clone(),
+            match_mode: match_drop.clone(),
+            scope: folders_btn.clone(),
+            folders_first: folders_first_btn.clone(),
+            tree: tree_btn.clone(),
+            list: list_mode_btn.clone(),
+            grid: grid_mode_btn.clone(),
+            hidden: hidden_btn.clone(),
+            zoom: zoom_scale.clone(),
+        },
     );
 
     window.present();
@@ -2293,17 +2323,24 @@ fn hit_menu() -> (gio::Menu, Vec<PathBuf>) {
     (menu, actions)
 }
 
-/// The trio every context-menu action resolves rows through.
+/// What every context-menu action and keybinding resolves rows through.
+///
+/// `selection` is a function, not a model, so the Tree surface's own selection
+/// is used when the Tree is on screen.
 #[derive(Clone)]
 struct ActionTarget {
-    selection: gtk::MultiSelection,
+    host: Rc<Host>,
     popover: gtk::PopoverMenu,
     context_target: Rc<RefCell<Option<RowData>>>,
 }
 
 impl ActionTarget {
+    fn selection(&self) -> gtk::MultiSelection {
+        self.host.selection()
+    }
+
     fn rows(&self) -> Vec<RowData> {
-        action_rows(&self.selection, &self.popover, &self.context_target)
+        action_rows(&self.selection(), &self.popover, &self.context_target)
     }
 }
 
@@ -2329,12 +2366,14 @@ fn install_actions(
     };
 
     let win = window.clone();
-    let navigate = Rc::clone(navigate);
+    let nav = Rc::clone(navigate);
     add(
         "open",
         Box::new(move |rows| {
-            if let Some(row) = rows.into_iter().next() {
-                activate_path(&win, &navigate, row.path());
+            // Open *every* selected row. Taking only the first meant selecting
+            // eight files and pressing Enter silently opened one of them.
+            for row in rows {
+                activate_path(&win, &nav, row.path());
             }
         }),
     );
@@ -2351,16 +2390,22 @@ fn install_actions(
     add(
         "reveal",
         Box::new(move |rows| {
-            if let Some(row) = rows.into_iter().next() {
+            for row in rows {
                 reveal(&win, &row.path());
             }
         }),
     );
     let st = Rc::clone(&state);
     add("cut", Box::new(move |rows| cut_rows(&st, rows)));
+    let st = Rc::clone(&state);
     add(
         "copy-files",
-        Box::new(|rows| copy_paths(&rows.into_iter().map(|row| row.path()).collect::<Vec<_>>())),
+        Box::new(move |rows| {
+            // A fresh Copy replaces any earlier cut: the clipboard now says
+            // "copy", so the move flag must go with it.
+            st.borrow_mut().cut.clear();
+            copy_paths(&rows.into_iter().map(|row| row.path()).collect::<Vec<_>>());
+        }),
     );
     let win = window.clone();
     let st = Rc::clone(&state);
@@ -2375,7 +2420,7 @@ fn install_actions(
     add(
         "open-folder",
         Box::new(move |rows| {
-            if let Some(row) = rows.into_iter().next() {
+            for row in rows {
                 open_folder(&win, &row.path(), row.is_dir());
             }
         }),
@@ -2483,7 +2528,8 @@ fn install_actions(
             let current = Path::new(&path)
                 .parent()
                 .map_or_else(String::new, |path| path.to_string_lossy().into_owned());
-            let _ = Command::new(&command)
+            let mut external = Command::new(&command);
+            external
                 .args(&paths)
                 .env("QFIND_SELECTED_PATHS", paths.join("\n"))
                 .env("QFIND_CURRENT_DIRECTORY", &current)
@@ -2501,8 +2547,8 @@ fn install_actions(
                 .env(
                     "NAUTILUS_SCRIPT_CURRENT_URI",
                     gio::File::for_path(&current).uri(),
-                )
-                .spawn();
+                );
+            let _ = crate::actions::spawn_detached(&mut external);
         });
         window.add_action(&act);
     }
@@ -2539,40 +2585,163 @@ fn focus_in(window: &gtk::ApplicationWindow, ancestor: &impl IsA<gtk::Widget>) -
     false
 }
 
+/// The controls the Filter and View popovers own, so each one can be driven
+/// from the keyboard as well as the mouse.
+struct Keys {
+    sort: gtk::DropDown,
+    class: gtk::DropDown,
+    match_mode: gtk::DropDown,
+    scope: gtk::ToggleButton,
+    folders_first: gtk::CheckButton,
+    tree: gtk::CheckButton,
+    list: gtk::ToggleButton,
+    grid: gtk::ToggleButton,
+    hidden: gtk::CheckButton,
+    zoom: gtk::Scale,
+}
+
+/// Advance a drop-down or toggle, wrapping at the ends. This is what makes the
+/// filter system usable without a mouse: every control had *zero* keybindings
+/// and lived behind two unlabeled popovers.
+fn cycle(drop: &gtk::DropDown) -> u32 {
+    let count = drop.model().map_or(1, |model| model.n_items()).max(1);
+    let next = (drop.selected() + 1) % count;
+    drop.set_selected(next);
+    next
+}
+
+const SORT_LABELS: [&str; 7] = [
+    "Score", "Name A-Z", "Name Z-A", "Newest", "Oldest", "Largest", "Smallest",
+];
+const CLASS_LABELS: [&str; 6] = [
+    "All types",
+    "Images",
+    "Audio",
+    "Video",
+    "Documents",
+    "Archives",
+];
+const MATCH_LABELS: [&str; 3] = ["Fuzzy", "Substring", "Exact"];
+
+fn sort_label(index: u32) -> &'static str {
+    SORT_LABELS.get(index as usize).copied().unwrap_or("Score")
+}
+fn class_label(index: u32) -> &'static str {
+    CLASS_LABELS
+        .get(index as usize)
+        .copied()
+        .unwrap_or("All types")
+}
+fn match_label(index: u32) -> &'static str {
+    MATCH_LABELS.get(index as usize).copied().unwrap_or("Fuzzy")
+}
+
+/// Toggle a `ToggleButton` and report the new state, so a keybinding can say
+/// what it did. `CheckButton` is a `Button` in GTK4, not a `ToggleButton`, hence
+/// the pair.
+fn flip(button: &gtk::ToggleButton) -> bool {
+    let next = !button.is_active();
+    button.set_active(next);
+    next
+}
+
+fn tick(button: &gtk::CheckButton) -> bool {
+    let next = !button.is_active();
+    button.set_active(next);
+    next
+}
+
 #[allow(clippy::too_many_arguments)]
 fn install_keys(
     window: &gtk::ApplicationWindow,
     search: &gtk::SearchEntry,
     preview_btn: &gtk::ToggleButton,
-    list: &gtk::ColumnView,
-    selection: &gtk::MultiSelection,
+    host_surface: Rc<Host>,
     preview_slot: Rc<RefCell<Option<gtk::Window>>>,
     hovered: Rc<RefCell<Option<String>>>,
     preview_mode: Rc<Cell<qfind_core::PreviewMode>>,
     state: Rc<RefCell<State>>,
     popover: gtk::PopoverMenu,
+    keys: Keys,
 ) {
-    let keys = gtk::EventControllerKey::new();
-    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let event_keys = gtk::EventControllerKey::new();
+    event_keys.set_propagation_phase(gtk::PropagationPhase::Capture);
     let search = search.clone();
     let preview_btn = preview_btn.clone();
-    let list = list.clone();
-    let selection = selection.clone();
     let host = window.clone();
     let window = window.clone();
-    keys.connect_key_pressed(move |_, key, _, mods| {
-        if state
-            .borrow()
-            .host
-            .as_ref()
-            .is_some_and(|host| !host.stack.is_mapped())
-        {
+    event_keys.connect_key_pressed(move |_, key, _, mods| {
+        if !host_surface.stack.is_mapped() {
             return glib::Propagation::Proceed;
         }
+        // Resolved per keypress: the Tree surface has its own selection model,
+        // so hardcoding the list's made the Tree read-only.
+        let selection = host_surface.selection();
         let search_focus = focus_in(&window, &search);
         let ctrl = mods.contains(gdk::ModifierType::CONTROL_MASK);
         let shift = mods.contains(gdk::ModifierType::SHIFT_MASK);
         let alt = mods.contains(gdk::ModifierType::ALT_MASK);
+
+        // Filter and view keys. Every one of these controls used to be bound to
+        // no key at all and reachable only through two unlabeled popovers, so
+        // sorting or switching to hidden files needed a mouse.
+        //
+        // Matched on the produced character rather than a keysym constant, so
+        // this works with Shift and on layouts where the keysym differs.
+        let letter = if ctrl { key.to_unicode() } else { None };
+        let pressed = |want: char| letter == Some(want);
+        // `+` arrives as KP_Add / equal on several layouts.
+        let plus = matches!(key, gdk::Key::plus | gdk::Key::equal | gdk::Key::KP_Add);
+        if ctrl && shift && pressed('s') {
+            report(&state, format!("Sort: {}", sort_label(cycle(&keys.sort))));
+            return glib::Propagation::Stop;
+        }
+        if ctrl && shift && pressed('t') {
+            report(&state, format!("Type: {}", class_label(cycle(&keys.class))));
+            return glib::Propagation::Stop;
+        }
+        if ctrl && shift && pressed('m') {
+            report(
+                &state,
+                format!("Match: {}", match_label(cycle(&keys.match_mode))),
+            );
+            return glib::Propagation::Stop;
+        }
+        if ctrl && shift && pressed('h') {
+            tick(&keys.hidden);
+            return glib::Propagation::Stop;
+        }
+        if ctrl && shift && pressed('d') {
+            flip(&keys.scope);
+            report(
+                &state,
+                if keys.scope.is_active() {
+                    "Scope: folders only"
+                } else {
+                    "Scope: files and folders"
+                },
+            );
+            return glib::Propagation::Stop;
+        }
+        if ctrl && shift && pressed('f') {
+            tick(&keys.folders_first);
+            return glib::Propagation::Stop;
+        }
+        if ctrl && shift && pressed('e') {
+            tick(&keys.tree);
+            return glib::Propagation::Stop;
+        }
+        if ctrl && shift && pressed('r') {
+            let list = keys.list.is_active();
+            (if list { &keys.grid } else { &keys.list }).set_active(!list);
+            return glib::Propagation::Stop;
+        }
+        if ctrl && alt && (plus || key == gdk::Key::minus) {
+            let step = if key == gdk::Key::minus { -1.0 } else { 1.0 };
+            keys.zoom
+                .set_value((keys.zoom.value() + step * 5.0).clamp(0.0, 100.0));
+            return glib::Propagation::Stop;
+        }
 
         if alt && key == gdk::Key::Left {
             navigate_history(&state, true);
@@ -2594,8 +2763,11 @@ fn install_keys(
                 }
                 return glib::Propagation::Stop;
             }
-            let hovering = hovered.borrow().is_some();
-            if search_focus && !hovering {
+            // A space in the search box is a space, always. The old guard tested
+            // `hovered` — the shared hover cell, not "is the pointer over the
+            // entry" — so parking the mouse over a file row and then typing a
+            // space opened a Preview and swallowed the character.
+            if search_focus {
                 return glib::Propagation::Proceed;
             }
             if let Some(path) = surface::preview_path(preview_mode.get(), &hovered, &selection) {
@@ -2631,7 +2803,7 @@ fn install_keys(
         }
 
         if key == gdk::Key::Down && search_focus {
-            list.grab_focus();
+            host_surface.focus_visible();
             return glib::Propagation::Stop;
         }
 
@@ -2786,7 +2958,7 @@ fn install_keys(
 
         glib::Propagation::Proceed
     });
-    host.add_controller(keys);
+    host.add_controller(event_keys);
 }
 
 fn flick_scroll(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
@@ -2801,6 +2973,29 @@ fn flick_scroll(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
         .build()
 }
 
+/// Is Ctrl held right now? GTK's drop signals carry no event state, so read
+/// the live pointer/keyboard state instead.
+fn ctrl_held() -> bool {
+    gdk::Display::default().is_some_and(|display| {
+        let seat = display.default_seat();
+        seat.as_ref()
+            .and_then(|seat| seat.keyboard())
+            .is_some_and(|keyboard| {
+                keyboard
+                    .modifier_state()
+                    .contains(gdk::ModifierType::CONTROL_MASK)
+            })
+    })
+}
+
+/// Selected positions, in model order.
+fn selected_positions(selection: &impl IsA<gtk::SelectionModel>) -> Vec<u32> {
+    let bitset = selection.as_ref().selection();
+    (0..bitset.size())
+        .map(|index| bitset.nth(index as u32))
+        .collect()
+}
+
 fn opts_from(state: &State) -> SearchOpts {
     SearchOpts {
         scope: state.scope,
@@ -2810,6 +3005,7 @@ fn opts_from(state: &State) -> SearchOpts {
         limit: MAX_ROWS,
         highlight: false,
         match_mode: state.match_mode,
+        show_hidden: state.show_hidden,
     }
 }
 
@@ -2855,9 +3051,17 @@ fn refresh_crumbs(state: &Rc<RefCell<State>>) {
             }
         }
     }
-    let show_from = segs.len().saturating_sub(3);
+    // Five segments, and the ellipsis is a *button* so the truncated parents
+    // are reachable. It was a dead label showing three segments.
+    let show_from = segs.len().saturating_sub(5);
     if show_from > 0 {
-        crumbs.append(&crumb_sep("…"));
+        let parent = segs[show_from - 1].1.clone();
+        let button = gtk::Button::with_label("…");
+        button.add_css_class("flat");
+        button.set_tooltip_text(Some(&parent.display().to_string()));
+        let state = Rc::clone(state);
+        button.connect_clicked(move |_| navigate_to(&state, parent.clone(), true));
+        crumbs.append(&button);
         crumbs.append(&crumb_sep("›"));
     }
     for (index, (name, path)) in segs.iter().enumerate().skip(show_from) {
@@ -2904,6 +3108,8 @@ fn navigate_to(state: &Rc<RefCell<State>>, path: PathBuf, remember: bool) {
         return;
     }
     let mut st = state.borrow_mut();
+    // The clipboard no longer describes this folder, so neither does the cut.
+    st.cut.clear();
     st.folder = st
         .catalog
         .as_ref()
@@ -3075,6 +3281,11 @@ fn cut_rows(state: &Rc<RefCell<State>>, rows: Vec<RowData>) {
 
 /// Paste the clipboard's file list into the browsed folder. Files that were
 /// marked with Cut in this window are moved; anything else is copied.
+///
+/// The cut list is only honoured for an exact match and is dropped the moment
+/// the paste is issued, whether or not it succeeds. Keeping it alive after a
+/// failed paste meant a later ordinary Copy + Paste of the same paths silently
+/// *moved* them instead.
 fn paste_here(window: &gtk::ApplicationWindow, state: &Rc<RefCell<State>>) {
     let window = window.clone();
     let state = Rc::clone(state);
@@ -3095,16 +3306,18 @@ fn paste_here(window: &gtk::ApplicationWindow, state: &Rc<RefCell<State>>) {
                 })
                 .unwrap_or_default();
             if paths.is_empty() {
-                state.borrow().status.set_text("Clipboard holds no files");
+                report(&state, "Clipboard holds no files");
                 return;
             }
-            let dest = current_dir(&state);
+            let Some(dest) = require_dir(&state, "paste") else {
+                return;
+            };
             let cut = {
                 let mut st = state.borrow_mut();
                 let cut = !st.cut.is_empty() && paths.iter().all(|path| st.cut.contains(path));
-                if cut {
-                    st.cut.clear();
-                }
+                // Always clear, even on an abort, so a stale cut can never turn
+                // a later Copy into a Move.
+                st.cut.clear();
                 cut
             };
             manager_tools::paste_paths(&window, &state, paths, dest, cut);
@@ -3113,7 +3326,11 @@ fn paste_here(window: &gtk::ApplicationWindow, state: &Rc<RefCell<State>>) {
 }
 
 fn open_terminal(state: &Rc<RefCell<State>>) {
-    open_terminal_at(state, current_dir(state));
+    if let Some(dir) = current_dir(state) {
+        open_terminal_at(state, dir);
+    } else {
+        report(state, "Browse a folder first");
+    }
 }
 
 fn open_terminal_at(state: &Rc<RefCell<State>>, dir: PathBuf) {
@@ -3130,9 +3347,11 @@ fn open_terminal_at(state: &Rc<RefCell<State>>, dir: PathBuf) {
         ]
         .map(String::from),
     );
-    let spawned = candidates
-        .iter()
-        .any(|term| Command::new(term).current_dir(&dir).spawn().is_ok());
+    let spawned = candidates.iter().any(|term| {
+        let mut command = Command::new(term);
+        command.current_dir(&dir);
+        crate::actions::spawn_detached(&mut command).is_ok()
+    });
     if !spawned {
         state
             .borrow()
@@ -3229,18 +3448,22 @@ fn spawn_search(state: &Rc<RefCell<State>>, seq: u64) {
         match result {
             Ok(result) => match result {
                 Ok(SearchResult::Indexed(mut ids)) => {
-                    let (host, catalog, selected_id, chart_dir) = {
+                    let (host, catalog, selected, chart_dir) = {
                         let st = state.borrow();
                         let manager = st.manager.borrow();
                         // Honor the Directory/Global toggle: Directory roots
                         // the chart at the browsed folder, Global shows all.
                         let scoped = manager.chart_scope() == ChartScope::Directory;
+                        // Every selected id, not just the first: restoring one
+                        // of eight lost the other seven on every refresh.
+                        let selected: Vec<u32> = selected_positions(&st.list_selection)
+                            .into_iter()
+                            .filter_map(|position| st.model.id(position))
+                            .collect();
                         (
                             st.host.clone(),
                             st.catalog.clone(),
-                            (!st.selection.selection().is_empty())
-                                .then(|| st.model.id(st.selection.selection().nth(0)))
-                                .flatten(),
+                            selected,
                             scoped
                                 .then(|| manager.directory().map(Path::to_path_buf))
                                 .flatten(),
@@ -3268,19 +3491,20 @@ fn spawn_search(state: &Rc<RefCell<State>>, seq: u64) {
                         st.visible_folders = folders;
                         st.visible_files = files;
                     }
-                    state.borrow().selection.unselect_all();
+                    surface::forget_hover(&state.borrow().hovered);
+                    state.borrow().list_selection.unselect_all();
                     state.borrow().model.set_ids(ids.clone());
-                    if let Some(position) =
-                        selected_id.and_then(|id| state.borrow().model.position(id))
-                    {
-                        state.borrow().selection.select_item(position, true);
+                    for id in selected {
+                        if let Some(position) = state.borrow().model.position(id) {
+                            state.borrow().list_selection.select_item(position, true);
+                        }
                     }
                     if let (Some(host), Some(c)) = (host, catalog) {
                         if host.surface.get() == Surface::Tree {
                             surface::rebuild_tree(&host, &c, &ids);
                         }
                         if host.show_weight.get() {
-                            surface::rebuild_weight(&host, &c, &ids, chart_dir.as_deref());
+                            surface::rebuild_weight(&host, &c, &ids, chart_dir.clone());
                         }
                         host.apply();
                     }
@@ -3296,7 +3520,7 @@ fn spawn_search(state: &Rc<RefCell<State>>, seq: u64) {
                                 c.file_count()
                             )
                         } else {
-                            format!("{folders} folders · {files} files")
+                            status_summary(folders, files, Some(n))
                         };
                         st.status.set_text(&summary);
                     }
@@ -3346,9 +3570,13 @@ fn spawn_search(state: &Rc<RefCell<State>>, seq: u64) {
                             })
                             .collect()
                     });
-                    let selected_path =
-                        selected_row(&state.borrow().selection).map(|row| row.path());
-                    let model_rows = rows
+                    // Snapshot *every* selected path. Taking only the first row
+                    // meant a multi-selection collapsed to one on every refresh.
+                    let selected_paths: Vec<String> = selected_rows(&state.borrow().list_selection)
+                        .into_iter()
+                        .map(|row| row.path())
+                        .collect();
+                    let model_rows: Vec<RowData> = rows
                         .into_iter()
                         .map(|row| {
                             RowData::new(
@@ -3367,9 +3595,17 @@ fn spawn_search(state: &Rc<RefCell<State>>, seq: u64) {
                         st.visible_files = files;
                         (st.model.clone(), st.status.clone(), st.host.clone())
                     };
+                    if let Some(host) = host.as_ref()
+                        && host.surface.get() == Surface::Tree
+                    {
+                        // The Tree used to keep the previous Query's Hits here,
+                        // including paths that had since been deleted.
+                        surface::rebuild_tree_from_rows(host, &model_rows);
+                    }
                     // GTK model changes notify selection synchronously. Never emit them
                     // while State is borrowed: its selection callback reads State again.
-                    state.borrow().selection.unselect_all();
+                    surface::forget_hover(&state.borrow().hovered);
+                    state.borrow().list_selection.unselect_all();
                     model.set_rows(model_rows);
                     if let Some(host) = host {
                         if let Some(weights) = weights {
@@ -3377,12 +3613,18 @@ fn spawn_search(state: &Rc<RefCell<State>>, seq: u64) {
                         }
                         host.apply();
                     }
-                    status.set_text(&format!("{folders} folders · {files} files"));
-                    if let Some(position) = selected_path
-                        .as_deref()
-                        .and_then(|path| state.borrow().model.position_path(path))
-                    {
-                        state.borrow().selection.select_item(position, true);
+                    // `live_children` truncates at MAX_ROWS; say so rather than
+                    // reporting the truncated count as if it were the total.
+                    status.set_text(&status_summary(folders, files, None));
+                    if folders + files == MAX_ROWS {
+                        status.set_text(&format!(
+                            "{} · results capped at {MAX_ROWS}",
+                            status_summary(folders, files, None)
+                        ));
+                    }
+                    let positions = state.borrow().model.positions_for(&selected_paths);
+                    for position in positions {
+                        state.borrow().list_selection.select_item(position, true);
                     }
                 }
                 Err(err) => state.borrow().status.set_text(&err),
@@ -3447,33 +3689,65 @@ fn push_undo(state: &Rc<RefCell<State>>, entry: UndoEntry) {
 }
 
 /// Trash rows through the core ops (undoable, errors surfaced) and refresh.
+///
+/// The work runs off the interface thread: trashing a folder is a full
+/// `copy_dir_all` plus `remove_dir_all` when the Trash is on another Mount, and
+/// doing it inline froze the window with no progress and no way to cancel.
 fn trash_rows(state: &Rc<RefCell<State>>, window: &gtk::ApplicationWindow, rows: Vec<RowData>) {
     if rows.is_empty() {
         return;
     }
-    let mut trashed = 0usize;
-    let mut failed: Option<String> = None;
-    for row in rows {
-        let path = PathBuf::from(row.path());
-        match qfind_core::trash(&path) {
-            Ok((staged, _)) => {
-                trashed += 1;
-                push_undo(state, UndoEntry::Trash { staged, orig: path });
+    let paths: Vec<PathBuf> = rows.iter().map(|row| PathBuf::from(row.path())).collect();
+    let state = Rc::clone(state);
+    let window = window.clone();
+    report(&state, format!("Trashing {} item(s)…", paths.len()));
+    glib::MainContext::default().spawn_local(async move {
+        let results = gio::spawn_blocking(move || {
+            paths
+                .iter()
+                .map(|path| (path.clone(), qfind_core::trash(path)))
+                .collect::<Vec<_>>()
+        })
+        .await;
+        let mut trashed = 0usize;
+        let mut undone = Vec::new();
+        let mut failures = Vec::new();
+        if let Ok(results) = results {
+            for (path, result) in results {
+                match result {
+                    Ok((staged, _)) => {
+                        trashed += 1;
+                        undone.push(UndoEntry::Trash { staged, orig: path });
+                    }
+                    Err(error) => failures.push(format!("{}: {error}", path.display())),
+                }
             }
-            Err(error) => {
-                failed = Some(error.to_string());
-                break;
+        } else {
+            failures.push("trash worker failed".into());
+        }
+        {
+            let mut st = state.borrow_mut();
+            // The cut list is invalid once its items have moved.
+            st.cut.retain(|path| {
+                undone
+                    .iter()
+                    .all(|e| !matches!(e, UndoEntry::Trash { orig, .. } if orig != path))
+            });
+            for entry in undone {
+                push_undo(&state, entry);
             }
         }
-    }
-    {
-        let st = state.borrow();
-        st.status.set_text(&match failed {
-            Some(error) => format!("Trashed {trashed}, stopped: {error}"),
-            None => format!("Trashed {trashed} (Ctrl+Z undo)"),
-        });
-    }
-    refresh_current(state, window);
+        let mut message = format!("Trashed {trashed} (Ctrl+Z undo)");
+        if !failures.is_empty() {
+            message = format!(
+                "Trashed {trashed}, {} failed: {}",
+                failures.len(),
+                failures.join("; ")
+            );
+        }
+        report(&state, message);
+        refresh_current(&state, &window);
+    });
 }
 
 /// Delete rows outright after confirmation. Unlike [`trash_rows`] this frees
@@ -3509,24 +3783,38 @@ fn delete_rows(state: &Rc<RefCell<State>>, window: &gtk::ApplicationWindow, rows
         if choice != Ok(1) {
             return;
         }
+        report(&state, format!("Deleting {} item(s)…", paths.len()));
+        let results = gio::spawn_blocking(move || {
+            paths
+                .iter()
+                .map(|path| (path.clone(), qfind_core::delete(path)))
+                .collect::<Vec<_>>()
+        })
+        .await;
         let mut deleted = 0usize;
-        let mut failed: Option<String> = None;
-        for path in paths {
-            match qfind_core::delete(&path) {
-                Ok(_) => deleted += 1,
-                Err(error) => {
-                    failed = Some(error.to_string());
-                    break;
+        let mut failures = Vec::new();
+        match results {
+            Ok(results) => {
+                for (path, result) in results {
+                    match result {
+                        Ok(_) => deleted += 1,
+                        Err(error) => failures.push(format!("{}: {error}", path.display())),
+                    }
                 }
             }
+            Err(_) => failures.push("delete worker failed".into()),
         }
-        {
-            let st = state.borrow();
-            st.status.set_text(&match failed {
-                Some(error) => format!("Deleted {deleted}, stopped: {error}"),
-                None => format!("Deleted {deleted} permanently"),
-            });
-        }
+        state.borrow_mut().cut.clear();
+        let message = if failures.is_empty() {
+            format!("Deleted {deleted} permanently")
+        } else {
+            format!(
+                "Deleted {deleted}, {} failed: {}",
+                failures.len(),
+                failures.join("; ")
+            )
+        };
+        report(&state, message);
         refresh_current(&state, &window);
     });
 }
@@ -3545,15 +3833,65 @@ fn undo_last(state: &Rc<RefCell<State>>, window: &gtk::ApplicationWindow) {
     refresh_current(state, window);
 }
 
-fn current_dir(state: &Rc<RefCell<State>>) -> PathBuf {
+/// Show a message in the footer. Every failure the user can act on goes
+/// through here instead of a silent `let _ =`.
+fn report(state: &Rc<RefCell<State>>, message: impl Into<String>) {
+    state.borrow().status.set_text(&message.into());
+}
+
+/// "12 folders · 30 files", plus an honest note when the Hit list was capped so
+/// the count can never quietly read as "this is all of them".
+fn status_summary(folders: usize, files: usize, total: Option<usize>) -> String {
+    let mut text = format!("{folders} folders · {files} files");
+    if let Some(total) = total
+        && total > folders + files
+    {
+        text.push_str(&format!(" · showing {} of {total}", folders + files));
+    }
+    text
+}
+
+impl State {
+    /// The selection model for the surface on screen.
+    pub(crate) fn active_selection(&self) -> gtk::MultiSelection {
+        self.host
+            .as_ref()
+            .map_or_else(|| self.list_selection.clone(), |host| host.selection())
+    }
+}
+
+/// The browsed Folder, or `None` in Global scope.
+///
+/// Never falls back to the process CWD. In Global scope that put the target
+/// wherever the app happened to be launched from, so Copy → Everywhere → Ctrl+V
+/// silently wrote files outside the window the user was looking at.
+fn current_dir(state: &Rc<RefCell<State>>) -> Option<PathBuf> {
     state
         .borrow()
         .manager
         .borrow()
         .directory()
         .map(Path::to_path_buf)
-        .or_else(|| std::env::current_dir().ok())
+}
+
+/// [`current_dir`] with an explicit fallback, for the read-only call sites that
+/// need *some* path (a dialog's initial text, a FileChooser's starting point).
+fn current_dir_or(state: &Rc<RefCell<State>>) -> PathBuf {
+    current_dir(state)
+        .or_else(home_dir)
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// [`current_dir`], or a clear refusal for the mutating call sites. Writing
+/// into a guessed directory is worse than asking.
+fn require_dir(state: &Rc<RefCell<State>>, what: &str) -> Option<PathBuf> {
+    current_dir(state).or_else(|| {
+        report(
+            state,
+            format!("Browse a folder first — {what} needs a destination"),
+        );
+        None
+    })
 }
 
 /// Modal one-line text prompt. `accept` runs with the trimmed input.
@@ -3625,13 +3963,13 @@ fn prompt_text(
 /// Ctrl+L "Go to folder": same resolve rules the old location entry had
 /// (absolute, or relative to the browsed directory / cwd).
 fn goto_dialog(state: Rc<RefCell<State>>, window: gtk::ApplicationWindow) {
-    let initial = current_dir(&state).display().to_string();
+    let initial = current_dir_or(&state).display().to_string();
     prompt_text(&window, "Go to folder", &initial, move |raw| {
         let path = PathBuf::from(&raw);
         let path = if path.is_absolute() {
             path
         } else {
-            current_dir(&state).join(path)
+            current_dir_or(&state).join(path)
         };
         navigate_to(&state, path, true);
     });
@@ -3684,7 +4022,9 @@ fn rename_row(state: Rc<RefCell<State>>, window: gtk::ApplicationWindow, row: Ro
 }
 
 fn mkdir_here(state: Rc<RefCell<State>>, window: gtk::ApplicationWindow) {
-    let parent = current_dir(&state);
+    let Some(parent) = require_dir(&state, "a new folder") else {
+        return;
+    };
     let win = window.clone();
     prompt_text(&window, "New folder", "", move |name| {
         if name.is_empty() || name.contains('/') {
@@ -3872,18 +4212,21 @@ mod tests {
             bookmark_btn: gtk::Button::new(),
             archive_save_btn: gtk::Button::new(),
             model: model.clone(),
-            selection,
+            list_selection: selection,
+            tree_selection: gtk::MultiSelection::new(Some(gio::ListStore::new::<RowData>())),
             status: gtk::Label::new(None),
             search,
             scope: Scope::All,
             class: FileClass::All,
             sort: Sort::Score,
             match_mode: MatchMode::Fuzzy,
+            show_hidden: true,
             seq: 1,
             snap_mtime: None,
             fresh: HashSet::new(),
             refreshing: false,
             cut: Vec::new(),
+            hovered: Rc::new(RefCell::new(None)),
             dir_monitor: None,
             last_ids: Vec::new(),
             visible_folders: 0,
@@ -3898,7 +4241,7 @@ mod tests {
         assert_eq!(state.borrow().visible_folders, 1);
         assert_eq!(state.borrow().visible_files, 1);
 
-        let selection = state.borrow().selection.clone();
+        let selection = state.borrow().list_selection.clone();
         let selection_reads = Rc::new(Cell::new(0));
         let reads = Rc::clone(&selection_reads);
         let state_on_selection = Rc::clone(&state);
@@ -3948,6 +4291,7 @@ mod tests {
                 limit: MAX_ROWS,
                 highlight: false,
                 match_mode: MatchMode::Fuzzy,
+                show_hidden: true,
             },
             true,
             false,

@@ -4,6 +4,7 @@
 //! (`org.gnome.NautilusPreviewer2.ShowFile`, then `sushi`), then a small
 //! built-in window.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::Future;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -85,7 +86,16 @@ fn thumbnail_sender() -> &'static mpsc::Sender<ThumbnailJob> {
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .recv();
                     let Ok(job) = job else { return };
-                    let rendered = render_thumbnail(&job.path, job.width, job.height, &job.output);
+                    // A panic in `image` on a corrupt file used to kill the
+                    // thread with `state.result` still `None` and the map entry
+                    // still present, so every later `load_thumbnail` took the
+                    // "already started" branch and awaited a future that could
+                    // never resolve: that thumbnail was dead for the session and
+                    // the pool shrank by one per bad file.
+                    let rendered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        render_thumbnail(&job.path, job.width, job.height, &job.output)
+                    }))
+                    .unwrap_or_else(|_| Err("thumbnail worker panicked".into()));
                     let wakers = {
                         let mut state = job
                             .result
@@ -152,10 +162,12 @@ pub fn selected_row(selection: &impl IsA<gtk::SelectionModel>) -> Option<RowData
 pub fn open(window: &impl IsA<gtk::Window>, path: &str) {
     let cfg = Config::load();
     let is_dir = Path::new(path).is_dir();
-    if let OpenHow::Editor { program, args } = cfg.open_how(Path::new(path), is_dir)
-        && Command::new(&program).args(&args).arg(path).spawn().is_ok()
-    {
-        return;
+    if let OpenHow::Editor { program, args } = cfg.open_how(Path::new(path), is_dir) {
+        let mut editor = Command::new(&program);
+        editor.args(&args).arg(path);
+        if spawn_detached(&mut editor).is_ok() {
+            return;
+        }
     }
     let file = gio::File::for_path(path);
     let launcher = gtk::FileLauncher::new(Some(&file));
@@ -229,30 +241,52 @@ pub fn copy_paths(paths: &[String]) {
     }
 }
 
-/// Spacebar Quick Look. Sushi first; built-in window if it is missing.
+/// Spacebar Quick Look. Sushi first; built-in window if it declines or is
+/// missing.
 pub fn preview(parent: &gtk::Window, path: &str, slot: &std::cell::RefCell<Option<gtk::Window>>) {
-    if let Some(existing) = slot.borrow_mut().take() {
+    // A window the user closed must not sit in the slot: `take()` would hand it
+    // back, the next Space would close it again, and only the Space after that
+    // would open anything.
+    if let Some(existing) = slot.borrow_mut().take()
+        && existing.is_visible()
+    {
         existing.close();
         return;
     }
-    if sushi_show(path) {
-        return;
-    }
-    let win = builtin_preview(parent, path);
-    *slot.borrow_mut() = Some(win);
+    let parent = parent.clone();
+    let path = path.to_owned();
+    let slot = slot.clone();
+    glib::MainContext::default().spawn_local(async move {
+        // Audio and video go straight to the built-in surfaces. Handing them to
+        // Sushi first meant the file left as a generic icon window, with no
+        // waveform and no transport.
+        if is_media(Path::new(&path)) {
+            let win = builtin_preview(&parent, &path);
+            *slot.borrow_mut() = Some(win);
+            return;
+        }
+        // The D-Bus round trip is sync but happens on a worker: `bus_get_sync`
+        // alone can stall for GIO's 25 s bus-acquire timeout, which used to
+        // freeze the whole window on every Space with no reachable session bus.
+        let uri = gio::File::for_path(&path).uri();
+        let accepted = gio::spawn_blocking(move || sushi_show(&uri))
+            .await
+            .unwrap_or(false);
+        if accepted {
+            return;
+        }
+        let win = builtin_preview(&parent, &path);
+        *slot.borrow_mut() = Some(win);
+    });
 }
 
-fn sushi_show(path: &str) -> bool {
-    let uri = gio::File::for_path(path).uri();
-    dbus_show_file(&uri)
-}
-
-fn dbus_show_file(uri: &str) -> bool {
-    let Ok(conn) = gio::bus_get_sync(gio::BusType::Session, None::<&gio::Cancellable>) else {
+/// Ask Sushi to show the file, reporting whether it *accepted* it.
+fn sushi_show(uri: &str) -> bool {
+    let Ok(conn) = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE) else {
         return false;
     };
     let args = (uri, "", true).to_variant();
-    conn.call_sync(
+    let Ok(reply) = conn.call_sync(
         Some("org.gnome.NautilusPreviewer"),
         "/org/gnome/NautilusPreviewer",
         "org.gnome.NautilusPreviewer2",
@@ -261,11 +295,22 @@ fn dbus_show_file(uri: &str) -> bool {
         None,
         gio::DBusCallFlags::NONE,
         800,
-        None::<&gio::Cancellable>,
-    )
-    .is_ok()
+        gio::Cancellable::NONE,
+    ) else {
+        return false;
+    };
+    // The reply is a boolean. It used to be ignored, so a Sushi that declined
+    // the type made Space do nothing at all with no fallback.
+    reply.child_value(0).get::<bool>().unwrap_or(false)
 }
 
+/// Reuse this Megaman instance to show `file`'s folder.
+///
+/// Spawning a *new* process was two bugs at once: the binary name was
+/// hardcoded, so a symlinked, renamed, or out-of-`$PATH` install silently fell
+/// through to Nautilus, and when it did work every Reveal produced a second
+/// full app instance with its own Catalog and timers. Asking this process to
+/// navigate does the right thing either way.
 fn open_megaman(file: &gio::File, directory: bool) -> bool {
     let Some(path) = file.path() else {
         return false;
@@ -277,7 +322,43 @@ fn open_megaman(file: &gio::File, directory: bool) -> bool {
             .unwrap_or_else(|| Path::new("/"))
             .to_path_buf()
     };
-    Command::new("qfind-gtk").arg(target).spawn().is_ok()
+    NAVIGATE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        match slot.as_mut() {
+            Some(navigate) => {
+                navigate(target);
+                true
+            }
+            None => false,
+        }
+    })
+}
+
+thread_local! {
+    /// The active window's navigator, set once the shell is built.
+    static NAVIGATE: RefCell<Option<Box<dyn Fn(PathBuf)>>> = const { RefCell::new(None) };
+}
+
+/// Run a helper without leaving it behind.
+///
+/// Dropping a `Child` never waits for it, so every editor launch, every Reveal,
+/// and every terminal left a `defunct` entry in the process table for the life
+/// of the app. One thread per helper is nothing next to the process it waits on,
+/// and it is the only thing that can reap *our* children.
+pub fn spawn_detached(command: &mut Command) -> std::io::Result<()> {
+    let mut child = command.spawn()?;
+    thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
+/// Publish the active window's navigator so "Show in Files" and "Open Folder"
+/// can navigate here instead of spawning another process.
+pub fn set_navigator(navigate: std::rc::Rc<std::cell::RefCell<Box<dyn Fn(PathBuf)>>>) {
+    NAVIGATE.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move |path| navigate.borrow()(path)));
+    });
 }
 
 fn builtin_preview(parent: &gtk::Window, path: &str) -> gtk::Window {
@@ -293,13 +374,18 @@ fn builtin_preview(parent: &gtk::Window, path: &str) -> gtk::Window {
         .default_height(560)
         .build();
 
-    let child = preview_widget(Path::new(path));
+    // `true`: Space is a request to hear or watch this, so the window that
+    // Space opened starts playing.
+    let child = preview_widget(Path::new(path), true);
     win.set_child(Some(&child));
 
+    // Escape closes. Space deliberately does not: it belongs to the media
+    // surfaces, where it plays and pauses, and it used to close the window
+    // instead whenever the Preview itself did not want it.
     let esc = gtk::EventControllerKey::new();
     let w = win.clone();
     esc.connect_key_pressed(move |_, key, _, _| {
-        if key == gdk::Key::Escape || key == gdk::Key::space {
+        if key == gdk::Key::Escape {
             w.close();
             glib::Propagation::Stop
         } else {
@@ -308,14 +394,43 @@ fn builtin_preview(parent: &gtk::Window, path: &str) -> gtk::Window {
     });
     win.add_controller(esc);
     win.present();
+    // Without this the keyboard stayed in the window behind, and a second Space
+    // was typed into the search box instead of pausing what Space had opened.
+    // Deferred, because moving the focus while the Space that opened this
+    // window is still being delivered lands that same Space on the new widget,
+    // which cancels the playback the Preview had just started.
+    let focused = win.clone();
+    glib::idle_add_local_once(move || {
+        gtk::prelude::GtkWindowExt::set_focus(&focused, Some(&child));
+    });
     win
 }
 
-pub(crate) fn preview_widget(p: &Path) -> gtk::Widget {
+/// Does this app have a real Preview surface for it, rather than a thumbnail?
+pub fn is_media(p: &Path) -> bool {
+    let (ctype, _) = gio::content_type_guess(Some(p), None::<&[u8]>);
+    crate::audio::is_audio(p, &ctype) || crate::preview::is_video(p, &ctype)
+}
+
+/// The Preview surface for a file.
+///
+/// `play` starts media immediately. It is on for the window Space opens and off
+/// for the Inspector, which is a look at the file: two players for one file meant
+/// the track played twice over itself.
+pub(crate) fn preview_widget(p: &Path, play: bool) -> gtk::Widget {
     if p.is_dir() {
         return fallback_preview(p, "inode/directory").upcast();
     }
     let (ctype, _) = gio::content_type_guess(Some(p), None::<&[u8]>);
+    // Audio and video get a real surface: decoded waveform with a transport and
+    // scrubbing, and in-place playback. Both are checked before the thumbnailer,
+    // which would otherwise swallow an `.mp3` and show a generic icon.
+    if crate::audio::is_audio(p, &ctype) {
+        return crate::preview::audio_preview(p, play);
+    }
+    if crate::preview::is_video(p, &ctype) {
+        return crate::preview::video_preview(p, play);
+    }
     if can_thumbnail(p) {
         thumbnail_preview(p).upcast()
     } else if is_textish(&ctype, p) {
@@ -456,6 +571,32 @@ fn can_thumbnail(path: &Path) -> bool {
         )
 }
 
+/// Where thumbnails live. Created once: `create_dir_all` ran on the main thread
+/// for every tile bound, adding a syscall storm to the scroll path.
+fn thumbnail_cache() -> ThumbnailResult {
+    static CACHE: std::sync::OnceLock<ThumbnailResult> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            // `XDG_CACHE_HOME`, then `$HOME/.cache`, then a per-user directory
+            // under the temp dir. The bare `temp_dir()` used as a last resort
+            // collided with another user's `qfind` and silently disabled
+            // thumbnails for the whole session with no diagnostic.
+            let base = std::env::var_os("XDG_CACHE_HOME")
+                .map(PathBuf::from)
+                .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+                .unwrap_or_else(|| {
+                    let user = std::env::var("USER")
+                        .or_else(|_| std::env::var("LOGNAME"))
+                        .unwrap_or_else(|_| "shared".into());
+                    std::env::temp_dir().join(format!("qfind-{user}"))
+                });
+            let cache = base.join("qfind/thumbnails");
+            std::fs::create_dir_all(&cache).map_err(|error| error.to_string())?;
+            Ok(cache)
+        })
+        .clone()
+}
+
 fn thumbnail_output(path: &Path, width: u32, height: u32) -> ThumbnailResult {
     let meta = std::fs::metadata(path).map_err(|error| error.to_string())?;
     let mut hash = DefaultHasher::new();
@@ -464,18 +605,53 @@ fn thumbnail_output(path: &Path, width: u32, height: u32) -> ThumbnailResult {
     meta.modified().ok().hash(&mut hash);
     width.hash(&mut hash);
     height.hash(&mut hash);
-    let cache = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
-        .unwrap_or_else(std::env::temp_dir)
-        .join("qfind/thumbnails");
-    std::fs::create_dir_all(&cache).map_err(|error| error.to_string())?;
-    Ok(cache.join(format!("{:016x}.png", hash.finish())))
+    Ok(thumbnail_cache()?.join(format!("{:016x}.png", hash.finish())))
 }
 
-fn render_thumbnail(path: &Path, width: u32, height: u32, output: &Path) -> ThumbnailResult {
+/// Render a thumbnail, atomically.
+///
+/// Everything is written to `<cache>/x.png.part` and renamed into place only on
+/// success. A thumbnailer killed at the 3 s timeout used to leave a half-written
+/// PNG at the final path; the cache key still matched on the next bind, so that
+/// corrupt image was shown permanently with no way to recover short of clearing
+/// the whole thumbnail cache by hand.
+fn render_thumbnail(path: &Path, width: u32, height: u32, cache: &Path) -> ThumbnailResult {
+    let output = cache.with_extension("png.part");
     let ext = extension(path);
+    match render_into(path, &ext, width, height, &output) {
+        Ok(()) => match std::fs::rename(&output, cache.with_extension("png")) {
+            Ok(()) => Ok(cache.with_extension("png")),
+            Err(error) => {
+                let _ = std::fs::remove_file(&output);
+                Err(error.to_string())
+            }
+        },
+        Err(error) => {
+            let _ = std::fs::remove_file(&output);
+            Err(error)
+        }
+    }
+}
+
+/// Refuse to decode anything larger than this. A 100 MP photo is 400 MB once
+/// decoded, and eight of those on eight worker threads will exhaust RAM.
+const MAX_DECODE_BYTES: u64 = 64 * 1024 * 1024;
+
+fn render_into(
+    path: &Path,
+    ext: &str,
+    width: u32,
+    height: u32,
+    output: &Path,
+) -> Result<(), String> {
     if is_raster_image(path) {
+        if let Ok(meta) = std::fs::metadata(path)
+            && meta.len() > MAX_DECODE_BYTES
+        {
+            return Err(format!("image too large to thumbnail: {}", path.display()));
+        }
+        // `image` decodes the full image before `thumbnail` shrinks it, so the
+        // guard above is what keeps that bounded.
         image::ImageReader::open(path)
             .map_err(|error| error.to_string())?
             .with_guessed_format()
@@ -485,10 +661,10 @@ fn render_thumbnail(path: &Path, width: u32, height: u32, output: &Path) -> Thum
             .thumbnail(width.max(1), height.max(1))
             .save(output)
             .map_err(|error| error.to_string())?;
-        return Ok(output.to_path_buf());
+        return Ok(());
     }
     let size = width.max(height).min(1600).to_string();
-    let mut command = if matches!(ext.as_str(), "svg" | "svgz") {
+    let mut command = if matches!(ext, "svg" | "svgz") {
         let mut command = Command::new("rsvg-convert");
         command
             .args(["--format", "png", "--keep-aspect-ratio", "--width"])
@@ -499,47 +675,25 @@ fn render_thumbnail(path: &Path, width: u32, height: u32, output: &Path) -> Thum
             .arg(output)
             .arg(path);
         command
-    } else if matches!(ext.as_str(), "pdf" | "ps" | "eps" | "djvu" | "xps") {
+    } else if matches!(ext, "pdf" | "ps" | "eps" | "djvu" | "xps") {
         let mut command = Command::new("evince-thumbnailer");
         command.arg("-s").arg(&size).arg(path).arg(output);
         command
     } else if matches!(
-        ext.as_str(),
+        ext,
         "mp3" | "flac" | "wav" | "ogg" | "m4a" | "aac" | "aiff" | "opus" | "wma"
     ) {
         let mut command = Command::new("ffmpeg");
         command
             .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
             .arg(path)
-            .args([
-                "-filter_complex",
-                &format!(
-                    "aformat=channel_layouts=mono,showwavespic=s={width}x{height}:colors=#8aa4ff"
-                ),
-                "-frames:v",
-                "1",
-            ])
-            .arg(output);
-        command
-    } else if matches!(ext.as_str(), "mp4" | "mkv" | "webm" | "mov" | "avi" | "m4v") {
-        let mut command = Command::new("ffmpegthumbnailer");
-        command
-            .args(["-i"])
-            .arg(path)
-            .args(["-o"])
-            .arg(output)
-            .args(["-s", &size, "-c", "png", "-t", "10%"]);
-        command
-    } else {
-        let mut command = Command::new("gsf-office-thumbnailer");
-        command
-            .arg("-i")
-            .arg(path)
             .arg("-o")
             .arg(output)
             .arg("-s")
             .arg(&size);
         command
+    } else {
+        return Err(format!("no thumbnailer for {ext}"));
     };
     command
         .stdin(Stdio::null())
@@ -549,9 +703,8 @@ fn render_thumbnail(path: &Path, width: u32, height: u32, output: &Path) -> Thum
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         match child.try_wait() {
-            Ok(Some(status)) if status.success() && output.is_file() => {
-                return Ok(output.to_path_buf());
-            }
+            // Reap the child on every exit path so it cannot become a zombie.
+            Ok(Some(status)) if status.success() && output.is_file() => return Ok(()),
             Ok(Some(status)) => return Err(format!("thumbnailer exited with {status}")),
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
             Ok(None) => {
@@ -574,14 +727,42 @@ fn is_textish(ctype: &str, path: &Path) -> bool {
         )
 }
 
+/// How much of a text file a Preview shows.
+const TEXT_PREVIEW_BYTES: usize = 64 * 1024;
+
+/// Read the head of a text file without loading all of it.
+///
+/// `fs::read` pulled the *entire* file into memory and only then truncated to
+/// 64 KiB. `is_textish` matches `.log`, `.json`, `.csv`, and anything GIO guesses
+/// as `text/*`, so Space on a multi-gigabyte log allocated gigabytes and froze
+/// the window.
+fn read_head(path: &Path) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut buf = vec![0u8; TEXT_PREVIEW_BYTES + 4];
+    let mut filled = 0;
+    while filled < buf.len() {
+        match file.read(&mut buf[filled..])? {
+            0 => break,
+            n => filled += n,
+        }
+    }
+    // Do not split a multi-byte scalar: a cut mid-sequence leaves a replacement
+    // character at the boundary.
+    let mut end = filled.min(TEXT_PREVIEW_BYTES);
+    while end > 0 && std::str::from_utf8(&buf[..end]).is_err() {
+        end -= 1;
+    }
+    let truncated = filled > TEXT_PREVIEW_BYTES;
+    let mut text = String::from_utf8_lossy(&buf[..end]).into_owned();
+    if truncated {
+        text.push_str("\n\n… preview truncated");
+    }
+    Ok(text)
+}
+
 fn text_preview(path: &Path) -> gtk::ScrolledWindow {
-    let text = std::fs::read(path)
-        .ok()
-        .map(|b| {
-            let cut = b.len().min(64 * 1024);
-            String::from_utf8_lossy(&b[..cut]).into_owned()
-        })
-        .unwrap_or_else(|| "(unreadable)".into());
+    let text = read_head(path).unwrap_or_else(|_| "(unreadable)".into());
     let view = gtk::TextView::builder()
         .editable(false)
         .wrap_mode(gtk::WrapMode::Word)
@@ -625,15 +806,18 @@ fn fallback_preview(path: &Path, ctype: &str) -> gtk::Box {
 #[allow(dead_code)]
 pub fn human_size(n: u64) -> String {
     const K: f64 = 1024.0;
-    let n = n as f64;
-    if n < K {
-        format!("{} B", n as u64)
-    } else if n < K * K {
-        format!("{:.1} KB", n / K)
-    } else if n < K * K * K {
-        format!("{:.1} MB", n / (K * K))
+    const UNITS: [&str; 6] = ["B", "KB", "MB", "GB", "TB", "PB"];
+    let mut value = n as f64;
+    let mut unit = 0;
+    while value >= K && unit < UNITS.len() - 1 {
+        value /= K;
+        unit += 1;
+    }
+    // A 2 TB volume used to read "2048.0 GB": the ladder stopped at gigabytes.
+    if unit == 0 {
+        format!("{} {}", n, UNITS[0])
     } else {
-        format!("{:.1} GB", n / (K * K * K))
+        format!("{value:.1} {}", UNITS[unit])
     }
 }
 

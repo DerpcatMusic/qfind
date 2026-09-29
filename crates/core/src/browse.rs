@@ -14,14 +14,21 @@ pub struct LiveEntry {
     pub mtime: i64,
 }
 
+/// Match one filename against a Query's words.
+///
+/// `Exact` compares the *joined* Query, not each word, so a two-word Query can
+/// still match. The indexed path has always joined; this makes live browsing
+/// agree with it instead of silently returning nothing.
 fn name_matches(name: &str, words: &[&str], mode: MatchMode) -> bool {
     let name = name.to_lowercase();
+    if mode == MatchMode::Exact {
+        return name == words.join(" ").to_lowercase();
+    }
     words.iter().all(|word| {
         let word = word.to_lowercase();
         match mode {
-            MatchMode::Exact => name == word,
             MatchMode::Substring => name.contains(&word),
-            MatchMode::Fuzzy => {
+            MatchMode::Fuzzy | MatchMode::Exact => {
                 let mut chars = name.chars();
                 word.chars()
                     .all(|wanted| chars.by_ref().any(|got| got == wanted))
@@ -67,8 +74,10 @@ pub fn live_children(
         {
             continue;
         }
+        // `DirEntry::metadata` does not follow symlinks, so a link to a 2 GB
+        // ISO reported ~20 bytes here while the Catalog reported the target's.
         let (size, mtime) = if opts.sort.needs_stat() || measure_size {
-            entry.metadata().map_or((0, 0), |meta| {
+            entry.path().metadata().map_or((0, 0), |meta| {
                 let mtime = meta
                     .modified()
                     .ok()

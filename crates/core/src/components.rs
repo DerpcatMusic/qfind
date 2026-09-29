@@ -624,15 +624,20 @@ fn task_component(path: &Path, request: &Value) -> Result<Value, String> {
 
 /// Storage inspection includes generated and hidden entries even when search excludes them.
 pub fn storage_children(path: &Path) -> Result<Vec<crate::StorageEntry>, String> {
-    fs::read_dir(path)
+    let entries = fs::read_dir(path)
         .map_err(|error| error.to_string())?
-        .map(|entry| {
-            let entry = entry.map_err(|error| error.to_string())?;
-            let metadata = entry.metadata().map_err(|error| error.to_string())?;
+        // `flatten` and `filter_map`: one unreadable child used to fail the whole
+        // listing with an error string.
+        .flatten()
+        .filter_map(|entry| {
+            // `DirEntry::metadata` does not traverse symlinks, so a symlinked
+            // folder came out as a ~10-byte "file" that could not be opened or
+            // drilled into. `path().metadata()` resolves the link.
+            let metadata = entry.path().metadata().ok()?;
             if metadata.is_dir() {
                 crate::FolderSizes::global().request(&entry.path());
             }
-            Ok(crate::StorageEntry {
+            Some(crate::StorageEntry {
                 id: u32::MAX,
                 name: entry.file_name().to_string_lossy().into_owned(),
                 path: entry.path(),
@@ -645,7 +650,8 @@ pub fn storage_children(path: &Path) -> Result<Vec<crate::StorageEntry>, String>
                 entries: 1,
             })
         })
-        .collect()
+        .collect::<Vec<_>>();
+    Ok(entries)
 }
 
 fn storage_component(manager: &Manager, path: &Path) -> Result<Value, String> {
