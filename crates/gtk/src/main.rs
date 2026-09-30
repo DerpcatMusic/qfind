@@ -591,12 +591,12 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     let back_btn = gtk::Button::from_icon_name("go-previous-symbolic");
     back_btn.set_tooltip_text(Some("Back (Alt+Left)"));
     back_btn.set_sensitive(false);
-    address_bar.append(&back_btn);
+    header.pack_start(&back_btn);
 
     let forward_btn = gtk::Button::from_icon_name("go-next-symbolic");
     forward_btn.set_tooltip_text(Some("Forward (Alt+Right)"));
     forward_btn.set_sensitive(false);
-    address_bar.append(&forward_btn);
+    header.pack_start(&forward_btn);
 
     let up_btn = gtk::Button::from_icon_name("go-up-symbolic");
     up_btn.set_tooltip_text(Some("Parent folder (Alt+Up)"));
@@ -606,7 +606,7 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
             .and_then(|path| path.parent())
             .is_some(),
     );
-    address_bar.append(&up_btn);
+    header.pack_start(&up_btn);
 
     let bookmark_btn = gtk::Button::new();
     let bookmarked = initial_folder
@@ -705,15 +705,18 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     let search = gtk::SearchEntry::builder()
         .placeholder_text(&search_hint)
         .build();
-    search.set_width_chars(44);
+    search.set_width_chars(26);
     search.add_css_class("qfind-search");
-    let title_box = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    // Nautilus layout: navigation at the start, the path bar as the title,
+    // search at the end. This used to be three stacked bars.
+    let title_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     title_box.set_hexpand(true);
     title_box.append(&gtk::Image::from_icon_name("folder-symbolic"));
     title_box.append(&crumbs);
     title_box.add_css_class("qfind-location");
-    address_bar.insert_child_after(&title_box, Some(&up_btn));
-    header.set_title_widget(Some(&search));
+    address_bar.prepend(&title_box);
+    address_bar.set_hexpand(true);
+    header.set_title_widget(Some(&address_bar));
 
     let classic_btn = gtk::ToggleButton::with_label("Browse");
     classic_btn.set_widget_name("qfind-mode-classic");
@@ -806,6 +809,7 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     view_box.append(&zebra_btn);
     view_box.append(&tree_btn);
     header.pack_end(&settings_btn);
+    header.pack_end(&search);
     let preview_view_btn = gtk::CheckButton::with_label("Inspector pane");
     preview_view_btn.set_active(true);
     view_box.append(&preview_view_btn);
@@ -1164,7 +1168,6 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
 
     let results = gtk::Box::new(gtk::Orientation::Vertical, 0);
     results.add_css_class("qfind-content");
-    results.append(&address_bar);
     results.append(&toolbar);
     results.append(&stack);
 
@@ -1338,10 +1341,6 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     preview_panel.add_css_class("qfind-chrome");
     preview_panel.add_css_class("qfind-inspector");
     preview_panel.set_widget_name("qfind-preview-pane");
-    let inspector_heading = gtk::Label::new(Some("INSPECTOR"));
-    inspector_heading.add_css_class("qfind-section-label");
-    inspector_heading.set_xalign(0.0);
-    preview_panel.append(&inspector_heading);
     preview_panel.append(&preview_header);
     preview_panel.append(&pane_stack);
     bind_preview_controls(&preview_btn, &preview_panel, &preview_close);
@@ -1373,10 +1372,6 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     let browser = gtk::Paned::new(gtk::Orientation::Horizontal);
     let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 4);
     sidebar.add_css_class("qfind-sidebar");
-    let workspace_heading = gtk::Label::new(Some("WORKSPACE"));
-    workspace_heading.add_css_class("qfind-section-label");
-    workspace_heading.set_xalign(0.0);
-    sidebar.append(&workspace_heading);
     let storage_shortcut = gtk::ToggleButton::with_label("Storage overview");
     storage_shortcut.set_group(Some(&projects_btn));
     storage_shortcut.set_active(true);
@@ -1527,15 +1522,13 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
         // folder, and a Preview. Cancel and the accept button live in the
         // header where every other chooser puts them.
         for widget in [
-            workspace_heading.upcast_ref::<gtk::Widget>(),
-            storage_shortcut.upcast_ref(),
+            storage_shortcut.upcast_ref::<gtk::Widget>(),
             projects_btn.upcast_ref(),
             workspace_sep.upcast_ref(),
             mode_box.upcast_ref(),
             tools_sep.upcast_ref(),
             tools_btn.upcast_ref(),
             columns_btn.upcast_ref(),
-            inspector_heading.upcast_ref(),
             chart_title.upcast_ref(),
             git_title.upcast_ref(),
             settings_btn.upcast_ref(),
@@ -1559,7 +1552,7 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
         name_row.append(&gtk::Label::new(Some("Name")));
         name_row.append(&name_entry);
         name_row.set_visible(pick.mode == PickMode::Save);
-        results.insert_child_after(&name_row, Some(&address_bar));
+        results.prepend(&name_row);
         let cancel = gtk::Button::with_label("Cancel");
         let accept = gtk::Button::with_label(&pick.accept);
         accept.add_css_class("suggested-action");

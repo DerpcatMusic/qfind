@@ -1061,11 +1061,15 @@ pub fn paint_icon(
     icons: &Rc<RefCell<std::collections::HashMap<String, gio::Icon>>>,
 ) {
     if data.is_dir() {
-        // Keep one raster backing; zoom scales it instead of reloading an SVG per size.
-        thread_local! {
-            static FOLDER: Option<gdk::Texture> = gdk::Texture::from_bytes(&glib::Bytes::from_static(include_bytes!("folder.png"))).ok();
+        if crate::icons::bundled() {
+            // Keep one raster backing; zoom scales it instead of reloading an SVG per size.
+            thread_local! {
+                static FOLDER: Option<gdk::Texture> = gdk::Texture::from_bytes(&glib::Bytes::from_static(include_bytes!("folder.png"))).ok();
+            }
+            FOLDER.with(|folder| icon.set_paintable(folder.as_ref()));
+        } else {
+            icon.set_from_gicon(&folder_icon(std::path::Path::new(&data.path())));
         }
-        FOLDER.with(|folder| icon.set_paintable(folder.as_ref()));
         return;
     }
     let key = data
@@ -1083,6 +1087,34 @@ pub fn paint_icon(
         })
         .clone();
     icon.set_from_gicon(&gicon);
+}
+
+/// The icon theme's folder icon, with the XDG special folders (Home,
+/// Documents, Downloads, …) getting theirs, as in Nautilus and Dolphin.
+fn folder_icon(path: &std::path::Path) -> gio::Icon {
+    thread_local! {
+        static SPECIAL: Vec<(std::path::PathBuf, &'static str)> = [
+            (dirs::home_dir(), "user-home"),
+            (dirs::desktop_dir(), "user-desktop"),
+            (dirs::document_dir(), "folder-documents"),
+            (dirs::download_dir(), "folder-download"),
+            (dirs::audio_dir(), "folder-music"),
+            (dirs::picture_dir(), "folder-pictures"),
+            (dirs::video_dir(), "folder-videos"),
+            (dirs::template_dir(), "folder-templates"),
+            (dirs::public_dir(), "folder-publicshare"),
+        ]
+        .into_iter()
+        .filter_map(|(dir, icon)| Some((dir?, icon)))
+        .collect();
+    }
+    let name = SPECIAL.with(|special| {
+        special
+            .iter()
+            .find(|(dir, _)| dir == path)
+            .map_or("folder", |(_, icon)| icon)
+    });
+    gio::ThemedIcon::from_names(&[name, "folder"]).upcast()
 }
 
 pub fn make_tree_factory(
