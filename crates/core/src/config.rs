@@ -187,6 +187,14 @@ pub struct Config {
     pub gtk_theme: String,
     /// `custom` (Megaman palette + icons + `custom.css` next to this file) or `native` (toolkit theme only).
     pub appearance: String,
+    /// Icon theme: empty follows `appearance` (Megaman's set for `custom`,
+    /// the desktop's for `native`), `megaman`, `system`, or an installed name.
+    pub icon_theme: String,
+    /// Accent: empty follows `appearance`, `system` takes the toolkit's,
+    /// `preset` always uses `theme`'s, `#rrggbb` is a custom color.
+    pub accent: String,
+    /// `system`, `light`, or `dark`.
+    pub color_scheme: String,
     /// Deprecated compatibility setting. Startup now opens immediately.
     pub splash: bool,
     /// How Enter opens a Hit.
@@ -214,6 +222,9 @@ impl Default for Config {
             theme: "grok".into(),
             gtk_theme: "system".into(),
             appearance: "custom".into(),
+            icon_theme: String::new(),
+            accent: String::new(),
+            color_scheme: "system".into(),
             splash: false,
             open: OpenMode::Auto,
             editor: String::new(),
@@ -288,6 +299,9 @@ impl Config {
         s.push_str(&format!("theme = \"{}\"\n", self.theme));
         s.push_str(&format!("gtk_theme = \"{}\"\n", self.gtk_theme));
         s.push_str(&format!("appearance = \"{}\"\n", self.appearance));
+        s.push_str(&format!("icon_theme = \"{}\"\n", self.icon_theme));
+        s.push_str(&format!("accent = \"{}\"\n", self.accent));
+        s.push_str(&format!("color_scheme = \"{}\"\n", self.color_scheme));
         s.push_str(&format!("splash = {}\n", self.splash));
         s.push_str(&format!("open = \"{}\"\n", self.open.as_str()));
         s.push_str(&format!(
@@ -519,6 +533,9 @@ fn parse(src: &str) -> Config {
             "theme" => cfg.theme = text(),
             "gtk_theme" => cfg.gtk_theme = text(),
             "appearance" => cfg.appearance = text(),
+            "icon_theme" => cfg.icon_theme = text(),
+            "accent" => cfg.accent = text(),
+            "color_scheme" => cfg.color_scheme = text(),
             "splash" => cfg.splash = parse_bool(v, cfg.splash),
             "open" => cfg.open = OpenMode::parse(v),
             "editor" => cfg.editor = text(),

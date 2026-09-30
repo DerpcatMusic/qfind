@@ -19,7 +19,6 @@ use std::time::{Duration, Instant};
 use gtk::gdk;
 use gtk::gio;
 use gtk::glib;
-use gtk::glib::prelude::ToVariant;
 use gtk::prelude::*;
 use qfind_core::{Config, OpenHow};
 
@@ -241,69 +240,6 @@ pub fn copy_paths(paths: &[String]) {
     }
 }
 
-/// Spacebar Quick Look. Sushi first; built-in window if it declines or is
-/// missing.
-pub fn preview(parent: &gtk::Window, path: &str, slot: &std::cell::RefCell<Option<gtk::Window>>) {
-    // A window the user closed must not sit in the slot: `take()` would hand it
-    // back, the next Space would close it again, and only the Space after that
-    // would open anything.
-    if let Some(existing) = slot.borrow_mut().take()
-        && existing.is_visible()
-    {
-        existing.close();
-        return;
-    }
-    let parent = parent.clone();
-    let path = path.to_owned();
-    let slot = slot.clone();
-    glib::MainContext::default().spawn_local(async move {
-        // Audio and video go straight to the built-in surfaces. Handing them to
-        // Sushi first meant the file left as a generic icon window, with no
-        // waveform and no transport.
-        if is_media(Path::new(&path)) {
-            let win = builtin_preview(&parent, &path);
-            *slot.borrow_mut() = Some(win);
-            return;
-        }
-        // The D-Bus round trip is sync but happens on a worker: `bus_get_sync`
-        // alone can stall for GIO's 25 s bus-acquire timeout, which used to
-        // freeze the whole window on every Space with no reachable session bus.
-        let uri = gio::File::for_path(&path).uri();
-        let accepted = gio::spawn_blocking(move || sushi_show(&uri))
-            .await
-            .unwrap_or(false);
-        if accepted {
-            return;
-        }
-        let win = builtin_preview(&parent, &path);
-        *slot.borrow_mut() = Some(win);
-    });
-}
-
-/// Ask Sushi to show the file, reporting whether it *accepted* it.
-fn sushi_show(uri: &str) -> bool {
-    let Ok(conn) = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE) else {
-        return false;
-    };
-    let args = (uri, "", true).to_variant();
-    let Ok(reply) = conn.call_sync(
-        Some("org.gnome.NautilusPreviewer"),
-        "/org/gnome/NautilusPreviewer",
-        "org.gnome.NautilusPreviewer2",
-        "ShowFile",
-        Some(&args),
-        None,
-        gio::DBusCallFlags::NONE,
-        800,
-        gio::Cancellable::NONE,
-    ) else {
-        return false;
-    };
-    // The reply is a boolean. It used to be ignored, so a Sushi that declined
-    // the type made Space do nothing at all with no fallback.
-    reply.child_value(0).get::<bool>().unwrap_or(false)
-}
-
 /// Reuse this Megaman instance to show `file`'s folder.
 ///
 /// Spawning a *new* process was two bugs at once: the binary name was
@@ -359,57 +295,6 @@ pub fn set_navigator(navigate: std::rc::Rc<std::cell::RefCell<Box<dyn Fn(PathBuf
     NAVIGATE.with(|slot| {
         *slot.borrow_mut() = Some(Box::new(move |path| navigate.borrow()(path)));
     });
-}
-
-fn builtin_preview(parent: &gtk::Window, path: &str) -> gtk::Window {
-    let win = gtk::Window::builder()
-        .transient_for(parent)
-        .title(
-            Path::new(path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("Preview"),
-        )
-        .default_width(780)
-        .default_height(560)
-        .build();
-
-    // `true`: Space is a request to hear or watch this, so the window that
-    // Space opened starts playing.
-    let child = preview_widget(Path::new(path), true);
-    win.set_child(Some(&child));
-
-    // Escape closes. Space deliberately does not: it belongs to the media
-    // surfaces, where it plays and pauses, and it used to close the window
-    // instead whenever the Preview itself did not want it.
-    let esc = gtk::EventControllerKey::new();
-    let w = win.clone();
-    esc.connect_key_pressed(move |_, key, _, _| {
-        if key == gdk::Key::Escape {
-            w.close();
-            glib::Propagation::Stop
-        } else {
-            glib::Propagation::Proceed
-        }
-    });
-    win.add_controller(esc);
-    win.present();
-    // Without this the keyboard stayed in the window behind, and a second Space
-    // was typed into the search box instead of pausing what Space had opened.
-    // Deferred, because moving the focus while the Space that opened this
-    // window is still being delivered lands that same Space on the new widget,
-    // which cancels the playback the Preview had just started.
-    let focused = win.clone();
-    glib::idle_add_local_once(move || {
-        gtk::prelude::GtkWindowExt::set_focus(&focused, Some(&child));
-    });
-    win
-}
-
-/// Does this app have a real Preview surface for it, rather than a thumbnail?
-pub fn is_media(p: &Path) -> bool {
-    let (ctype, _) = gio::content_type_guess(Some(p), None::<&[u8]>);
-    crate::audio::is_audio(p, &ctype) || crate::preview::is_video(p, &ctype)
 }
 
 /// The Preview surface for a file.

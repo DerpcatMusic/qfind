@@ -37,8 +37,8 @@ mod storage;
 mod surface;
 mod video;
 use actions::{
-    copy_name, copy_paths, copy_text, open, open_folder, open_with, preview, preview_widget,
-    reveal, selected_row, selected_rows,
+    copy_name, copy_paths, copy_text, open, open_folder, open_with, preview_widget, reveal,
+    selected_row, selected_rows,
 };
 use model::HitModel;
 use row::RowData;
@@ -50,6 +50,9 @@ static QFIND_ROOT: OnceLock<PathBuf> = OnceLock::new();
 static FOLDERS_FIRST: AtomicBool = AtomicBool::new(true);
 type Navigator = Rc<RefCell<Box<dyn Fn(PathBuf)>>>;
 static PICK: OnceLock<Pick> = OnceLock::new();
+
+/// Shows a path in the Inspector's Preview.
+type PreviewSink = Rc<dyn Fn(&str)>;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PickMode {
@@ -160,6 +163,21 @@ impl UndoEntry {
 const MAX_UNDO: usize = 32;
 
 fn main() -> glib::ExitCode {
+    // Game Vulkan layers are installed as implicit layers (LSFG-VK frame
+    // generation, MangoHud, gamescope WSI, …) and load into every Vulkan
+    // client. With GTK's Vulkan renderer one of them hooked our swapchain and
+    // the window hung on a GPU fence as soon as it presented a frame. GTK's GL
+    // renderer is just as GPU-accelerated for a file manager, and never runs
+    // the Vulkan WSI. Either choice made in the environment still wins.
+    for (key, value) in [
+        ("GSK_RENDERER", "gl"),
+        ("VK_LOADER_LAYERS_DISABLE", "~implicit~"),
+    ] {
+        if std::env::var_os(key).is_none() {
+            // SAFETY: first statement of `main`; no other thread exists yet.
+            unsafe { std::env::set_var(key, value) };
+        }
+    }
     glib::set_application_name("Megaman");
     if let Some(pick) = parse_pick() {
         let _ = PICK.set(pick);
@@ -537,7 +555,13 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     // Read the config once. It used to be parsed twice during construction, so
     // `apply_appearance` and the widgets could disagree if the file changed
     // between the two reads.
-    let cfg = Config::load();
+    let mut cfg = Config::load();
+    // A picker opens as a plain list without dotfiles, like every other
+    // chooser. Its view changes are never saved over the file manager's.
+    if PICK.get().is_some() {
+        cfg.zoom = 20;
+        cfg.show_hidden = false;
+    }
     let manager = Rc::new(RefCell::new(ManagerSession::new(initial_folder.clone())));
     let window = gtk::ApplicationWindow::builder()
         .application(app)
@@ -582,12 +606,12 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     let back_btn = gtk::Button::from_icon_name("go-previous-symbolic");
     back_btn.set_tooltip_text(Some("Back (Alt+Left)"));
     back_btn.set_sensitive(false);
-    address_bar.append(&back_btn);
+    header.pack_start(&back_btn);
 
     let forward_btn = gtk::Button::from_icon_name("go-next-symbolic");
     forward_btn.set_tooltip_text(Some("Forward (Alt+Right)"));
     forward_btn.set_sensitive(false);
-    address_bar.append(&forward_btn);
+    header.pack_start(&forward_btn);
 
     let up_btn = gtk::Button::from_icon_name("go-up-symbolic");
     up_btn.set_tooltip_text(Some("Parent folder (Alt+Up)"));
@@ -597,7 +621,7 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
             .and_then(|path| path.parent())
             .is_some(),
     );
-    address_bar.append(&up_btn);
+    header.pack_start(&up_btn);
 
     let bookmark_btn = gtk::Button::new();
     let bookmarked = initial_folder
@@ -696,15 +720,18 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     let search = gtk::SearchEntry::builder()
         .placeholder_text(&search_hint)
         .build();
-    search.set_width_chars(44);
+    search.set_width_chars(26);
     search.add_css_class("qfind-search");
-    let title_box = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    // Nautilus layout: navigation at the start, the path bar as the title,
+    // search at the end. This used to be three stacked bars.
+    let title_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     title_box.set_hexpand(true);
     title_box.append(&gtk::Image::from_icon_name("folder-symbolic"));
     title_box.append(&crumbs);
     title_box.add_css_class("qfind-location");
-    address_bar.insert_child_after(&title_box, Some(&up_btn));
-    header.set_title_widget(Some(&search));
+    address_bar.prepend(&title_box);
+    address_bar.set_hexpand(true);
+    header.set_title_widget(Some(&address_bar));
 
     let classic_btn = gtk::ToggleButton::with_label("Browse");
     classic_btn.set_widget_name("qfind-mode-classic");
@@ -797,6 +824,7 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     view_box.append(&zebra_btn);
     view_box.append(&tree_btn);
     header.pack_end(&settings_btn);
+    header.pack_end(&search);
     let preview_view_btn = gtk::CheckButton::with_label("Inspector pane");
     preview_view_btn.set_active(true);
     view_box.append(&preview_view_btn);
@@ -842,7 +870,8 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     toolbar.add_css_class("qfind-toolbar");
     toolbar.append(&mode_box);
-    toolbar.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+    let tools_sep = gtk::Separator::new(gtk::Orientation::Vertical);
+    toolbar.append(&tools_sep);
     toolbar.append(&tools_btn);
     let projects_btn = gtk::ToggleButton::with_label(qfind_core::components::title("projects"));
 
@@ -909,7 +938,8 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
         column.set_sorter(Some(&gtk::CustomSorter::new(|_, _| gtk::Ordering::Equal)));
         list.append_column(&column);
     }
-    toolbar.append(&columns::configure(&list, "files"));
+    let columns_btn = columns::configure(&list, "files");
+    toolbar.append(&columns_btn);
     for column in [&name_column, &size_column, &modified_column] {
         column.set_sorter(Some(&gtk::CustomSorter::new(|_, _| gtk::Ordering::Equal)));
     }
@@ -1153,7 +1183,6 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
 
     let results = gtk::Box::new(gtk::Orientation::Vertical, 0);
     results.add_css_class("qfind-content");
-    results.append(&address_bar);
     results.append(&toolbar);
     results.append(&stack);
 
@@ -1327,10 +1356,6 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     preview_panel.add_css_class("qfind-chrome");
     preview_panel.add_css_class("qfind-inspector");
     preview_panel.set_widget_name("qfind-preview-pane");
-    let inspector_heading = gtk::Label::new(Some("INSPECTOR"));
-    inspector_heading.add_css_class("qfind-section-label");
-    inspector_heading.set_xalign(0.0);
-    preview_panel.append(&inspector_heading);
     preview_panel.append(&preview_header);
     preview_panel.append(&pane_stack);
     bind_preview_controls(&preview_btn, &preview_panel, &preview_close);
@@ -1362,10 +1387,6 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     let browser = gtk::Paned::new(gtk::Orientation::Horizontal);
     let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 4);
     sidebar.add_css_class("qfind-sidebar");
-    let workspace_heading = gtk::Label::new(Some("WORKSPACE"));
-    workspace_heading.add_css_class("qfind-section-label");
-    workspace_heading.set_xalign(0.0);
-    sidebar.append(&workspace_heading);
     let storage_shortcut = gtk::ToggleButton::with_label("Storage overview");
     storage_shortcut.set_group(Some(&projects_btn));
     storage_shortcut.set_active(true);
@@ -1393,7 +1414,8 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     }
     sidebar.append(&storage_shortcut);
     sidebar.append(&projects_btn);
-    sidebar.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    let workspace_sep = gtk::Separator::new(gtk::Orientation::Horizontal);
+    sidebar.append(&workspace_sep);
     sidebar.append(&places_scroll);
     browser.set_start_child(Some(&sidebar));
     let workspaces = gtk::Stack::new();
@@ -1417,28 +1439,58 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     vbox.append(&footer);
     window.set_child(Some(&vbox));
 
-    let preview_slot: Rc<RefCell<Option<gtk::Window>>> = Rc::new(RefCell::new(None));
+    // Space and the Preview action show the file in the Inspector, playing,
+    // instead of in a separate window. `preview_generation` is shared with the
+    // selection handler so a pending selection Preview cannot append a second
+    // surface after this one.
+    let preview_generation = Rc::new(Cell::new(0_u64));
+    let show_preview: PreviewSink = {
+        let preview_btn = preview_btn.clone();
+        let preview_title = preview_title.clone();
+        let preview_name = preview_name.clone();
+        let preview_path = preview_path.clone();
+        let preview_content = preview_content.clone();
+        let preview_generation = Rc::clone(&preview_generation);
+        Rc::new(move |path: &str| {
+            preview_generation.set(preview_generation.get().wrapping_add(1));
+            preview_btn.set_active(true);
+            preview_title.set_active(true);
+            while let Some(child) = preview_content.first_child() {
+                preview_content.remove(&child);
+            }
+            let path = Path::new(path);
+            preview_name.set_text(
+                &path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            );
+            preview_path.set_text(&path.to_string_lossy());
+            let child = preview_widget(path, true);
+            child.set_hexpand(true);
+            child.set_vexpand(true);
+            preview_content.append(&child);
+            child.grab_focus();
+        })
+    };
     surface::attach_preview_on_hits(
         &list,
         selection.clone(),
-        window.clone(),
-        Rc::clone(&preview_slot),
+        Rc::clone(&show_preview),
         Rc::clone(&hovered),
         Rc::clone(&preview_mode),
     );
     surface::attach_preview_on_hits(
         &grid,
         selection.clone(),
-        window.clone(),
-        Rc::clone(&preview_slot),
+        Rc::clone(&show_preview),
         Rc::clone(&hovered),
         Rc::clone(&preview_mode),
     );
     surface::attach_preview_on_hits(
         &tree,
         tree_sel.clone(),
-        window.clone(),
-        Rc::clone(&preview_slot),
+        Rc::clone(&show_preview),
         Rc::clone(&hovered),
         Rc::clone(&preview_mode),
     );
@@ -1481,16 +1533,63 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     }));
 
     if let Some(pick) = PICK.get() {
+        // A picker is a dialog, not the file manager: only Places, the
+        // folder, and a Preview. Cancel and the accept button live in the
+        // header where every other chooser puts them.
+        for widget in [
+            storage_shortcut.upcast_ref::<gtk::Widget>(),
+            projects_btn.upcast_ref(),
+            workspace_sep.upcast_ref(),
+            mode_box.upcast_ref(),
+            tools_sep.upcast_ref(),
+            tools_btn.upcast_ref(),
+            columns_btn.upcast_ref(),
+            chart_title.upcast_ref(),
+            git_title.upcast_ref(),
+            settings_btn.upcast_ref(),
+            archive_save_btn.upcast_ref(),
+        ] {
+            widget.set_visible(false);
+        }
+        window.set_default_size(1100, 700);
+        content_preview.set_position(680);
+
         let name_entry = gtk::Entry::new();
         name_entry.set_text(&pick.name);
         name_entry.set_placeholder_text(Some("File name"));
-        name_entry.set_visible(pick.mode == PickMode::Save);
+        name_entry.set_hexpand(true);
+        let name_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        name_row.add_css_class("qfind-toolbar");
+        name_row.set_margin_start(12);
+        name_row.set_margin_end(12);
+        name_row.set_margin_top(6);
+        name_row.set_margin_bottom(6);
+        name_row.append(&gtk::Label::new(Some("Name")));
+        name_row.append(&name_entry);
+        name_row.set_visible(pick.mode == PickMode::Save);
+        results.prepend(&name_row);
         let cancel = gtk::Button::with_label("Cancel");
         let accept = gtk::Button::with_label(&pick.accept);
         accept.add_css_class("suggested-action");
-        footer.append(&name_entry);
-        footer.append(&cancel);
-        footer.append(&accept);
+        header.pack_start(&cancel);
+        header.pack_end(&accept);
+        {
+            let escape = gtk::EventControllerKey::new();
+            let quit = window.clone();
+            escape.connect_key_pressed(move |_, key, _, _| {
+                if key != gdk::Key::Escape {
+                    return glib::Propagation::Proceed;
+                }
+                if let Some(app) = quit.application() {
+                    app.quit();
+                }
+                glib::Propagation::Stop
+            });
+            window.add_controller(escape);
+        }
+        if pick.mode == PickMode::Save {
+            name_entry.grab_focus();
+        }
         if !pick.query.is_empty() {
             search.set_text(&pick.query);
         }
@@ -1500,7 +1599,16 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
             let name_entry = name_entry.clone();
             move || {
                 let paths = match pick.mode {
-                    PickMode::Folder => vec![current_dir_or(&state)],
+                    // A selected folder wins over the one being browsed.
+                    PickMode::Folder => vec![
+                        selected_rows(&state.borrow().active_selection())
+                            .into_iter()
+                            .find(RowData::is_dir)
+                            .map_or_else(
+                                || current_dir_or(&state),
+                                |row| PathBuf::from(row.path()),
+                            ),
+                    ],
                     PickMode::Save => {
                         let name = name_entry.text();
                         if name.trim().is_empty() {
@@ -1624,10 +1732,11 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     if let Some(root) = initial_folder.as_ref() {
         update_archive_save_button(&archive_save_btn, root);
     }
-    let (git_page, git_status) = git_panel::new(state.clone(), None);
-    pane_stack.add_named(&git_page, Some("git"));
-    footer.append(&git_status);
-    {
+    // The picker has no Git tab; do not run git on every folder it visits.
+    if PICK.get().is_none() {
+        let (git_page, git_status) = git_panel::new(state.clone(), None);
+        pane_stack.add_named(&git_page, Some("git"));
+        footer.append(&git_status);
         let pane_stack = pane_stack.clone();
         git_title.connect_toggled(move |button| {
             if button.is_active() {
@@ -1662,7 +1771,7 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
             popover: popover.clone(),
             context_target,
         },
-        Rc::clone(&preview_slot),
+        Rc::clone(&show_preview),
         external_actions,
         Rc::clone(&state),
     );
@@ -1676,7 +1785,9 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
             cfg.show_hidden = hidden_btn.is_active();
             cfg.respect_gitignore = gitignore_btn.is_active();
             cfg.respect_ignore = ignore_btn.is_active();
-            if let Err(error) = cfg.save() {
+            if PICK.get().is_none()
+                && let Err(error) = cfg.save()
+            {
                 report(&state, format!("Could not save settings: {error}"));
             }
             // The hidden rule travels in `SearchOpts`, so an Indexed Query has
@@ -1989,6 +2100,9 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
         let zoom = Rc::clone(&zoom);
         let spacing = Rc::clone(&spacing);
         view_popover.connect_closed(move |_| {
+            if PICK.get().is_some() {
+                return;
+            }
             let mut cfg = Config::load();
             cfg.zoom = zoom.get().get();
             cfg.spacing = spacing.get();
@@ -2101,7 +2215,7 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
         let preview_name = preview_name.clone();
         let preview_path = preview_path.clone();
         let preview_content = preview_content.clone();
-        let preview_generation = Rc::new(Cell::new(0_u64));
+        let preview_generation = Rc::clone(&preview_generation);
         selection.connect_selection_changed(move |_, _, _| {
             let rows = selected_rows(&sel);
             let selected = rows.first().cloned();
@@ -2196,7 +2310,7 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
         &search,
         &preview_btn,
         Rc::clone(&host),
-        Rc::clone(&preview_slot),
+        Rc::clone(&show_preview),
         Rc::clone(&hovered),
         Rc::clone(&preview_mode),
         Rc::clone(&state),
@@ -2228,7 +2342,6 @@ fn build_ui_at(app: &gtk::Application, initial_folder: Option<PathBuf>) {
     start_watch(&state);
     if let Some(root) = initial_folder.as_ref() {
         watch_directory(&state, root);
-        sync_index(&state, root.clone());
     }
 }
 
@@ -2348,7 +2461,7 @@ fn install_actions(
     window: &gtk::ApplicationWindow,
     navigate: &Navigator,
     target: ActionTarget,
-    preview_slot: Rc<RefCell<Option<gtk::Window>>>,
+    show_preview: PreviewSink,
     external_actions: Vec<PathBuf>,
     state: Rc<RefCell<State>>,
 ) {
@@ -2506,11 +2619,10 @@ fn install_actions(
     }
 
     let act = gio::SimpleAction::new("preview", None);
-    let win = window.clone();
     let preview_target = target.clone();
     act.connect_activate(move |_, _| {
         if let Some(row) = preview_target.rows().into_iter().next() {
-            preview(win.upcast_ref(), &row.path(), &preview_slot);
+            show_preview(&row.path());
         }
     });
     window.add_action(&act);
@@ -2657,7 +2769,7 @@ fn install_keys(
     search: &gtk::SearchEntry,
     preview_btn: &gtk::ToggleButton,
     host_surface: Rc<Host>,
-    preview_slot: Rc<RefCell<Option<gtk::Window>>>,
+    show_preview: PreviewSink,
     hovered: Rc<RefCell<Option<String>>>,
     preview_mode: Rc<Cell<qfind_core::PreviewMode>>,
     state: Rc<RefCell<State>>,
@@ -2757,12 +2869,6 @@ fn install_keys(
         }
 
         if key == gdk::Key::space || key == gdk::Key::KP_Space {
-            if preview_slot.borrow().is_some() {
-                if let Some(w) = preview_slot.borrow_mut().take() {
-                    w.close();
-                }
-                return glib::Propagation::Stop;
-            }
             // A space in the search box is a space, always. The old guard tested
             // `hovered` — the shared hover cell, not "is the pointer over the
             // entry" — so parking the mouse over a file row and then typing a
@@ -2771,19 +2877,13 @@ fn install_keys(
                 return glib::Propagation::Proceed;
             }
             if let Some(path) = surface::preview_path(preview_mode.get(), &hovered, &selection) {
-                preview(window.upcast_ref(), &path, &preview_slot);
+                show_preview(&path);
                 return glib::Propagation::Stop;
             }
             return glib::Propagation::Proceed;
         }
 
         if key == gdk::Key::Escape {
-            if preview_slot.borrow().is_some() {
-                if let Some(w) = preview_slot.borrow_mut().take() {
-                    w.close();
-                }
-                return glib::Propagation::Stop;
-            }
             if !search.text().is_empty() {
                 search.set_text("");
                 search.grab_focus();
@@ -3215,18 +3315,17 @@ fn refresh_subtree(state: &Rc<RefCell<State>>, dir: PathBuf) {
     glib::MainContext::default().spawn_local(async move {
         let target = dir.clone();
         let result =
-            gio::spawn_blocking(move || Catalog::refresh(Config::load().rebuild(), &target)).await;
+            load_catalog(move || Catalog::refresh(Config::load().rebuild(), &target)).await;
         state.borrow_mut().refreshing = false;
         match result {
-            Ok(Ok(catalog)) => {
+            Ok(catalog) => {
                 state.borrow_mut().fresh.insert(dir);
                 adopt_catalog(&state, catalog);
             }
-            Ok(Err(err)) => state
+            Err(err) => state
                 .borrow()
                 .status
                 .set_text(&format!("index update failed: {err}")),
-            Err(_) => state.borrow().status.set_text("Index update failed"),
         }
     });
 }
@@ -3634,6 +3733,19 @@ fn spawn_search(state: &Rc<RefCell<State>>, seq: u64) {
     });
 }
 
+/// Open, rebuild or refresh a Catalog on a worker thread, with its indexes
+/// already built. Building the Folder index of a large Catalog takes seconds;
+/// on the UI thread it froze the window at launch and after every reload.
+async fn load_catalog(
+    job: impl FnOnce() -> qfind_core::Result<Catalog> + Send + 'static,
+) -> Result<Catalog, String> {
+    match gio::spawn_blocking(move || job().inspect(Catalog::warm)).await {
+        Ok(result) => result.map_err(|err| err.to_string()),
+        Err(_) => Err("worker panicked".into()),
+    }
+}
+
+/// `adopt_catalog` expects a Catalog from `load_catalog`.
 fn adopt_catalog(state: &Rc<RefCell<State>>, catalog: Catalog) {
     let mtime = std::fs::metadata(catalog.path())
         .and_then(|m| m.modified())
@@ -3656,9 +3768,7 @@ fn adopt_catalog(state: &Rc<RefCell<State>>, catalog: Catalog) {
         ));
         st.catalog = Some(catalog.clone());
     }
-    state.borrow().storage.set_catalog(catalog.clone());
-    let warm = catalog;
-    thread::spawn(move || warm.warm());
+    state.borrow().storage.set_catalog(catalog);
     search_now(state);
 }
 
@@ -4051,27 +4161,29 @@ fn mkdir_here(state: Rc<RefCell<State>>, window: gtk::ApplicationWindow) {
 
 fn start_rebuild(state: &Rc<RefCell<State>>, _window: &gtk::ApplicationWindow, force: bool) {
     let snapshot = default_snapshot_path();
-    if !force
-        && snapshot.exists()
-        && let Ok(catalog) = Catalog::open(&snapshot)
-    {
-        adopt_catalog(state, catalog);
-        return;
-    }
-
-    state
-        .borrow()
-        .status
-        .set_text("Rebuilding Catalog from local Mounts…");
     let state = Rc::clone(state);
     glib::MainContext::default().spawn_local(async move {
-        match gio::spawn_blocking(move || Catalog::rebuild(Config::load().rebuild())).await {
-            Ok(Ok(catalog)) => adopt_catalog(&state, catalog),
-            Ok(Err(err)) => state
+        if !force && snapshot.exists() {
+            state.borrow().status.set_text("Loading Catalog…");
+            if let Ok(catalog) = load_catalog(move || Catalog::open(snapshot)).await {
+                adopt_catalog(&state, catalog);
+                // The snapshot may predate changes in the open folder.
+                if let Some(dir) = current_dir(&state) {
+                    sync_index(&state, dir);
+                }
+                return;
+            }
+        }
+        state
+            .borrow()
+            .status
+            .set_text("Rebuilding Catalog from local Mounts…");
+        match load_catalog(|| Catalog::rebuild(Config::load().rebuild())).await {
+            Ok(catalog) => adopt_catalog(&state, catalog),
+            Err(err) => state
                 .borrow()
                 .status
                 .set_text(&format!("rebuild failed: {err}")),
-            Err(_) => state.borrow().status.set_text("Catalog rebuild failed"),
         }
     });
 }
@@ -4114,13 +4226,17 @@ fn start_watch(state: &Rc<RefCell<State>>) {
             if state.borrow().snap_mtime == Some(mtime) {
                 return;
             }
-            if let Ok(catalog) = Catalog::open(&path) {
-                adopt_catalog(&state, catalog);
-                state
-                    .borrow()
-                    .status
-                    .set_text("Catalog reloaded (snapshot changed)");
-            }
+            glib::MainContext::default().spawn_local(async move {
+                if let Ok(catalog) = load_catalog(move || Catalog::open(path)).await
+                    && state.borrow().snap_mtime != Some(mtime)
+                {
+                    adopt_catalog(&state, catalog);
+                    state
+                        .borrow()
+                        .status
+                        .set_text("Catalog reloaded (snapshot changed)");
+                }
+            });
         });
     });
 }

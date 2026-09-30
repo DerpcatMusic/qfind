@@ -1,98 +1,114 @@
-/* Native theme colors keep the workspace legible in light and dark appearances. */
-@define-color qfind_accent #83bba8;
-@define-color qfind_line alpha(@theme_fg_color, 0.10);
-.qfind-shell { background: mix(@theme_bg_color, @theme_base_color, 0.55); color: @theme_fg_color; }
-headerbar.qfind-shell { min-height: 54px; padding: 0 14px; border-bottom: 1px solid @qfind_line; box-shadow: none; }
-.qfind-brand { font-size: 22px; font-weight: 800; letter-spacing: -1px; padding-left: 8px; }
-.qfind-search { min-height: 30px; border-radius: 9px; background: alpha(@theme_fg_color, 0.045); border: 1px solid @qfind_line; box-shadow: none; }
-.qfind-search:focus-within { border-color: @qfind_accent; }
-.qfind-content { background: shade(@theme_base_color, 0.97); color: @theme_fg_color; }
-.qfind-chrome, scrolledwindow.qfind-chrome > viewport, scrolledwindow.qfind-chrome > viewport > box { background: mix(@theme_bg_color, @theme_base_color, 0.55); color: @theme_fg_color; }
-.qfind-chrome entry, .qfind-chrome searchentry { background: shade(@theme_base_color, 0.97); color: @theme_fg_color; }
-.qfind-sidebar { padding: 10px 8px 0; background: mix(@theme_bg_color, @theme_base_color, 0.55); }
-.qfind-sidebar button { min-height: 28px; border-radius: 7px; padding: 3px 10px; }
+/* Surfaces come from the GTK theme: @qfind_window, @qfind_view,
+ * @qfind_sidebar, @qfind_fg and @qfind_accent are defined in settings.rs from
+ * the theme's own names where it has them, so a recolored desktop (adw-gtk3
+ * with Noctalia, matugen, …) recolors Megaman too. */
+@define-color qfind_line alpha(@qfind_fg, 0.09);
+@define-color qfind_hover alpha(@qfind_fg, 0.06);
+
+/* Header: the theme draws it; we only lay out the path bar and search. */
+headerbar.qfind-shell { padding: 0 6px; }
+/* The window icon, when the decoration layout shows one: the logo only fills
+ * the middle of its canvas, so GTK's 16px left a speck. */
+headerbar.qfind-shell windowcontrols image.icon { -gtk-icon-size: 28px; margin: 0 4px; }
+.qfind-address { border-radius: 8px; background: alpha(@qfind_fg, 0.06); padding: 0 2px 0 10px; margin: 0 12px; min-height: 34px; }
+.qfind-address button { min-width: 28px; min-height: 28px; padding: 0; border: none; box-shadow: none; background: transparent; border-radius: 6px; }
+.qfind-address button:hover { background: @qfind_hover; }
+.qfind-location { padding: 0; }
+.qfind-location > image { opacity: 0.7; }
+.qfind-location button { font-weight: 600; padding: 2px 6px; min-height: 26px; }
+.qfind-search { min-height: 34px; border-radius: 8px; }
+.qfind-search:focus-within { box-shadow: inset 0 0 0 2px alpha(@qfind_accent, 0.6); }
+
+/* Sidebar (Places): its own surface, like Nautilus and Dolphin. */
+.qfind-sidebar, .qfind-sidebar scrolledwindow, .qfind-sidebar viewport, .qfind-sidebar viewport > box { background: @qfind_sidebar; }
+.qfind-sidebar { padding: 8px 6px 0; border-right: 1px solid @qfind_line; }
+.qfind-sidebar button { min-height: 32px; border-radius: 8px; padding: 0 10px; margin: 1px 0; border: none; box-shadow: none; background: transparent; }
+.qfind-sidebar button:hover { background: @qfind_hover; }
 .qfind-sidebar button label { font-weight: 500; }
-.qfind-sidebar separator { margin: 10px 8px 4px; background: @qfind_line; }
-.qfind-sidebar .heading { font-size: 11px; font-weight: 600; opacity: 0.55; padding-top: 8px; }
-.qfind-section-label { font-size: 10px; font-weight: 700; letter-spacing: 1.3px; opacity: 0.55; margin: 10px 16px 8px; }
-.qfind-sidebar button:checked, .qfind-place-active { background: alpha(@qfind_accent, 0.16); }
-.qfind-address { min-height: 48px; padding: 4px 12px; border-bottom: 1px solid @qfind_line; }
-.qfind-address button { min-width: 22px; min-height: 26px; padding: 3px; border: none; box-shadow: none; background: transparent; border-radius: 6px; }
-.qfind-address button:hover { background: alpha(@theme_fg_color, 0.07); }
-.qfind-location { padding: 0 10px; }
-.qfind-location button { font-weight: 600; padding: 3px 5px; }
-.qfind-toolbar { padding: 7px 14px; border-bottom: 1px solid @qfind_line; }
-.qfind-toolbar button { min-height: 26px; padding: 2px 8px; border: none; box-shadow: none; background: transparent; border-radius: 6px; font-size: 12px; }
-.qfind-toolbar button:hover { background: alpha(@theme_fg_color, 0.06); }
-.qfind-toolbar button:checked { background: alpha(@qfind_accent, 0.18); color: @theme_fg_color; }
-.qfind-toolbar separator { margin: 5px; background: @qfind_line; }
-columnview header button { background: shade(@theme_base_color, 0.97); border: none; border-bottom: 1px solid @qfind_line; border-radius: 0; box-shadow: none; padding: 8px 10px; font-size: 11px; font-weight: 600; color: alpha(@theme_fg_color, 0.55); }
-columnview row { border-radius: 0; }
-columnview row:hover { background: alpha(@theme_fg_color, 0.035); }
-columnview row:selected, gridview child:selected { background: alpha(@qfind_accent, 0.20); color: @theme_fg_color; }
-.qfind-odd { background: alpha(@theme_fg_color, 0.022); }
-.qfind-odd:selected { background: alpha(@qfind_accent, 0.20); }
+.qfind-sidebar button image { opacity: 0.8; }
+.qfind-sidebar button:checked, .qfind-sidebar .qfind-place-active { background: alpha(@qfind_accent, 0.18); }
+.qfind-sidebar button:checked image, .qfind-sidebar .qfind-place-active image { opacity: 1; color: @qfind_accent; }
+.qfind-sidebar separator { margin: 8px 10px; background: @qfind_line; min-height: 1px; }
+.qfind-sidebar .heading { font-size: 12px; font-weight: 700; opacity: 0.55; margin: 14px 0 4px; }
+
+/* Content: the view surface, one slim toolbar above it (Dolphin). */
+.qfind-content { background: @qfind_view; }
+.qfind-toolbar { padding: 6px 10px; border-bottom: 1px solid @qfind_line; }
+.qfind-toolbar button, .qfind-toolbar menubutton > button { min-height: 28px; padding: 0 10px; border: none; box-shadow: none; background: transparent; border-radius: 7px; }
+.qfind-toolbar button:hover, .qfind-toolbar menubutton > button:hover { background: @qfind_hover; }
+.qfind-toolbar button:checked { background: alpha(@qfind_accent, 0.18); }
+.qfind-toolbar .linked > button { border-radius: 7px; margin: 0 1px; }
+.qfind-toolbar separator { margin: 6px 4px; background: @qfind_line; }
+
+columnview, gridview, listview.view { background: @qfind_view; }
+columnview header button { background: transparent; border: none; border-bottom: 1px solid @qfind_line; border-radius: 0; box-shadow: none; padding: 6px 10px; font-size: 12px; font-weight: 600; color: alpha(@qfind_fg, 0.6); }
+columnview row { border-radius: 6px; margin: 0 6px; }
+columnview row:hover, gridview child:hover { background: @qfind_hover; }
+columnview row:selected, gridview child:selected { background: alpha(@qfind_accent, 0.24); color: @qfind_fg; }
+columnview row:selected:focus-within { background: alpha(@qfind_accent, 0.32); }
+.qfind-odd { background: alpha(@qfind_fg, 0.025); }
+.qfind-odd:selected { background: alpha(@qfind_accent, 0.24); }
 .qfind-dirty { font-weight: 600; }
-.qfind-dirty:selected { color: @theme_fg_color; }
-.qfind-tile { margin: 3px; padding: 3px; border-radius: 10px; }
-.qfind-tile:hover { background: alpha(@theme_fg_color, 0.035); }
+.qfind-dirty:selected { color: @qfind_fg; }
+gridview child { border-radius: 10px; margin: 2px; }
+.qfind-tile { margin: 2px; padding: 8px 6px; border-radius: 10px; }
 .qfind-tile .qfind-name { font-size: 13px; font-weight: 500; }
+.qfind-item image { color: @qfind_accent; }
 .qfind-chart-hover { background: alpha(@qfind_accent, 0.15); box-shadow: inset 0 0 0 2px @qfind_accent; border-radius: 5px; }
-.qfind-inspector { border-left: 1px solid @qfind_line; }
-.qfind-inspector-tabs { padding: 0 10px 8px; border-bottom: 1px solid @qfind_line; }
-.qfind-inspector-tabs button { min-height: 30px; padding: 2px 10px; border-radius: 6px; font-size: 12px; }
-.qfind-inspector-tabs button:checked { background: alpha(@qfind_accent, 0.12); }
-.qfind-project { padding: 12px 8px; border-radius: 8px; background: shade(@theme_base_color, 0.97); border: 1px solid @qfind_line; }
+
+/* Inspector: a side surface matching the sidebar. */
+.qfind-inspector { background: @qfind_sidebar; border-left: 1px solid @qfind_line; }
+.qfind-inspector-tabs { padding: 8px 10px; border-bottom: 1px solid @qfind_line; }
+.qfind-inspector-tabs button { min-height: 28px; padding: 0 12px; border-radius: 7px; border: none; box-shadow: none; background: transparent; }
+.qfind-inspector-tabs button:hover { background: @qfind_hover; }
+.qfind-inspector-tabs button:checked { background: alpha(@qfind_accent, 0.18); }
+
+.qfind-project { padding: 12px 8px; border-radius: 10px; background: @qfind_view; border: 1px solid @qfind_line; }
 .qfind-project button { font-weight: 600; }
 .qfind-project checkbutton { font-size: 12px; margin: 4px 8px; }
-.qfind-footer { min-height: 32px; padding: 0 12px; background: mix(@theme_bg_color, @theme_base_color, 0.55); border-top: 1px solid @qfind_line; font-size: 11px; }
-.qfind-footer button { font-size: 11px; min-height: 24px; padding: 0 8px; }
-button:focus-visible { outline: 2px solid @qfind_accent; outline-offset: -2px; }
 
-.qfind-item image { color: @qfind_accent; }
-
-.qfind-sidebar button { border-radius: 9px; }
-.qfind-dialog { background: shade(@theme_bg_color, 0.9); }
-.qfind-dialog entry, .qfind-dialog textview text { background: @theme_base_color; }
-.qfind-dialog entry, .qfind-dialog button { border-radius: 7px; }
-.qfind-footer scale { padding: 0 8px; }
+/* Status bar. */
+.qfind-footer { min-height: 28px; padding: 0 10px; background: @qfind_window; border-top: 1px solid @qfind_line; font-size: 12px; }
+.qfind-footer > label { opacity: 0.7; }
+.qfind-footer button { font-size: 12px; min-height: 22px; padding: 0 8px; border: none; box-shadow: none; background: transparent; }
+.qfind-footer button:hover { background: @qfind_hover; }
+.qfind-footer scale { padding: 0 6px; min-width: 110px; }
 .qfind-footer scale highlight { background: @qfind_accent; }
 
-/* Megaman: one mint accent, quiet surfaces, and deliberate spacing. */
-.qfind-brand { font-size: 20px; letter-spacing: -0.5px; }
-.qfind-sidebar button { min-height: 34px; }
-.qfind-tile { padding: 10px; margin: 5px; border: 1px solid transparent; }
-.qfind-tile:hover { border-color: @qfind_line; }
-.qfind-search { min-height: 34px; }
-.megaman-projects { background: @theme_base_color; }
+button:focus-visible { outline: 2px solid alpha(@qfind_accent, 0.8); outline-offset: -2px; }
+*:drop(active) { box-shadow: inset 0 0 0 2px @qfind_accent; }
+.qfind-dialog { background: @qfind_window; }
+.qfind-dialog entry, .qfind-dialog textview text { background: @qfind_view; }
+.qfind-dialog entry, .qfind-dialog button { border-radius: 8px; }
+
+.megaman-projects { background: @qfind_view; }
 .megaman-project-header { padding: 10px 12px; }
 .megaman-project-header searchentry { min-height: 36px; border-radius: 10px; }
 .megaman-project-header button { min-height: 36px; min-width: 32px; border-radius: 10px; }
-.megaman-eyebrow { font-size: 10px; font-weight: 700; letter-spacing: 1px; color: alpha(@theme_fg_color, 0.65); }
+.megaman-eyebrow { font-size: 10px; font-weight: 700; letter-spacing: 1px; color: alpha(@qfind_fg, 0.65); }
 .megaman-project-table { margin: 0 12px; }
 .megaman-project-table header button { padding: 12px 8px; }
-.megaman-project-table row { border-bottom: 1px solid alpha(@theme_fg_color, 0.04); }
+.megaman-project-table row { border-bottom: 1px solid alpha(@qfind_fg, 0.04); }
 .megaman-project-table row:selected { box-shadow: inset 3px 0 @qfind_accent; }
-.megaman-project-inspector { padding: 0 16px 16px; background: alpha(@theme_fg_color, 0.018); }
+.megaman-project-inspector { padding: 0 16px 16px; background: alpha(@qfind_fg, 0.018); }
 .megaman-inspector-title { font-size: 22px; font-weight: 750; letter-spacing: -0.5px; }
 .megaman-project-inspector > button { min-height: 36px; border-radius: 9px; margin: 6px 0; }
 .megaman-project-inspector stackswitcher { margin: 8px 0; }
 .megaman-project-inspector stackswitcher button { min-height: 30px; border-radius: 7px; }
-.megaman-detail-card { padding: 12px 14px; border: 1px solid @qfind_line; border-radius: 9px; background: @theme_base_color; }
+.megaman-detail-card { padding: 12px 14px; border: 1px solid @qfind_line; border-radius: 9px; background: @qfind_view; }
 .megaman-overview { padding-top: 8px; }
-.megaman-command-output { border: 1px solid @qfind_line; border-radius: 9px; padding: 10px; background: @theme_base_color; }
+.megaman-command-output { border: 1px solid @qfind_line; border-radius: 9px; padding: 10px; background: @qfind_view; }
 .megaman-command-output textview { font-size: 12px; }
 .megaman-overview dropdown, .megaman-overview button { min-height: 32px; }
-*:drop(active) { box-shadow: inset 0 0 0 2px @qfind_accent; }
 
 .megaman-project-inspector stackswitcher button:checked { background: alpha(@qfind_accent, 0.20); }
 
-.megaman-projects .suggested-action:disabled { background: alpha(@theme_fg_color, 0.06); color: alpha(@theme_fg_color, 0.35); border-color: @qfind_line; }
+.megaman-projects .suggested-action:disabled { background: alpha(@qfind_fg, 0.06); color: alpha(@qfind_fg, 0.35); border-color: @qfind_line; }
 .megaman-project-header searchentry:focus-within { border-color: @qfind_accent; outline-color: @qfind_accent; }
 
 /* Settings + project inspector: boxed groups, one accent. */
 .megaman-settings-group { font-size: 13px; font-weight: 700; margin-left: 2px; }
-.megaman-settings list.boxed-list, .megaman-project-inspector list.boxed-list { border: 1px solid @qfind_line; border-radius: 10px; background: @theme_base_color; }
+.megaman-settings list.boxed-list, .megaman-project-inspector list.boxed-list { border: 1px solid @qfind_line; border-radius: 10px; background: @qfind_view; }
 .megaman-settings list.boxed-list > row, .megaman-project-inspector list.boxed-list > row { border-bottom: 1px solid @qfind_line; padding: 0; }
 .megaman-settings list.boxed-list > row:last-child, .megaman-project-inspector list.boxed-list > row:last-child { border-bottom: none; }
 .megaman-settings dropdown button, .megaman-settings entry { min-height: 32px; border-radius: 8px; }
@@ -110,4 +126,4 @@ button:focus-visible { outline: 2px solid @qfind_accent; outline-offset: -2px; }
 .qfind-sidebar .folder-videos-symbolic { color: #b39be9; }
 .megaman-projects .suggested-action { background: #397c68; color: white; border-color: #397c68; }
 .megaman-projects .suggested-action:hover { background: #306b59; }
-.megaman-project-table .qfind-dirty { color: mix(@theme_fg_color, #b87927, 0.55); }
+.megaman-project-table .qfind-dirty { color: mix(@qfind_fg, #b87927, 0.55); }

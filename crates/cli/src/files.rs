@@ -411,7 +411,9 @@ fn list(args: ListArgs) -> Result<()> {
             class,
             sort,
             date: DateAge::Any,
-            show_hidden: true,
+            // `live_children` used to read this from the config file and
+            // ignore the option; keep that behaviour for the CLI.
+            show_hidden: qfind_core::Config::load().show_hidden,
             // The core browse helper truncates unconditionally; apply the
             // CLI limit after date filtering so the result count stays correct.
             limit: usize::MAX,

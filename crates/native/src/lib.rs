@@ -190,6 +190,7 @@ pub extern "C" fn qfind_manager_rows(
             SearchOpts {
                 limit: limit as usize,
                 sort,
+                show_hidden: qfind_core::Config::load().show_hidden,
                 ..SearchOpts::default()
             },
         )?;
