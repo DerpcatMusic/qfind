@@ -51,7 +51,7 @@ pub fn live_children(
     let mut rows = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if !cfg.show_hidden && name.starts_with('.') {
+        if !opts.show_hidden && name.starts_with('.') {
             continue;
         }
         let path = entry.path();

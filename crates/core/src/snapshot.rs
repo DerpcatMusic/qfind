@@ -58,10 +58,11 @@ struct FolderIndex {
 
 impl FolderIndex {
     fn get(&self, path: &Path) -> Option<u32> {
-        self.exact
-            .get(path)
-            .copied()
-            .or_else(|| self.folded.get(&fold_key(path)).copied())
+        self.exact.get(path).copied().or_else(|| {
+            cfg!(any(windows, target_os = "macos"))
+                .then(|| self.folded.get(&fold_key(path)).copied())
+                .flatten()
+        })
     }
 }
 
@@ -250,8 +251,12 @@ impl Snapshot {
                 };
                 for id in 0..self.folder_count {
                     let path = self.path(id);
-                    index.exact.entry(path.clone()).or_insert(id);
-                    index.folded.entry(fold_key(&path)).or_insert(id);
+                    // Case-sensitive filesystems never consult `folded`, so
+                    // do not copy every Folder path into it.
+                    if cfg!(any(windows, target_os = "macos")) {
+                        index.folded.entry(fold_key(&path)).or_insert(id);
+                    }
+                    index.exact.entry(path).or_insert(id);
                 }
                 index
             })

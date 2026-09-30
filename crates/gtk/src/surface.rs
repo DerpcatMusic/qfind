@@ -14,7 +14,7 @@ use qfind_core::{
     squarify, walk_visible,
 };
 
-use crate::actions::{content_for_paths, preview, selected_row, selected_rows};
+use crate::actions::{content_for_paths, selected_row, selected_rows};
 use crate::row::RowData;
 
 pub struct Host {
@@ -135,8 +135,7 @@ impl Host {
 pub fn attach_preview_on_hits(
     widget: &impl IsA<gtk::Widget>,
     selection: impl IsA<gtk::SelectionModel> + Clone,
-    window: gtk::ApplicationWindow,
-    preview_slot: Rc<RefCell<Option<gtk::Window>>>,
+    show_preview: Rc<dyn Fn(&str)>,
     hovered: Rc<RefCell<Option<String>>>,
     mode: Rc<Cell<PreviewMode>>,
 ) {
@@ -145,7 +144,7 @@ pub fn attach_preview_on_hits(
     keys.connect_key_pressed(move |_, key, _, _| {
         if key == gdk::Key::space || key == gdk::Key::KP_Space {
             if let Some(path) = preview_path(mode.get(), &hovered, &selection) {
-                preview(window.upcast_ref(), &path, &preview_slot);
+                show_preview(&path);
             }
             return glib::Propagation::Stop;
         }

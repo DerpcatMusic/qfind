@@ -300,9 +300,12 @@ impl Catalog {
         &self.snapshot
     }
 
-    /// Touch the packed letter-mask so the first Query does not pay for it.
+    /// Touch the packed letter-mask and the Folder index so neither the first
+    /// Query nor the first Folder lookup pays for it. Both are seconds on a
+    /// large Catalog: call this off the UI thread.
     pub fn warm(&self) {
         let _ = self.snapshot.letter_mask();
+        let _ = self.snapshot.folder_id(Path::new("/"));
     }
 }
 
