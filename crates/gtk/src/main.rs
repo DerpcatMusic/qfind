@@ -163,6 +163,21 @@ impl UndoEntry {
 const MAX_UNDO: usize = 32;
 
 fn main() -> glib::ExitCode {
+    // Game Vulkan layers are installed as implicit layers (LSFG-VK frame
+    // generation, MangoHud, gamescope WSI, …) and load into every Vulkan
+    // client. With GTK's Vulkan renderer one of them hooked our swapchain and
+    // the window hung on a GPU fence as soon as it presented a frame. GTK's GL
+    // renderer is just as GPU-accelerated for a file manager, and never runs
+    // the Vulkan WSI. Either choice made in the environment still wins.
+    for (key, value) in [
+        ("GSK_RENDERER", "gl"),
+        ("VK_LOADER_LAYERS_DISABLE", "~implicit~"),
+    ] {
+        if std::env::var_os(key).is_none() {
+            // SAFETY: first statement of `main`; no other thread exists yet.
+            unsafe { std::env::set_var(key, value) };
+        }
+    }
     glib::set_application_name("Megaman");
     if let Some(pick) = parse_pick() {
         let _ = PICK.set(pick);
