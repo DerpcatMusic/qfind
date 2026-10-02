@@ -54,7 +54,7 @@ jobs:
         run: rustup update stable --no-self-update
       - name: Download existing Windows build
         if: inputs.windows_run != ''
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: megaman-windows-x64
           path: target/prebuilt
@@ -85,7 +85,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           path: dist
       - name: Publish test downloads
