@@ -84,7 +84,15 @@ jobs:
         with:
           persist-credentials: false
       - id: v
-        run: echo "msrv=$(cargo metadata --no-deps --format-version 1 | jq -r '[.packages[].rust_version | select(. != null)] | max_by(split(".") | map(tonumber)) // empty')" >> "$GITHUB_OUTPUT"
+        name: Read declared workspace MSRV
+        run: |
+          set -euo pipefail
+          msrv=$(cargo metadata --locked --no-deps --format-version 1 | jq -er '
+            if (.packages | type) != "array" then error("missing package metadata")
+            else [.packages[].rust_version | select(. != null)]
+              | if length == 0 then "" else max_by(split(".") | map(tonumber)) end
+            end')
+          printf 'msrv=%s\n' "$msrv" >> "$GITHUB_OUTPUT"
       - if: steps.v.outputs.msrv != ''
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
