@@ -116,9 +116,17 @@ jobs:
   # The ONLY required status check. Every job above must be in `needs`:
   # Each job is unconditional: unexpected skipped jobs must fail this gate.
   conclusion:
-    if: ${{ !cancelled() }}
+    # Run the cheap aggregate even when an upstream job was cancelled.
+    if: ${{ always() }}
     needs: [lint, test, msrv, deny]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
     permissions: {}
     steps:
-      - run: jq --exit-status 'all(.result == "success")' <<< '${{ toJson(needs) }}'
+      - name: Require all expected jobs to succeed
+        env:
+          NEEDS_JSON: ${{ toJson(needs) }}
+        run: >-
+          jq --exit-status
+          'keys == ["deny", "lint", "msrv", "test"] and all(.[]; .result == "success")'
+          <<< "$NEEDS_JSON"
