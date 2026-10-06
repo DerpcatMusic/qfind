@@ -15,12 +15,12 @@ anyhow.workspace = true
 async-channel = { workspace = true, optional = true }
 cpal.workspace = true
 dirs.workspace = true
-glow = "0.16"
+glow = "0.18"
 gstreamer.workspace = true
 gstreamer-app.workspace = true
 gstreamer-video.workspace = true
 gtk.workspace = true
-libloading = "0.8"
+libloading = "0.9"
 image.workspace = true
 qfind-core = { workspace = true, features = ["archives"] }
 symphonia.workspace = true
