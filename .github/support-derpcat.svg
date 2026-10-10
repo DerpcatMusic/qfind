@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="280" viewBox="0 0 720 280" role="img" aria-labelledby="title description">
+  <title id="title">Donate to Derpcat on Patreon</title>
+  <desc id="description">Support my open-source work. Your support helps me build and maintain free tools.</desc>
+  <rect x="1" y="1" width="718" height="278" rx="20" fill="#171717" stroke="#393939" stroke-width="2"/>
+  <rect x="32" y="32" width="4" height="20" rx="2" fill="#ff8c78"/>
+  <g font-family="Arial, Helvetica, sans-serif">
+    <text x="48" y="48" fill="#ffad9d" font-size="17" font-weight="700" letter-spacing="2">SUPPORT DERPCAT</text>
+    <text x="32" y="103" fill="#ffffff" font-size="36" font-weight="700">Support my open-source work.</text>
+    <text x="32" y="144" fill="#d4d4d4" font-size="21">Help me keep building and maintaining free tools.</text>
+    <rect x="32" y="180" width="316" height="64" rx="12" fill="#ff8c78"/>
+    <text x="58" y="220" fill="#171717" font-size="24" font-weight="700">Donate on Patreon</text>
+    <path d="M312 204l8 8-8 8m-12-8h20" fill="none" stroke="#171717" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="370" y="219" fill="#b5b5b5" font-size="18">Thank you for your support.</text>
+  </g>
+</svg>

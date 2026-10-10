@@ -13,6 +13,16 @@ Files, storage, and projects. One native workspace for Linux, macOS, and Windows
 
 </div>
 
+<!-- derpcat-support -->
+<p align="center">
+  <a href="https://www.patreon.com/derpcatmusic">
+    <img src=".github/support-derpcat.svg" alt="Donate to Derpcat on Patreon — support my open-source work and help me keep building and maintaining free tools." width="800">
+  </a>
+  <br>
+  <a href="https://www.patreon.com/derpcatmusic"><strong>❤️ Support me on Patreon</strong></a>
+</p>
+<!-- /derpcat-support -->
+
 <p align="center">
   <img src="docs/images/qfind-grid-preview.png" alt="Megaman grid search with image thumbnails and a large side Preview" width="920">
 </p>
