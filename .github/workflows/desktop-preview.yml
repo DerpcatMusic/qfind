@@ -39,7 +39,7 @@ jobs:
         run: |
           export PKG_CONFIG_PATH="$(brew --prefix libarchive)/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
           ./packaging/release-macos.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: megaman-${{ matrix.runner }}
           path: target/dist/*macos*.zip*
@@ -72,7 +72,7 @@ jobs:
             $env:MEGAMAN_PUBLISHED_ZIP = $archive.FullName
           }
           ./packaging/release-windows.ps1
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: megaman-windows-x64
           path: target/dist/*windows*.zip*
