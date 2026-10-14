@@ -15,12 +15,12 @@ publish = false
 qfind-core = { path = "crates/core" }
 anyhow = "1"
 async-channel = "2.5"
-base64 = "0.22"
+base64 = "0.23"
 clap = { version = "4", features = ["derive"] }
 crossbeam-channel = "0.5"
 compress-tools = "0.16.1"
 crossterm = "0.29"
-dirs = "6"
+dirs = "7"
 globset = "0.4"
 ignore = "0.4"
 gtk = { version = "0.11", package = "gtk4", features = ["v4_12"] }
@@ -29,7 +29,7 @@ memmap2 = "0.9"
 nucleo-matcher = "0.3"
 # Real media Preview: pure-Rust decode for the waveform, in-process output so
 # seeking is sample-accurate instead of a kill-and-respawn.
-symphonia = { version = "0.5", default-features = false, features = [
+symphonia = { version = "0.6", default-features = false, features = [
   "pcm",
   "adpcm",
   "flac",
@@ -39,7 +39,7 @@ symphonia = { version = "0.5", default-features = false, features = [
   "wav",
   "ogg",
 ] }
-cpal = "0.16"
+cpal = "0.18"
 # Video needs a real transport, and `playbin` is the one pipeline that decodes
 # "whatever the file is". Frames arrive through an appsink as RGB.
 gstreamer = "0.25"
