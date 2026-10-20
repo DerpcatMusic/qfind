@@ -59,5 +59,7 @@ crossterm = { path = "vendor/crossterm" }
 
 [profile.release]
 lto = "thin"
-codegen-units = 1
+# Cargo default (16): with thin LTO it builds several times faster than 1
+# for about the same code; measured on KURV 2026-10-20.
+codegen-units = 16
 strip = "symbols"
